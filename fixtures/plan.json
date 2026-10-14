@@ -1,0 +1,33 @@
+{
+  "nodes": [
+    {
+      "node_id": "read",
+      "role": "research",
+      "objective": "读取fixture来源",
+      "dependencies": [],
+      "resource_ids": [],
+      "max_turns": 16
+    },
+    {
+      "node_id": "write",
+      "role": "extraction",
+      "objective": "形成有引用的brief",
+      "dependencies": [
+        "read"
+      ],
+      "resource_ids": [],
+      "max_turns": 16
+    },
+    {
+      "node_id": "verify",
+      "role": "verification",
+      "objective": "独立核对产物和引用",
+      "dependencies": [
+        "write"
+      ],
+      "resource_ids": [],
+      "max_turns": 16
+    }
+  ],
+  "max_parallel": 2
+}

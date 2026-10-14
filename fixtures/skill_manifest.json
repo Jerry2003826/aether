@@ -1,0 +1,17 @@
+{
+  "name": "evidence-first-brief",
+  "version": 1,
+  "project_id": "demo-project",
+  "parent_version": null,
+  "bundle_sha256": "5e58f20a4c7afc80fee3f8c44833cef5d14ed92a91852f4bbcacd1fbaf7710d1",
+  "training_trace_ids": [],
+  "required_tool_ids": [
+    "knowledge.search",
+    "artifacts.write"
+  ],
+  "required_risk": "R1",
+  "applicable_task_types": [
+    "research"
+  ],
+  "status": "QUARANTINED"
+}

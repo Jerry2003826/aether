@@ -1,0 +1,18 @@
+{
+  "kind": "call_tools",
+  "tool_calls": [
+    {
+      "tool_id": "knowledge.search",
+      "arguments": {
+        "query": "可验证执行",
+        "limit": 8,
+        "source_ids": [
+          "fixture-source-001"
+        ]
+      },
+      "reason": "检索已授权的fixture资料。"
+    }
+  ],
+  "artifact_ids": [],
+  "message": ""
+}

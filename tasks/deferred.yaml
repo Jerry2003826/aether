@@ -1,0 +1,27 @@
+auto_execute: false
+owner_approval_required: true
+after: F27
+items:
+- id: D01
+  topic: Hindsight高级记忆
+  first_choice: vectorize-io/hindsight
+  rule: 只在原生记忆出现可测缺陷时做同源对照；Graphiti等保留研究不同时部署
+- id: D02
+  topic: DSPy/GEPA候选优化
+  first_choice: stanfordnlp/dspy
+  rule: 只产候选，不掌握生产部署和评测集
+- id: D03
+  topic: AG-UI/A2A/MCP Apps
+  rule: 保留事件/外部agent端口；有实际客户端需求再接，当前不用
+- id: D04
+  topic: microVM沙箱
+  rule: 有更强威胁模型/多租户需求后再选；V1不得宣称已隔离任意恶意客户
+- id: D05
+  topic: Crawl4AI/agent-browser/SolidLSP/ast-grep优化
+  rule: 当前HTTPX+Playwright+CodeGraph已有明确首选；仅在真实失败需求下增补
+- id: D06
+  topic: AgentDojo/Promptfoo/Inspect与更多公开benchmark
+  rule: 标准安全评测补充当前真实工具链测试；不能替代实际权限/网络检查
+- id: D07
+  topic: Reef/CORAL/Agent Lightning/语音/多消息渠道
+  rule: 非当前关键路径，禁止为了功能清单提前增加服务

@@ -1,0 +1,738 @@
+old_v12_count: 73
+old_v13_count: 13
+purpose: One-to-one historical coverage, not another backlog. All 60 original core work items have current targets.
+items:
+- old_id: M00-01
+  old_title: 锁定来源和许可证
+  targets:
+  - F00
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 所有实际依赖有immutable revision和license记录；无latest生产引用
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-02
+  old_title: 运行环境与镜像探针
+  targets:
+  - F00
+  - F01
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 实际安装/import/镜像digest检验；不支持平台明确失败，不伪造支持
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-03
+  old_title: OpenHands协议探针
+  targets:
+  - F01
+  - F13
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 有真实模型时写文件和终止测试；无key标live blocked而非通过
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-04
+  old_title: 搜索与模型能力探针
+  targets:
+  - F01
+  - F11
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 真实中英检索+1024维测试；无权重/密钥逐项blocked
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-05
+  old_title: doctor与依赖决策
+  targets:
+  - F00
+  - F01
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 缺Docker、缺key、端口冲突、未知价格均有可读错误和非零/明确warn分类
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M01-01
+  old_title: 初始化真实工程
+  targets:
+  - F00
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - .reference tests和生产domain等价；CI没有空操作假绿
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M01-02
+  old_title: 迁移与项目隔离
+  targets:
+  - F02
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 空库upgrade/rollback/upgrade；非superuser两项目交叉请求被拒
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M01-03
+  old_title: 单owner认证
+  targets:
+  - F02
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 无session401、跨站拒绝、过期/撤销/重复bootstrap失败
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M01-04
+  old_title: 不可变产物存储
+  targets:
+  - F03
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 写中断、hash错误、path/symlink、跨scope访问、重复写一致
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M01-05
+  old_title: 真实API最小片段
+  targets:
+  - F02
+  - F08
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - POST/GET真DB；同key同body幂等/不同body409；不接任何收费调用
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M02-01
+  old_title: 可靠任务提交
+  targets:
+  - F07
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - DB提交后kill dispatcher，恢复后恰好一个logical workflow
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M02-02
+  old_title: 合同与有界DAG
+  targets:
+  - F07
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 32node/depth3边界；不能删mandatory或self-approve
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M02-03
+  old_title: Typed turn执行
+  targets:
+  - F07
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - request到verified success真实存储；模型说完成但无产物不能success
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M02-04
+  old_title: 命令与事件恢复
+  targets:
+  - F07
+  - F08
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 重复pause/kill恢复/SSE断线补事件不重复；expiry明显提示
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M02-05
+  old_title: 重放与长任务边界
+  targets:
+  - F09
+  - F23
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 旧history对新workflow重放；restart不重置预算/事件ID
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M03-01
+  old_title: 模型gateway
+  targets:
+  - F04
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 非法schema有限修复；job token越scope/alias/admin访问拒绝
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M03-02
+  old_title: 预算与用量
+  targets:
+  - F05
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 并发不重复reserve；unknown不释放；真实超支记账且停止
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M03-03
+  old_title: 工具注册与capability
+  targets:
+  - F04
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - payload不能自报低risk；越权read和外部egress都拒绝
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M03-04
+  old_title: 审批与幂等操作
+  targets:
+  - F06
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 同intent重复发送处理一致；审批后参数变更/过期/重放均拒绝
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M03-05
+  old_title: UNKNOWN对账
+  targets:
+  - F06
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 外部已成功但响应丢失不双发；不可对账进入NEEDS_REVIEW
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-01
+  old_title: 可信采集与解析
+  targets:
+  - F10
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - redirect到metadata/私网阻止；过大文档/坏格式/超时明确
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-02
+  old_title: 版本与chunk
+  targets:
+  - F10
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 中英文Unicode span严格相等；重复抓取不重复chunk；冲突来源不覆盖
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-03
+  old_title: BM25S快照
+  targets:
+  - F11
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - query/corpus tokenizer一致；build中断旧index仍可查询；不会跨项目
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-04
+  old_title: 向量融合重排
+  targets:
+  - F11
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 真实权重维数/质量smoke；不可用不造随机分；删除前后无泄漏
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-05
+  old_title: 检索评测与删除
+  targets:
+  - F11
+  - F16
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 指标由真实hits/labels计算；old generation和缓存不能绕过删除
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-01
+  old_title: 受限runner-manager
+  targets:
+  - F13
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - actor进程无法读host secret/控制数据库；job并发/CPU/TTL有效
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-02
+  old_title: OpenHands adapter
+  targets:
+  - F13
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - SDK结束但test失败不success；额度/取消终止；不能直连provider
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-03
+  old_title: 快照和patch
+  targets:
+  - F03
+  - F14
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 绝对path/../symlink/export竞态拒绝；二次变更hash不同
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-04
+  old_title: 独立verifier
+  targets:
+  - F14
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 修改tests/跳过全部/吞exit/stale result/self签名均不能PASS
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-05
+  old_title: 故障恢复与演示
+  targets:
+  - F14
+  - F26
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 不重复job；live产生真实patch并独立test；无key单列未运行
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-01
+  old_title: 多类记忆
+  targets:
+  - F12
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 网页说法不升级用户确认；不同source冲突并存
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-02
+  old_title: 检索与上下文预算
+  targets:
+  - F12
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 恶意tool结果不变系统权限；记忆与引用不跨project
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-03
+  old_title: 纠正和遗忘
+  targets:
+  - F16
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - forget后搜索/推荐/新task context不可见；已存敏感trace按策略删除
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-04
+  old_title: MCP connector
+  targets:
+  - F17
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 断线/超时/取消；新tool未审不开放；annotations不能绕过policy
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-05
+  old_title: 注入与secret回归
+  targets:
+  - F23
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 工具请求受服务端policy拦截；日志/context/export无测试secret
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M07-01
+  old_title: 反馈账本
+  targets:
+  - F19
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 同event重复计数一次；虚构owner和跨project impression拒绝
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M07-02
+  old_title: 画像与排序
+  targets:
+  - F19
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - cold start可用；hide/save真实改变后续排序；不存在虚假learned指标
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M07-03
+  old_title: 受控探索
+  targets:
+  - F19
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 含greedy/non-greedy的实际p正确；不足candidate降级并记录
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M07-04
+  old_title: Temporal watches
+  targets:
+  - F18
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 无变更不花LLM；重复tick/恢复不双通知；pause/delete真实停止
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M07-05
+  old_title: 可解释行为评测
+  targets:
+  - F19
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 真实DB行为可复现；强反馈优先于click；探索可关闭
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-01
+  old_title: Skill registry
+  targets:
+  - F20
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 坏manifest/path/外部脚本拒绝；默认不自动加载公共skills
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-02
+  old_title: 候选生成
+  targets:
+  - F20
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 不能读release labels/control secrets；失败trace不被标成成功
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-03
+  old_title: 独立paired evaluator
+  targets:
+  - F21
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - <30family/CI<=0/costunknown/safetyfail拒绝；合成分只测控制逻辑
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-04
+  old_title: 部署与回滚
+  targets:
+  - F21
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 并发promote冲突；candidate不能自升；rollback恢复旧version
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-05
+  old_title: 学习链路验收
+  targets:
+  - F21
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 不得用模型自评分当收益；无足够证据则正确停在未晋级
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M09-01
+  old_title: 应用外壳与认证
+  targets:
+  - F08
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 刷新/session失效/多project切换；key不进入bundle
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M09-02
+  old_title: 任务workspace
+  targets:
+  - F08
+  - F22
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 断线恢复不丢event；未知状态不画success；暂停/取消处理中可见
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M09-03
+  old_title: 审批与知识
+  targets:
+  - F08
+  - F22
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - stale approval409；无数据/索引滞后/证据不足真实展示
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M09-04
+  old_title: Discover与Skills lab
+  targets:
+  - F22
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 从UI点击真实改变API状态；无成绩不生成百分比图表
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M09-05
+  old_title: E2E与可访问性
+  targets:
+  - F22
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 研究任务/审批/forget/rollback全流程；不靠纯前端mock通过
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-01
+  old_title: 固定Hermes runner
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 两边模型和budget manifest一致；cold独立profile；不猜内部API
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-02
+  old_title: 数据集分区
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - pack public fixtures永不称holdout；release路径不挂actor/learner
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-03
+  old_title: 四组实验
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 每任务结果包含证据/成本/错误；失败和超时纳入分母
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-04
+  old_title: 统计与消融
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 可从raw traces复算；sample不足不宣称显著；多模型实验单列
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-05
+  old_title: 比较报告
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 没有真实release dataset就不出超越结论；发布由owner显式操作
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-01
+  old_title: 故障矩阵
+  targets:
+  - F23
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 核对operation次数、成本和证据，不只检测进程alive
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-02
+  old_title: 部署安全
+  targets:
+  - F23
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 非superuserRLS、actor secret/host/socket、SSRF均真实测试
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-03
+  old_title: 备份恢复
+  targets:
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 新环境恢复并读取项目，UNKNOWN不被自动重发；不清空用户volume
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-04
+  old_title: Live用户演示
+  targets:
+  - F26
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 真实引用+patch测试；API key缺失标blocked，不用scripted顶替
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-05
+  old_title: 发布与交付
+  targets:
+  - F27
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - mandatory实测通过才标V1完成；不自动push/publish/购买服务
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-06
+  old_title: CodeGraph 来源安全与运行兼容探针
+  targets:
+  - F15
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 真实 CLI/MCP 调用和版本/输出/隐私/资源记录，或可核验的 unavailable；不能报告未运行的成功
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-06
+  old_title: 隔离代码图谱适配器与失效处理
+  targets:
+  - F15
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 跨项目路径、symlink、stale、modified candidate、删除与权限撤销拒绝；不安装时coding功能继续；graph测试提示不可缩减trusted suite
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-06
+  old_title: CodeGraph On/Off 消融评测
+  targets:
+  - F15
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 可重算原始任务/耗时/成本/成功证据；包含 index cold-start；供应商数字不充当实验结果
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M00-07
+  old_title: 候选仓库许可/来源/供应链增量审计
+  targets:
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 实际拟导入项目具可重复核对的revision和许可证；受限/未维护项目不可进入生产依赖；不明版本标blocked而非通过
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M04-06
+  old_title: 授权站点 Crawl4AI 采集对照
+  targets:
+  - D05
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 授权JS页面正文准确率有对照；未授权站点、私网重定向、敏感参数被拒绝；缺依赖主路径继续运行
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-07
+  old_title: agent-browser 隔离会话 A/B 探针
+  targets:
+  - D05
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 至少5个合成静态网站任务可重现；隔离profile和session cleanup、下载/外发控制通过；Playwright基线可用
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M05-08
+  old_title: 代码语义工具候选对照
+  targets:
+  - D05
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 固定代码快照与真值评测；图索引stale和跨项目拒绝；MIT SolidLSP不包含GPL Serena主体
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M06-06
+  old_title: 可插拔长期记忆 Hindsight/原生/替代 A-B
+  targets:
+  - D01
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 跨项目泄漏为零；原始来源/证据hash可追溯；删除策略可测；某引擎故障时切回原生检索；不可捏造真实模型通过
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M08-06
+  old_title: Reef/CORAL 探索式技能候选隔离实验
+  targets:
+  - D07
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 独立grader不可写、holdout不可读、评分与artifact哈希绑定、失败/越权无法promotion，收益在未见任务上可重算
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-07
+  old_title: Pydantic Evals 开发集成与轨迹评分
+  targets:
+  - F21
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 评分可用独立脚本重算；原始时间/费用/运行版本保留；任何模型生成的judge分数只作辅助
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-08
+  old_title: Promptfoo 离线红队提示词注入关卡
+  targets:
+  - F23
+  - D06
+  disposition: folded_with_optional_research
+  legacy_acceptance_for_traceability_only:
+  - 至少覆盖4种不可信输入载体；验证无越权动作/无secret外发；无法运行的在线模型项目标not_run
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M10-09
+  old_title: 新终端与代码 benchmark 真实对照
+  targets:
+  - D06
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - 记录每个原始任务和run_id、模型版本、容器镜像、token、成本、成功和未运行原因；不能引用作者数字充当实测
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: M11-06
+  old_title: 新增组件发布前隐私与许可证否决门
+  targets:
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - 每个真实生产依赖有冻结SHA/SBOM/notice/最小许可组合；无外发隐私泄露；禁止组件退出构建失败而不是静默忽略
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-01
+  old_title: 冻结上游SHA和纠正许可记录
+  targets:
+  - F00
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - AutoGen docs CC-BY-4.0 and code MIT separately recorded
+  - Each selected exact dependency has SHA, version, SPDX/license file, notices, platform status
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-02
+  old_title: SBOM与漏洞检查CI
+  targets:
+  - F25
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - Generate SBOM for built container and Python/Node dependencies
+  - Known severe vulnerabilities produce review/block decision
+  - Release artifact signature verification runs when publishing
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-03
+  old_title: 单一任务权威与操作账本故障测试
+  targets:
+  - F06
+  - F23
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - Simulated crash after successful remote operation with lost response does not duplicate effect
+  - Unknown outcome results in reconciliation/pause, not blind retry
+  - No second production scheduler can retry side effects
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-04
+  old_title: MicroVM平台与隔离探针
+  targets:
+  - F13
+  - D04
+  disposition: folded_with_optional_research
+  legacy_acceptance_for_traceability_only:
+  - Feature capability report for macOS-arm64, Linux and Windows when available
+  - No inherited host secrets, no cross-project files, network egress policy tested
+  - Unsupported host receives explicit unsupported/blocked status
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-05
+  old_title: CodeGraph完整仓库快照集成回归
+  targets:
+  - F15
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - Index commit pinned snapshots and check stale index invalidation
+  - Repository cross-tenant probes fail closed
+  - Independent tests still cover all required suite after code changes
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-06
+  old_title: AgentDojo和实际工具输出注入评测
+  targets:
+  - F23
+  - D06
+  disposition: folded_with_optional_research
+  legacy_acceptance_for_traceability_only:
+  - 'Attack carriers: web, repo comment, MCP tool description, skill file'
+  - Measure malicious action rate, legitimate task success, false positive rate
+  - Test logs include successful and blocked tool effects
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-07
+  old_title: Hindsight与Graphiti记忆消融实验
+  targets:
+  - D01
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - Same synthetic source data and model/token limits for all variants
+  - Evaluate recall, contradictions, deletion, project isolation, p95 latency
+  - No source-of-truth mutation by memory engine and no auto-enable
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-08
+  old_title: AG-UI事件与审批流实验
+  targets:
+  - D03
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - Typed event stream supports reconnect, task progress, user approval, evidence refs
+  - No unauthorized frontend action can bypass approval
+  - Client/backend state reconciliation tested
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-09
+  old_title: A2A隔离外联POC
+  targets:
+  - D03
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - External agents receive least privilege delegated task not direct credentials
+  - Remote timeouts and cancellation do not bypass Temporal ledger
+  - AuthN/AuthZ and identity binding tested in local sample
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-10
+  old_title: MCP Apps可行性与隔离测试
+  targets:
+  - D03
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - Embedded UI cannot access trusted host secrets
+  - Calls from embedded UI pass tool authorization
+  - Official SDK integration can be disabled without core breakage
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-11
+  old_title: DSPy离线候选优化
+  targets:
+  - D02
+  disposition: deferred
+  legacy_acceptance_for_traceability_only:
+  - GEPA/MIPROv2 pilot only uses training/dev evidence and trusted graders
+  - Frozen holdout unreachable from optimizer
+  - Promotion only via independent SkillLab, with rollback when metrics regress
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-12
+  old_title: 检索与记忆来源一体化回归
+  targets:
+  - F11
+  - F16
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - Hybrid retrieve preserves immutable origin and version
+  - BM25/vector/RRF/rerank ablation recorded including Chinese queries
+  - Delete cascade and stale index cases tested
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.
+- old_id: DELTA13-13
+  old_title: 对照与成本安全联合报告
+  targets:
+  - F24
+  disposition: folded
+  legacy_acceptance_for_traceability_only:
+  - Run AETHER vs fixed Hermes baseline with same model, dataset and cost budget
+  - Report success, p95 latency, token/cost and unsafe side-effect counts
+  - Not-run tasks are never counted as passes
+  note: Current F-task acceptance and freeze decisions govern execution; comparative gains are not presumed.

@@ -1,0 +1,17 @@
+{
+  "project_id": "demo-project",
+  "task_id": "research-task-001",
+  "intent_id": "intent-1",
+  "tool_id": "artifacts.write",
+  "arguments": {
+    "content": "演示简报",
+    "media_type": "text/markdown"
+  },
+  "resource_id": "artifact-target",
+  "resource_version": "1",
+  "payload_sha256": null,
+  "risk": "R1",
+  "idempotency": "idempotent_write",
+  "max_cost_micro_usd": 0,
+  "capability_id": "sandbox-write"
+}

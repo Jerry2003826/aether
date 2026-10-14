@@ -1,0 +1,18 @@
+{
+  "inputs": [
+    {
+      "path": "archive/DeepSeek_research_original.zip",
+      "sha256": "96cc057e7bcfa8ce22a0babac1a365472457fc989a273d015f1a9f90288f1d14"
+    },
+    {
+      "path": "archive/AETHER_v1.3_original_delta.zip",
+      "sha256": "e123b3610e11f3cb698ae5386b04554b13c9593cb52705ae48990500da5cfe50"
+    },
+    {
+      "path": "archive/AETHER_v1.2_original.zip",
+      "sha256": "63fb51a96841c45d93177061c1205a368723e02d1730c59a65d219c4b4298954"
+    }
+  ],
+  "reference_origin": "V1.2 original reference and original reference tests, plus documented DAG default correction",
+  "implementation_claim": "No complete application/containers/live benchmark built in this response"
+}

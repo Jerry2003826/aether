@@ -1,0 +1,276 @@
+{
+  "is_actual_lock": false,
+  "generated_by_task": "F00/F01/F25",
+  "entries": [
+    {
+      "repository": "temporalio/temporal",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "temporalio/sdk-python",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "fastapi/fastapi",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pydantic/pydantic",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "sqlalchemy/sqlalchemy",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "sqlalchemy/alembic",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "BerriAI/litellm",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "OpenHands/software-agent-sdk",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pgvector/pgvector",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pgvector/pgvector-python",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "xhluca/bm25s",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "fxsjy/jieba",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "FlagOpen/FlagEmbedding",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "encode/httpx",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "adbar/trafilatura",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "kurtmckee/feedparser",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "docling-project/docling",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "microsoft/playwright-python",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "modelcontextprotocol/python-sdk",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "agentskills/agentskills",
+      "role": "core_spec",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "vercel/next.js",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "shadcn-ui/ui",
+      "role": "core_ui",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pydantic/pydantic-ai",
+      "role": "dev",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "anchore/syft",
+      "role": "dev_release",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "google/osv-scanner",
+      "role": "dev_release",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "colbymchenry/codegraph",
+      "role": "selected_optional",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "role": "baseline_only",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    }
+  ]
+}

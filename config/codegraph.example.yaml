@@ -1,0 +1,41 @@
+schema_version: '1.0'
+feature: repository_intelligence.codegraph
+selected_upstream: colbymchenry/codegraph
+mode: isolated_cli_or_mcp # F15 decides after live probe, no arbitrary shell commands
+package: '@colbymchenry/codegraph'
+version: null # freeze exact version and artifact hash in F15 before enabling
+license: MIT # verify exact selected artifact and transitive notices
+product_enabled: false
+codex_dev_enabled: false # independent user opt-in; not in product bootstrap
+index:
+  source: authorized_immutable_repository_snapshot
+  cache_root: sandbox_owned_scoped_volume
+  owner_key_fields: [project_id, repository_artifact_id, snapshot_sha256, version, extraction_options_hash]
+  max_files: 25000
+  max_bytes: 536870912
+  max_wall_seconds: 180
+  max_queries_per_job: 40
+  max_context_chars: 24000
+  auto_watch: false # immutable snapshot by default; edited candidate requires new version
+  purge_on_revoke_or_delete: true
+security:
+  allow_network: false
+  telemetry_env:
+    CODEGRAPH_TELEMETRY: '0'
+    DO_NOT_TRACK: '1'
+  mount_host_home: false
+  mount_docker_socket: false
+  allow_untrusted_project_path: false
+  allow_symlink_escape: false
+  filter_secrets: true
+  allowed_tool_functions:
+  - codegraph_explore
+  - codegraph_impact
+  - codegraph_affected # CLI, NOT a default MCP tool
+verification:
+  trust_graph_test_recommendations: false
+  trusted_tests_always_required: true
+  forbid_stale_graph_as_evidence: true
+fallback:
+  mode: authorized_source_read
+  degraded_reason: graph_unavailable

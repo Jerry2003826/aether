@@ -1,0 +1,126 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Execution evidence record",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "check_id",
+    "task_id",
+    "category",
+    "status",
+    "command",
+    "exit_code",
+    "log_path",
+    "reason"
+  ],
+  "properties": {
+    "check_id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^F[0-9]{2}$"
+    },
+    "category": {
+      "enum": [
+        "unit",
+        "integration",
+        "security",
+        "e2e",
+        "live",
+        "evaluation",
+        "pack"
+      ]
+    },
+    "status": {
+      "enum": [
+        "passed",
+        "failed",
+        "not_run",
+        "blocked",
+        "skipped"
+      ]
+    },
+    "command": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "exit_code": {
+      "type": [
+        "integer",
+        "null"
+      ]
+    },
+    "log_path": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "reason": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "environment": {
+      "type": "object"
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "passed"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "command": {
+            "type": "string",
+            "minLength": 1
+          },
+          "exit_code": {
+            "const": 0
+          },
+          "log_path": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "enum": [
+              "blocked",
+              "not_run",
+              "skipped"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      }
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "checked_on": "2026-10-15",
+  "check_level": "official_documentation_only_not_runtime_integration",
+  "sources": [
+    {
+      "id": "S01",
+      "title": "Temporal Python SDK",
+      "url": "https://github.com/temporalio/sdk-python",
+      "scope": "Workflow/Activity/client/testing/重放；当前branch文档不等于PyPI版本已验证"
+    },
+    {
+      "id": "S02",
+      "title": "Temporal activity definition",
+      "url": "https://docs.temporal.io/activity-definition",
+      "scope": "Activity副作用和幂等性；不保证任意远端操作恰好一次"
+    },
+    {
+      "id": "S03",
+      "title": "CodeGraph README",
+      "url": "https://github.com/colbymchenry/codegraph",
+      "scope": "默认explore工具、CLI/程序接口、telemetry off；运行时仍须真实探针"
+    },
+    {
+      "id": "S04",
+      "title": "OpenHands SDK",
+      "url": "https://github.com/OpenHands/software-agent-sdk",
+      "scope": "四个组件目录、Python/REST接口、隔离workspace选项"
+    },
+    {
+      "id": "S05",
+      "title": "LiteLLM",
+      "url": "https://github.com/BerriAI/litellm",
+      "scope": "模型适配接口；不选用其其他harness能力"
+    },
+    {
+      "id": "S06",
+      "title": "pgvector",
+      "url": "https://github.com/pgvector/pgvector",
+      "scope": "Postgres向量相似度与过滤注意事项"
+    },
+    {
+      "id": "S07",
+      "title": "BM25S",
+      "url": "https://github.com/xhluca/bm25s",
+      "scope": "BM25检索及保存/加载"
+    },
+    {
+      "id": "S08",
+      "title": "FlagEmbedding",
+      "url": "https://github.com/FlagOpen/FlagEmbedding",
+      "scope": "检索/重排模型工具"
+    },
+    {
+      "id": "S09",
+      "title": "MCP Python SDK",
+      "url": "https://github.com/modelcontextprotocol/python-sdk",
+      "scope": "官方工具协议客户端/服务端SDK"
+    },
+    {
+      "id": "S10",
+      "title": "Agent Skills",
+      "url": "https://github.com/agentskills/agentskills",
+      "scope": "SKILL.md规范"
+    },
+    {
+      "id": "S11",
+      "title": "Pydantic Evals",
+      "url": "https://pydantic.dev/docs/ai/evals/evals/",
+      "scope": "独立评测能力，不要求使用Agent运行时"
+    },
+    {
+      "id": "S12",
+      "title": "Syft",
+      "url": "https://github.com/anchore/syft",
+      "scope": "镜像和文件系统SBOM"
+    },
+    {
+      "id": "S13",
+      "title": "OSV Scanner",
+      "url": "https://github.com/google/osv-scanner",
+      "scope": "漏洞扫描，具体版本离线支持需探针"
+    },
+    {
+      "id": "S14",
+      "title": "Codex AGENTS.md",
+      "url": "https://developers.openai.com/codex/agent-configuration/agents-md",
+      "scope": "项目级指令发现/优先级/长度限制"
+    },
+    {
+      "id": "S15",
+      "title": "Codex best practices",
+      "url": "https://developers.openai.com/codex/learn/best-practices",
+      "scope": "任务计划、上下文控制和实际验证"
+    }
+  ]
+}

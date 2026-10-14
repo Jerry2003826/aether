@@ -1,0 +1,127 @@
+schema_version: '1.0'
+type_note: argument_fields here describe registry design; implement strict per-tool JSON Schemas in F04/F06.
+  Risk/idempotency labels are server-controlled, never inferred from MCP annotations.
+tools:
+- id: knowledge.search
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    query: string
+    source_ids: string[]
+    limit: integer[1,50]
+  result_type: SearchResult
+  required_capability: knowledge:read
+  enforcement: Query only authorized project indexes; tombstone filter before returning.
+- id: sources.fetch
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    source_id: uuid
+    version_hint: string|null
+  result_type: ArtifactRef
+  required_capability: source:read
+  enforcement: Only registered approved sources; gateway performs download and SSRF protection.
+- id: artifacts.read
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    artifact_id: uuid
+  result_type: ArtifactPayload
+  required_capability: artifact:read
+  enforcement: Server maps ID to path; prevent arbitrary path reads and secret egress.
+- id: artifacts.write
+  risk: R1
+  idempotency: idempotent_write
+  argument_fields:
+    content: string
+    media_type: string
+  result_type: ArtifactRef
+  required_capability: artifact:sandbox_write
+  enforcement: Bounded project sandbox artifact only; stable intent dedup.
+- id: coding.start
+  risk: R1
+  idempotency: idempotent_write
+  argument_fields:
+    base_artifact_id: uuid
+    objective: string
+  result_type: CodingJobResult
+  required_capability: coding:execute
+  enforcement: Gateway adds immutable contract, deadline and capabilities; no host paths.
+- id: coding.get
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    job_id: uuid
+  result_type: CodingJobResult
+  required_capability: coding:read
+  enforcement: Must belong to same task/project.
+- id: memory.propose
+  risk: R1
+  idempotency: idempotent_write
+  argument_fields:
+    claim: string
+    source_artifact_ids: uuid[]
+  result_type: ProposedMemory
+  required_capability: memory:propose
+  enforcement: Cannot mark as user-confirmed or overwrite existing facts.
+- id: skill.propose
+  risk: R1
+  idempotency: idempotent_write
+  argument_fields:
+    bundle_artifact_id: uuid
+    parent_version: integer|null
+  result_type: QuarantinedSkill
+  required_capability: skill:propose
+  enforcement: Creates quarantined candidate only; no evaluation-score or promotion rights.
+- id: watch.propose
+  risk: R1
+  idempotency: idempotent_write
+  argument_fields:
+    source_ids: uuid[]
+    purpose: string
+  result_type: WatchDraft
+  required_capability: watch:propose
+  enforcement: No active schedule until owner approves cost/cadence/scope.
+- id: repo.code.explore
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    repository_artifact_id: uuid
+    question: string(max=512)
+    max_context_chars: integer[1024,24000]
+  result_type: CodeContextResult
+  required_capability: code:read
+  enforcement: Resolve snapshot from server-authenticated task/project context; never accept projectPath/host
+    path; index manifest and per-file hash checked before returning.
+- id: repo.code.impact
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    repository_artifact_id: uuid
+    symbol_ref: string(max=512)
+    depth: integer[1,5]
+  result_type: CodeImpactResult
+  required_capability: code:read
+  enforcement: Authorized repo only; graph is advisory; unknown dynamic edges never asserted absent; return
+    freshness/version.
+- id: repo.code.affected_tests
+  risk: R0
+  idempotency: read_only
+  argument_fields:
+    repository_artifact_id: uuid
+    changed_files: relative_path[1,100][]
+  result_type: CodeAffectedTestsResult
+  required_capability: code:read
+  enforcement: Read-only test hints. Cannot overwrite trusted verifier suite or mark tests passed.
+mcp:
+  default: disabled_until_reviewed
+  accept_tool_schema_changes_automatically: false
+  unreviewed_tools: deny
+actor_denied_tools:
+- task.mark_success
+- skill.promote
+- verification.write_result
+- policy.modify
+- provider.read_key
+- production.deploy
+- payments.send

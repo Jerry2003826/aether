@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether.invalid/contracts/acceptance.schema.json",
+  "title": "Trusted acceptance parameter templates",
+  "description": "Registry selects a parameter schema by template name. No arbitrary executable verifier command is allowed.",
+  "$defs": {
+    "artifact_exists": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_name",
+        "minimum_bytes"
+      ],
+      "properties": {
+        "logical_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "minimum_bytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "json_schema": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logical_name",
+        "schema_registry_id",
+        "schema_sha256"
+      ],
+      "properties": {
+        "logical_name": {
+          "type": "string"
+        },
+        "schema_registry_id": {
+          "type": "string"
+        },
+        "schema_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "trusted_test_suite": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "suite_id",
+        "minimum_collected_tests"
+      ],
+      "properties": {
+        "suite_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "minimum_collected_tests": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1800
+        }
+      }
+    },
+    "citation_integrity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_citations",
+        "require_all_valid"
+      ],
+      "properties": {
+        "min_citations": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "require_all_valid": {
+          "const": true
+        }
+      }
+    },
+    "source_coverage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_distinct_sources",
+        "required_source_ids"
+      ],
+      "properties": {
+        "minimum_distinct_sources": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "required_source_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        }
+      }
+    },
+    "human_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "rubric"
+      ],
+      "properties": {
+        "rubric": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reviewer_role": {
+          "const": "owner"
+        }
+      }
+    }
+  }
+}

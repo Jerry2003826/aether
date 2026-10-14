@@ -1,0 +1,67 @@
+schema_version: '1.0'
+mode: offline
+live_requires_explicit_enable: true
+providers:
+  user_provider:
+    adapter: litellm
+    model_id: null
+    base_url: null
+    api_key_env: AETHER_MODEL_API_KEY
+    pricing:
+      version: null
+      currency: USD
+      input_micro_usd_per_million_tokens: null
+      output_micro_usd_per_million_tokens: null
+      cache_pricing: null
+    live_enabled: false
+aliases:
+  planner:
+    provider_ref: user_provider
+    max_output_tokens: 4096
+    requires_tools: true
+    requires_structured_output: true
+  actor:
+    provider_ref: user_provider
+    max_output_tokens: 8192
+    requires_tools: true
+    requires_structured_output: true
+  coder:
+    provider_ref: user_provider
+    max_output_tokens: 8192
+    requires_tools: true
+    requires_structured_output: false
+  judge:
+    provider_ref: user_provider
+    max_output_tokens: 4096
+    requires_tools: false
+    requires_structured_output: true
+  extractor:
+    provider_ref: user_provider
+    max_output_tokens: 2048
+    requires_tools: false
+    requires_structured_output: true
+ml:
+  backend: FlagEmbedding
+  embedding:
+    model_id: BAAI/bge-m3
+    revision: null
+    dimension: 1024
+    normalize: true
+  reranker:
+    model_id: BAAI/bge-reranker-v2-m3
+    revision: null
+  download_on_runtime_request: false
+  device: cpu
+  max_parallel_jobs: 1
+scripted:
+  enabled_for:
+  - unit
+  - offline_demo
+  label: SCRIPTED_PROVIDER_NOT_REAL_AI
+  fixtures_dir: fixtures
+  report_usage_status: scripted
+required_probe_outputs:
+- config/models.lock.json
+- reports/model_probe.json
+note: null IDs/prices/revisions are intentionally unresolved; live validation must reject them. Do not
+  mine Codex/Cursor login credentials.

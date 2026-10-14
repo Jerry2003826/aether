@@ -1,0 +1,70 @@
+spec_version: '1.4'
+default_mode: offline
+features:
+  memory:
+    selected: native_postgres
+    switchable_later: true
+  orchestrator:
+    selected: temporal
+    exclusive: true
+  coding:
+    selected: openhands_sdk
+    enabled: false
+    enable_after:
+    - F13
+    - F14
+    - F26
+  codegraph:
+    selected: colbymchenry/codegraph
+    enabled: false
+    enable_after:
+    - F15
+    owner_approval_required: true
+    fallback: bounded_project_text_search
+  search:
+    selected: bm25s_pgvector_bge
+    enabled_after:
+    - F11
+    degraded_mode: lexical_only_explicit
+  browser:
+    selected: playwright
+    enabled: false
+    enable_after:
+    - F10
+    - F23
+  mcp:
+    selected: official_python_sdk
+    enabled: false
+    enable_after:
+    - F17
+    per_server_review: true
+  learning:
+    selected: native_skilllab_pydantic_evals
+    candidate_generation_enabled: false
+    automatic_promotion: false
+  watch:
+    enabled: false
+    owner_scope_and_budget_required: true
+  recommendation_exploration:
+    enabled: false
+  external_writes:
+    enabled: false
+  hindsight:
+    enabled: false
+    deferred: D01
+  dspy:
+    enabled: false
+    deferred: D02
+  ag_ui_a2a_mcp_apps:
+    enabled: false
+    deferred: D03
+  langfuse:
+    enabled: false
+    optional_observability_only: true
+limits:
+  max_plan_nodes: 32
+  max_dependency_depth: 32
+  max_recursive_delegation: 0
+  max_read_parallelism: 2
+  max_coding_jobs_per_task: 1
+  max_context_tool_calls_per_turn: 3

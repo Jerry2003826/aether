@@ -1,0 +1,1379 @@
+{
+  "$defs": {
+    "AcceptanceCriterion": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "template": {
+          "enum": [
+            "artifact_exists",
+            "json_schema",
+            "trusted_test_suite",
+            "citation_integrity",
+            "source_coverage",
+            "human_review"
+          ],
+          "title": "Template",
+          "type": "string"
+        },
+        "description": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "mandatory": {
+          "default": true,
+          "title": "Mandatory",
+          "type": "boolean"
+        },
+        "parameters": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Parameters",
+          "type": "object"
+        },
+        "trusted_suite_hash": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Trusted Suite Hash"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "template",
+        "description"
+      ],
+      "title": "AcceptanceCriterion",
+      "type": "object"
+    },
+    "ApprovalGrant": {
+      "additionalProperties": false,
+      "properties": {
+        "approval_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Approval Id",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "intent_digest": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Intent Digest",
+          "type": "string"
+        },
+        "issued_to_owner": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Issued To Owner",
+          "type": "string"
+        },
+        "expires_at": {
+          "format": "date-time",
+          "title": "Expires At",
+          "type": "string"
+        },
+        "decision": {
+          "enum": [
+            "approved",
+            "rejected"
+          ],
+          "title": "Decision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "approval_id",
+        "project_id",
+        "task_id",
+        "intent_digest",
+        "issued_to_owner",
+        "expires_at",
+        "decision"
+      ],
+      "title": "ApprovalGrant",
+      "type": "object"
+    },
+    "ArtifactRef": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Artifact Id",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Sha256",
+          "type": "string"
+        },
+        "byte_size": {
+          "minimum": 0,
+          "title": "Byte Size",
+          "type": "integer"
+        },
+        "media_type": {
+          "title": "Media Type",
+          "type": "string"
+        },
+        "classification": {
+          "default": "project_private",
+          "enum": [
+            "public",
+            "project_private",
+            "sensitive"
+          ],
+          "title": "Classification",
+          "type": "string"
+        }
+      },
+      "required": [
+        "artifact_id",
+        "project_id",
+        "sha256",
+        "byte_size",
+        "media_type"
+      ],
+      "title": "ArtifactRef",
+      "type": "object"
+    },
+    "BudgetSpec": {
+      "additionalProperties": false,
+      "properties": {
+        "max_cost_micro_usd": {
+          "default": 2000000,
+          "minimum": 0,
+          "title": "Max Cost Micro Usd",
+          "type": "integer"
+        },
+        "max_tokens": {
+          "default": 100000,
+          "minimum": 1,
+          "title": "Max Tokens",
+          "type": "integer"
+        },
+        "max_model_requests": {
+          "default": 48,
+          "minimum": 1,
+          "title": "Max Model Requests",
+          "type": "integer"
+        },
+        "active_seconds": {
+          "default": 1800,
+          "minimum": 1,
+          "title": "Active Seconds",
+          "type": "integer"
+        },
+        "verification_reserve_fraction": {
+          "default": 0.2,
+          "exclusiveMaximum": 1,
+          "minimum": 0,
+          "title": "Verification Reserve Fraction",
+          "type": "number"
+        }
+      },
+      "title": "BudgetSpec",
+      "type": "object"
+    },
+    "Citation": {
+      "additionalProperties": false,
+      "properties": {
+        "source_version_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Source Version Id",
+          "type": "string"
+        },
+        "source_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Source Sha256",
+          "type": "string"
+        },
+        "start": {
+          "minimum": 0,
+          "title": "Start",
+          "type": "integer"
+        },
+        "end": {
+          "minimum": 1,
+          "title": "End",
+          "type": "integer"
+        },
+        "quote": {
+          "minLength": 1,
+          "title": "Quote",
+          "type": "string"
+        },
+        "page": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Page"
+        }
+      },
+      "required": [
+        "source_version_id",
+        "source_sha256",
+        "start",
+        "end",
+        "quote"
+      ],
+      "title": "Citation",
+      "type": "object"
+    },
+    "CodingJobRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "intent_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Intent Id",
+          "type": "string"
+        },
+        "base_artifact": {
+          "$ref": "#/$defs/ArtifactRef"
+        },
+        "objective": {
+          "title": "Objective",
+          "type": "string"
+        },
+        "contract_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Contract Sha256",
+          "type": "string"
+        },
+        "allowed_tools": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Allowed Tools",
+          "type": "array"
+        },
+        "deadline": {
+          "format": "date-time",
+          "title": "Deadline",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "task_id",
+        "intent_id",
+        "base_artifact",
+        "objective",
+        "contract_sha256",
+        "allowed_tools",
+        "deadline"
+      ],
+      "title": "CodingJobRequest",
+      "type": "object"
+    },
+    "CodingJobResult": {
+      "additionalProperties": false,
+      "properties": {
+        "job_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "QUEUED",
+            "STARTING",
+            "ACTIVE",
+            "EXPORTING",
+            "FINISHED",
+            "FAILED",
+            "CANCELLED"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "patch": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "event_artifact": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ArtifactRef"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        }
+      },
+      "required": [
+        "job_id",
+        "status"
+      ],
+      "title": "CodingJobResult",
+      "type": "object"
+    },
+    "Decision": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "enum": [
+            "call_tools",
+            "submit_candidate",
+            "request_clarification",
+            "stop_blocked"
+          ],
+          "title": "Kind",
+          "type": "string"
+        },
+        "tool_calls": {
+          "items": {
+            "$ref": "#/$defs/ToolCallProposal"
+          },
+          "maxItems": 3,
+          "title": "Tool Calls",
+          "type": "array"
+        },
+        "artifact_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Artifact Ids",
+          "type": "array"
+        },
+        "message": {
+          "default": "",
+          "title": "Message",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind"
+      ],
+      "title": "Decision",
+      "type": "object"
+    },
+    "EventEnvelope": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "event_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Event Id",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "sequence": {
+          "minimum": 1,
+          "title": "Sequence",
+          "type": "integer"
+        },
+        "event_type": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Event Type",
+          "type": "string"
+        },
+        "occurred_at": {
+          "format": "date-time",
+          "title": "Occurred At",
+          "type": "string"
+        },
+        "payload": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Payload",
+          "type": "object"
+        }
+      },
+      "required": [
+        "event_id",
+        "project_id",
+        "task_id",
+        "sequence",
+        "event_type",
+        "occurred_at",
+        "payload"
+      ],
+      "title": "EventEnvelope",
+      "type": "object"
+    },
+    "GoalContract": {
+      "additionalProperties": false,
+      "properties": {
+        "schema_version": {
+          "const": "1.0",
+          "default": "1.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "contract_version": {
+          "minimum": 1,
+          "title": "Contract Version",
+          "type": "integer"
+        },
+        "goal": {
+          "maxLength": 16000,
+          "minLength": 1,
+          "title": "Goal",
+          "type": "string"
+        },
+        "assumptions": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Assumptions",
+          "type": "array"
+        },
+        "allowed_source_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Allowed Source Ids",
+          "type": "array"
+        },
+        "required_artifacts": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Required Artifacts",
+          "type": "array"
+        },
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/AcceptanceCriterion"
+          },
+          "minItems": 1,
+          "title": "Criteria",
+          "type": "array"
+        },
+        "budget": {
+          "$ref": "#/$defs/BudgetSpec"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "task_id",
+        "contract_version",
+        "goal",
+        "required_artifacts",
+        "criteria",
+        "created_at"
+      ],
+      "title": "GoalContract",
+      "type": "object"
+    },
+    "IdempotencyClass": {
+      "enum": [
+        "read_only",
+        "idempotent_write",
+        "reconcilable_write",
+        "non_idempotent"
+      ],
+      "title": "IdempotencyClass",
+      "type": "string"
+    },
+    "JsonValue": {},
+    "ModelRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "planner",
+            "actor",
+            "coder",
+            "judge",
+            "extractor"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "input_artifact_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Input Artifact Ids",
+          "type": "array"
+        },
+        "output_schema_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Output Schema Name"
+        },
+        "max_output_tokens": {
+          "minimum": 1,
+          "title": "Max Output Tokens",
+          "type": "integer"
+        },
+        "reservation_micro_usd": {
+          "minimum": 0,
+          "title": "Reservation Micro Usd",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "request_id",
+        "project_id",
+        "task_id",
+        "role",
+        "input_artifact_ids",
+        "output_schema_name",
+        "max_output_tokens",
+        "reservation_micro_usd"
+      ],
+      "title": "ModelRequest",
+      "type": "object"
+    },
+    "ModelResult": {
+      "additionalProperties": false,
+      "properties": {
+        "request_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Request Id",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/JsonValue"
+        },
+        "usage_status": {
+          "enum": [
+            "known",
+            "unknown",
+            "scripted"
+          ],
+          "title": "Usage Status",
+          "type": "string"
+        },
+        "input_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Input Tokens"
+        },
+        "output_tokens": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Output Tokens"
+        },
+        "actual_cost_micro_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Actual Cost Micro Usd"
+        },
+        "provider_request_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Provider Request Id"
+        }
+      },
+      "required": [
+        "request_id",
+        "output",
+        "usage_status",
+        "input_tokens",
+        "output_tokens",
+        "actual_cost_micro_usd",
+        "provider_request_id"
+      ],
+      "title": "ModelResult",
+      "type": "object"
+    },
+    "OperationIntent": {
+      "additionalProperties": false,
+      "description": "Constructed by the trusted gateway, never accepted from an actor verbatim.",
+      "properties": {
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "task_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Task Id",
+          "type": "string"
+        },
+        "intent_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Intent Id",
+          "type": "string"
+        },
+        "tool_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Tool Id",
+          "type": "string"
+        },
+        "arguments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Arguments",
+          "type": "object"
+        },
+        "resource_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        },
+        "resource_version": {
+          "title": "Resource Version",
+          "type": "string"
+        },
+        "payload_sha256": {
+          "anyOf": [
+            {
+              "pattern": "^[0-9a-f]{64}$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Payload Sha256"
+        },
+        "risk": {
+          "$ref": "#/$defs/RiskClass"
+        },
+        "idempotency": {
+          "$ref": "#/$defs/IdempotencyClass"
+        },
+        "max_cost_micro_usd": {
+          "minimum": 0,
+          "title": "Max Cost Micro Usd",
+          "type": "integer"
+        },
+        "capability_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Capability Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "project_id",
+        "task_id",
+        "intent_id",
+        "tool_id",
+        "arguments",
+        "resource_id",
+        "resource_version",
+        "risk",
+        "idempotency",
+        "max_cost_micro_usd",
+        "capability_id"
+      ],
+      "title": "OperationIntent",
+      "type": "object"
+    },
+    "Plan": {
+      "additionalProperties": false,
+      "properties": {
+        "nodes": {
+          "items": {
+            "$ref": "#/$defs/TaskNode"
+          },
+          "maxItems": 32,
+          "minItems": 1,
+          "title": "Nodes",
+          "type": "array"
+        },
+        "max_parallel": {
+          "default": 2,
+          "maximum": 2,
+          "minimum": 1,
+          "title": "Max Parallel",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "nodes"
+      ],
+      "title": "Plan",
+      "type": "object"
+    },
+    "PromotionMetrics": {
+      "additionalProperties": false,
+      "properties": {
+        "independent_task_families": {
+          "minimum": 0,
+          "title": "Independent Task Families",
+          "type": "integer"
+        },
+        "success_improvement": {
+          "maximum": 1,
+          "minimum": -1,
+          "title": "Success Improvement",
+          "type": "number"
+        },
+        "paired_ci_lower": {
+          "maximum": 1,
+          "minimum": -1,
+          "title": "Paired Ci Lower",
+          "type": "number"
+        },
+        "cost_ratio": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Cost Ratio"
+        },
+        "new_safety_failures": {
+          "minimum": 0,
+          "title": "New Safety Failures",
+          "type": "integer"
+        },
+        "mandatory_regressions": {
+          "minimum": 0,
+          "title": "Mandatory Regressions",
+          "type": "integer"
+        },
+        "evaluator_report_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evaluator Report Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "independent_task_families",
+        "success_improvement",
+        "paired_ci_lower",
+        "cost_ratio",
+        "new_safety_failures",
+        "mandatory_regressions",
+        "evaluator_report_sha256"
+      ],
+      "title": "PromotionMetrics",
+      "type": "object"
+    },
+    "RiskClass": {
+      "enum": [
+        "R0",
+        "R1",
+        "R2",
+        "R3"
+      ],
+      "title": "RiskClass",
+      "type": "string"
+    },
+    "SearchHit": {
+      "additionalProperties": false,
+      "properties": {
+        "chunk_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "document_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Document Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        },
+        "score": {
+          "title": "Score",
+          "type": "number"
+        },
+        "citation": {
+          "$ref": "#/$defs/Citation"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "document_id",
+        "text",
+        "score",
+        "citation"
+      ],
+      "title": "SearchHit",
+      "type": "object"
+    },
+    "SearchRequest": {
+      "additionalProperties": false,
+      "properties": {
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "query": {
+          "maxLength": 4000,
+          "minLength": 1,
+          "title": "Query",
+          "type": "string"
+        },
+        "mode": {
+          "default": "hybrid",
+          "enum": [
+            "lexical",
+            "dense",
+            "hybrid"
+          ],
+          "title": "Mode",
+          "type": "string"
+        },
+        "limit": {
+          "default": 8,
+          "maximum": 50,
+          "minimum": 1,
+          "title": "Limit",
+          "type": "integer"
+        },
+        "source_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Source Ids",
+          "type": "array"
+        }
+      },
+      "required": [
+        "project_id",
+        "query"
+      ],
+      "title": "SearchRequest",
+      "type": "object"
+    },
+    "SearchResult": {
+      "additionalProperties": false,
+      "properties": {
+        "hits": {
+          "items": {
+            "$ref": "#/$defs/SearchHit"
+          },
+          "title": "Hits",
+          "type": "array"
+        },
+        "index_generation": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Index Generation",
+          "type": "string"
+        },
+        "embedding_revision": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Embedding Revision"
+        },
+        "degraded": {
+          "default": false,
+          "title": "Degraded",
+          "type": "boolean"
+        },
+        "degraded_reason": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Degraded Reason"
+        }
+      },
+      "required": [
+        "hits",
+        "index_generation",
+        "embedding_revision"
+      ],
+      "title": "SearchResult",
+      "type": "object"
+    },
+    "SkillManifest": {
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "maxLength": 64,
+          "minLength": 1,
+          "pattern": "^[a-z0-9]+(?:-[a-z0-9]+)*$",
+          "title": "Name",
+          "type": "string"
+        },
+        "version": {
+          "minimum": 1,
+          "title": "Version",
+          "type": "integer"
+        },
+        "project_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Project Id",
+          "type": "string"
+        },
+        "parent_version": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Parent Version"
+        },
+        "bundle_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Bundle Sha256",
+          "type": "string"
+        },
+        "training_trace_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Training Trace Ids",
+          "type": "array"
+        },
+        "required_tool_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Required Tool Ids",
+          "type": "array"
+        },
+        "required_risk": {
+          "$ref": "#/$defs/RiskClass"
+        },
+        "applicable_task_types": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Applicable Task Types",
+          "type": "array"
+        },
+        "status": {
+          "enum": [
+            "DRAFT",
+            "QUARANTINED",
+            "STATIC_PASSED",
+            "EVALUATING",
+            "ELIGIBLE",
+            "CANARY",
+            "ACTIVE",
+            "REJECTED",
+            "ROLLED_BACK"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "version",
+        "project_id",
+        "bundle_sha256",
+        "training_trace_ids",
+        "required_tool_ids",
+        "required_risk",
+        "applicable_task_types",
+        "status"
+      ],
+      "title": "SkillManifest",
+      "type": "object"
+    },
+    "TaskNode": {
+      "additionalProperties": false,
+      "properties": {
+        "node_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "role": {
+          "enum": [
+            "research",
+            "coding",
+            "extraction",
+            "verification"
+          ],
+          "title": "Role",
+          "type": "string"
+        },
+        "objective": {
+          "minLength": 1,
+          "title": "Objective",
+          "type": "string"
+        },
+        "dependencies": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Dependencies",
+          "type": "array"
+        },
+        "resource_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "title": "Resource Ids",
+          "type": "array"
+        },
+        "max_turns": {
+          "default": 16,
+          "maximum": 64,
+          "minimum": 1,
+          "title": "Max Turns",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "node_id",
+        "role",
+        "objective"
+      ],
+      "title": "TaskNode",
+      "type": "object"
+    },
+    "ToolCallProposal": {
+      "additionalProperties": false,
+      "properties": {
+        "tool_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Tool Id",
+          "type": "string"
+        },
+        "arguments": {
+          "additionalProperties": {
+            "$ref": "#/$defs/JsonValue"
+          },
+          "title": "Arguments",
+          "type": "object"
+        },
+        "reason": {
+          "maxLength": 2000,
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        }
+      },
+      "required": [
+        "tool_id",
+        "arguments",
+        "reason"
+      ],
+      "title": "ToolCallProposal",
+      "type": "object"
+    },
+    "VerificationResult": {
+      "additionalProperties": false,
+      "properties": {
+        "criterion_id": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "verdict": {
+          "enum": [
+            "PASS",
+            "FAIL",
+            "UNVERIFIABLE",
+            "AWAITING_HUMAN"
+          ],
+          "title": "Verdict",
+          "type": "string"
+        },
+        "artifact_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Artifact Sha256",
+          "type": "string"
+        },
+        "contract_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Contract Sha256",
+          "type": "string"
+        },
+        "verifier_identity": {
+          "maxLength": 128,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+          "title": "Verifier Identity",
+          "type": "string"
+        },
+        "evidence_ids": {
+          "items": {
+            "maxLength": 128,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9_.:-]*$",
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Ids",
+          "type": "array"
+        },
+        "reason": {
+          "title": "Reason",
+          "type": "string"
+        },
+        "checked_at": {
+          "format": "date-time",
+          "title": "Checked At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "verdict",
+        "artifact_sha256",
+        "contract_sha256",
+        "verifier_identity",
+        "evidence_ids",
+        "reason",
+        "checked_at"
+      ],
+      "title": "VerificationResult",
+      "type": "object"
+    }
+  },
+  "title": "AETHER domain contract 1.0",
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether.invalid/contracts/domain.schema.json",
+  "description": "Specification-owned types, not a complete implemented API."
+}

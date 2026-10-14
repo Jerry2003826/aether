@@ -1,0 +1,73 @@
+schema_version: '1.0'
+default: deny
+single_owner: true
+allow_public_bind: false
+timezone_display: Australia/Melbourne
+limits:
+  max_dag_nodes: 32
+  max_depth: 32
+  max_parallel_read_nodes: 2
+  max_coding_jobs: 1
+  max_turns: 64
+  max_replans: 2
+  max_model_requests: 48
+  task_cost_micro_usd: 2000000
+  task_tokens: 100000
+  active_seconds: 1800
+  verification_budget_fraction: 0.2
+  approval_ttl_hours: 72
+  max_recursive_delegation: 0
+risk:
+  R0:
+    authorization_required: true
+    approval: preapproved_read_capability
+  R1:
+    authorization_required: true
+    approval: preapproved_sandbox_scope
+  R2:
+    authorization_required: true
+    approval: per_intent_required
+  R3:
+    enabled: false
+    approval: explicit_owner_and_reviewed_connector
+network:
+  actor_public_egress: false
+  runner_control_plane_access: false
+  gateway_allowed_sources: []
+  block_private_loopback_linklocal_metadata: true
+  validate_every_redirect_and_connection: true
+  max_redirects: 3
+  max_response_bytes: 20971520
+  allow_fixture_test_network_only_in_tests: true
+sandbox:
+  mount_host_home: false
+  mount_docker_socket: false
+  public_skill_loading: false
+  allowed_model_aliases:
+  - coder
+  default_cpu: 2
+  default_memory_mib: 4096
+  pids_limit: 256
+  max_job_seconds: 900
+learning:
+  auto_generate_candidates: false
+  auto_promote: false
+  min_independent_families: 30
+  minimum_success_delta: 0.05
+  required_ci_lower_strictly_gt: 0.0
+  maximum_cost_ratio: 1.1
+  max_safety_failures: 0
+  max_mandatory_regressions: 0
+  canary_fraction: 0.0
+recommendations:
+  exploration_enabled: false
+  epsilon: 0.05
+  exploration_slot: last
+  record_actual_propensity: true
+retention_days:
+  redacted_traces: 30
+  task_metadata: 90
+  artifacts: 30
+  knowledge_until_deleted: true
+note: Policy metadata must be enforced by trusted services; it does not create an
+  OS/network security boundary.

@@ -1,0 +1,2 @@
+AETHER 的目标是可验证执行。
+This is a synthetic fixture, not a real website claim.

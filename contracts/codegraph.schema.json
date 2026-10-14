@@ -1,0 +1,256 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://aether.local/contracts/codegraph.schema.json",
+  "title": "CodeGraph adapter response contracts (AETHER-authored; not vendor response schema)",
+  "$defs": {
+    "GraphStatus": {
+      "type": "string",
+      "enum": [
+        "ready",
+        "stale",
+        "degraded",
+        "unavailable"
+      ]
+    },
+    "CodeSymbolRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "symbol_id",
+        "kind",
+        "qualified_name",
+        "relative_path",
+        "start_line",
+        "end_line",
+        "file_sha256"
+      ],
+      "properties": {
+        "symbol_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "kind": {
+          "type": "string",
+          "enum": [
+            "function",
+            "method",
+            "class",
+            "module",
+            "interface",
+            "type",
+            "other"
+          ]
+        },
+        "qualified_name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "relative_path": {
+          "$ref": "#/$defs/RepoRelativePath"
+        },
+        "start_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "end_line": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "file_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        }
+      }
+    },
+    "CodeContextResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_artifact_id",
+        "project_id",
+        "snapshot_sha256",
+        "codegraph_version",
+        "index_status",
+        "query",
+        "symbols",
+        "source_freshness_confirmed",
+        "degraded_reason"
+      ],
+      "properties": {
+        "repository_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "codegraph_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index_status": {
+          "$ref": "#/$defs/GraphStatus"
+        },
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "symbols": {
+          "type": "array",
+          "maxItems": 100,
+          "items": {
+            "$ref": "#/$defs/CodeSymbolRef"
+          }
+        },
+        "context_text": {
+          "type": "string",
+          "maxLength": 24000
+        },
+        "source_freshness_confirmed": {
+          "type": "boolean"
+        },
+        "degraded_reason": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      }
+    },
+    "CodeImpactResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "repository_artifact_id",
+        "snapshot_sha256",
+        "codegraph_version",
+        "index_status",
+        "symbol_ref",
+        "possible_impacted_symbols",
+        "completeness"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "codegraph_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index_status": {
+          "$ref": "#/$defs/GraphStatus"
+        },
+        "symbol_ref": {
+          "type": "string",
+          "minLength": 1
+        },
+        "possible_impacted_symbols": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/CodeSymbolRef"
+          }
+        },
+        "completeness": {
+          "type": "string",
+          "enum": [
+            "partial",
+            "unknown"
+          ]
+        }
+      }
+    },
+    "CodeAffectedTestsResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "project_id",
+        "repository_artifact_id",
+        "snapshot_sha256",
+        "codegraph_version",
+        "index_status",
+        "suggested_relative_test_paths",
+        "advisory_only"
+      ],
+      "properties": {
+        "project_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "repository_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "snapshot_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "codegraph_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "index_status": {
+          "$ref": "#/$defs/GraphStatus"
+        },
+        "suggested_relative_test_paths": {
+          "type": "array",
+          "maxItems": 250,
+          "items": {
+            "$ref": "#/$defs/RepoRelativePath"
+          }
+        },
+        "advisory_only": {
+          "const": true
+        }
+      }
+    },
+    "RepoRelativePath": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2048,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\\\)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\x00]+$"
+    },
+    "CodeQueryRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository_artifact_id",
+        "question",
+        "max_context_chars"
+      ],
+      "properties": {
+        "repository_artifact_id": {
+          "type": "string",
+          "format": "uuid"
+        },
+        "question": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "max_context_chars": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 24000
+        }
+      }
+    }
+  }
+}

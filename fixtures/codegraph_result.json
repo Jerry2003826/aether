@@ -1,0 +1,22 @@
+{
+  "project_id": "00000000-0000-4000-8000-000000000011",
+  "repository_artifact_id": "00000000-0000-4000-8000-000000000022",
+  "snapshot_sha256": "2222222222222222222222222222222222222222222222222222222222222222",
+  "codegraph_version": "SYNTHETIC_TEST_VERSION",
+  "index_status": "ready",
+  "query": "Who calls the login handler?",
+  "source_freshness_confirmed": true,
+  "degraded_reason": null,
+  "context_text": "Synthetic example only. Not output from actual CodeGraph.",
+  "symbols": [
+    {
+      "symbol_id": "auth.login",
+      "kind": "function",
+      "qualified_name": "auth.login",
+      "relative_path": "src/auth.py",
+      "start_line": 10,
+      "end_line": 20,
+      "file_sha256": "1111111111111111111111111111111111111111111111111111111111111111"
+    }
+  ]
+}

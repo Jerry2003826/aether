@@ -1,0 +1,3 @@
+# Pack/reference checks only; production resolves and locks its own dependencies in F00/F01.
+pydantic>=2,<3
+PyYAML>=6,<7

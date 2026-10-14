@@ -1,0 +1,180 @@
+note: Full API target; early vertical slices implement only their assigned paths. Unknown or disabled features must not
+  return fake successful data.
+paths:
+- path: /health/live
+  methods:
+  - get
+  implemented_by: F02
+  status: not_implemented
+- path: /health/ready
+  methods:
+  - get
+  implemented_by: F02
+  status: not_implemented
+- path: /v1/auth/bootstrap
+  methods:
+  - post
+  implemented_by: F02
+  status: not_implemented
+- path: /v1/auth/session
+  methods:
+  - post
+  - get
+  - delete
+  implemented_by: F02
+  status: not_implemented
+- path: /v1/projects
+  methods:
+  - get
+  - post
+  implemented_by: F02
+  status: not_implemented
+- path: /v1/projects/{project_id}/tasks
+  methods:
+  - get
+  - post
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/tasks/{task_id}
+  methods:
+  - get
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/tasks/{task_id}/contract
+  methods:
+  - get
+  - put
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/tasks/{task_id}/commands
+  methods:
+  - post
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/tasks/{task_id}/events
+  methods:
+  - get
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/approvals
+  methods:
+  - get
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/approvals/{approval_id}/decision
+  methods:
+  - post
+  implemented_by: F08
+  status: not_implemented
+- path: /v1/projects/{project_id}/artifacts/{artifact_id}
+  methods:
+  - get
+  - delete
+  implemented_by: F03
+  status: not_implemented
+- path: /v1/projects/{project_id}/sources
+  methods:
+  - get
+  - post
+  implemented_by: F10
+  status: not_implemented
+- path: /v1/projects/{project_id}/memories
+  methods:
+  - get
+  - post
+  implemented_by: F12
+  status: not_implemented
+- path: /v1/projects/{project_id}/skills
+  methods:
+  - get
+  - post
+  implemented_by: F20
+  status: not_implemented
+- path: /v1/projects/{project_id}/watches
+  methods:
+  - get
+  - post
+  implemented_by: F18
+  status: not_implemented
+- path: /v1/projects/{project_id}/evaluations
+  methods:
+  - get
+  - post
+  implemented_by: F24
+  status: not_implemented
+- path: /v1/projects/{project_id}/sources/{source_id}
+  methods:
+  - get
+  - patch
+  - delete
+  implemented_by: F10
+  status: not_implemented
+- path: /v1/projects/{project_id}/memories/{memory_id}
+  methods:
+  - patch
+  - delete
+  implemented_by: F16
+  status: not_implemented
+- path: /v1/projects/{project_id}/watches/{watch_id}
+  methods:
+  - patch
+  - delete
+  implemented_by: F18
+  status: not_implemented
+- path: /v1/projects/{project_id}/ingestions
+  methods:
+  - get
+  - post
+  implemented_by: F10
+  status: not_implemented
+- path: /v1/projects/{project_id}/search
+  methods:
+  - post
+  implemented_by: F11
+  status: not_implemented
+- path: /v1/projects/{project_id}/recommendations
+  methods:
+  - get
+  implemented_by: F19
+  status: not_implemented
+- path: /v1/projects/{project_id}/feedback
+  methods:
+  - post
+  implemented_by: F19
+  status: not_implemented
+- path: /v1/projects/{project_id}/skills/{skill_id}/evaluate
+  methods:
+  - post
+  implemented_by: F21
+  status: not_implemented
+- path: /v1/projects/{project_id}/skills/{skill_id}/deployments
+  methods:
+  - post
+  implemented_by: F21
+  status: not_implemented
+- path: /v1/projects/{project_id}/costs
+  methods:
+  - get
+  implemented_by: F05
+  status: not_implemented
+- path: /v1/admin/connectors
+  methods:
+  - get
+  - post
+  implemented_by: F17
+  status: not_implemented
+- path: /v1/admin/connectors/{connector_id}/probe
+  methods:
+  - post
+  implemented_by: F17
+  status: not_implemented
+- path: /v1/admin/models/probe
+  methods:
+  - post
+  implemented_by: F05
+  status: not_implemented
+- path: /v1/projects/{project_id}/artifacts
+  methods:
+  - post
+  implemented_by: F03
+  status: not_implemented

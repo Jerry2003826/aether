@@ -1,0 +1,3686 @@
+openapi: 3.1.0
+info:
+  title: AETHER V1 API design contract
+  version: 1.0.0
+  description: Design contract, not an implemented API. Server-side scope/authentication, side-effect ledgers and
+    independent verification are mandatory. Production entity IDs are UUID even when reusable reference schemas
+    allow readable fixtures. Stream and generic provider metrics fields are intentionally bounded by their described
+    adapters; do not accept arbitrary privileged commands.
+servers:
+- url: http://127.0.0.1:8000
+  description: Intended local development endpoint, not a running server
+security:
+- sessionCookie: []
+paths:
+  /health/live:
+    get:
+      operationId: liveness
+      summary: liveness
+      responses:
+        '401': &id001
+          description: Unauthenticated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403': &id002
+          description: Forbidden
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404': &id003
+          description: Invisible or missing resource
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409': &id004
+          description: Idempotency/version conflict
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '422': &id005
+          description: Invalid contract
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429': &id006
+          description: Rate or budget limit
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '503': &id007
+          description: Dependency unavailable
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+      security: []
+  /health/ready:
+    get:
+      operationId: readiness
+      summary: readiness
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+      security: []
+  /v1/auth/bootstrap:
+    post:
+      operationId: bootstrapOwner
+      summary: One-use, loopback-only owner enrollment; disabled after first owner.
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '201':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BootstrapRequest'
+  /v1/auth/session:
+    post:
+      operationId: login
+      summary: login
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+    get:
+      operationId: getSession
+      summary: getSession
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+    delete:
+      operationId: logout
+      summary: logout
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '204':
+          description: Success
+      parameters:
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: &id008
+          type: string
+  /v1/projects:
+    get:
+      operationId: listProjects
+      summary: listProjects
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Project'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createProject
+      summary: createProject
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '201':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Project'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ProjectCreate'
+  /v1/projects/{project_id}/tasks:
+    get:
+      operationId: listTasks
+      summary: listTasks
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/TaskSnapshot'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: &id009
+          type: string
+          format: uuid
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createTask
+      summary: createTask
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCreate'
+  /v1/projects/{project_id}/tasks/{task_id}:
+    get:
+      operationId: getTask
+      summary: getTask
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/TaskSnapshot'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: task_id
+        in: path
+        required: true
+        schema: *id009
+  /v1/projects/{project_id}/tasks/{task_id}/contract:
+    get:
+      operationId: getContract
+      summary: getContract
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoalContract'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: task_id
+        in: path
+        required: true
+        schema: *id009
+    put:
+      operationId: reviseContract
+      summary: Create/update draft; approved contract stays immutable and new version needs approval.
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/GoalContract'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: task_id
+        in: path
+        required: true
+        schema: *id009
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/GoalContract'
+  /v1/projects/{project_id}/tasks/{task_id}/commands:
+    post:
+      operationId: submitTaskCommand
+      summary: submitTaskCommand
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: task_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TaskCommand'
+  /v1/projects/{project_id}/tasks/{task_id}/events:
+    get:
+      operationId: streamTaskEvents
+      summary: streamTaskEvents
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Persistent EventEnvelope stream; reconnect with Last-Event-ID. Payloads are redacted.
+          content:
+            text/event-stream:
+              schema: *id008
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: task_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Last-Event-ID
+        in: header
+        schema: *id008
+  /v1/projects/{project_id}/approvals:
+    get:
+      operationId: listApprovals
+      summary: listApprovals
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Approval'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+  /v1/projects/{project_id}/approvals/{approval_id}/decision:
+    post:
+      operationId: decideApproval
+      summary: decideApproval
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: approval_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecision'
+  /v1/projects/{project_id}/artifacts/{artifact_id}:
+    get:
+      operationId: getArtifact
+      summary: getArtifact
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Authorized artifact bytes. Content-Type is the stored media type; server maps ID to path.
+          content:
+            application/octet-stream:
+              schema:
+                type: string
+                format: binary
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: artifact_id
+        in: path
+        required: true
+        schema: *id009
+    delete:
+      operationId: deleteArtifact
+      summary: deleteArtifact
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: artifact_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+  /v1/projects/{project_id}/sources:
+    get:
+      operationId: listSources
+      summary: listSources
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Source'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createSource
+      summary: createSource
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourceCreate'
+  /v1/projects/{project_id}/memories:
+    get:
+      operationId: listMemories
+      summary: listMemories
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Memory'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createMemory
+      summary: createMemory
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryCreate'
+  /v1/projects/{project_id}/skills:
+    get:
+      operationId: listSkills
+      summary: listSkills
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Skill'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createSkill
+      summary: createSkill
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkillImport'
+  /v1/projects/{project_id}/watches:
+    get:
+      operationId: listWatches
+      summary: listWatches
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Watch'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createWatch
+      summary: createWatch
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchCreate'
+  /v1/projects/{project_id}/evaluations:
+    get:
+      operationId: listEvaluations
+      summary: listEvaluations
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Evaluation'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createEvaluation
+      summary: createEvaluation
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EvaluationCreate'
+  /v1/projects/{project_id}/sources/{source_id}:
+    get:
+      operationId: getSource
+      summary: getSource
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Source'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: source_id
+        in: path
+        required: true
+        schema: *id009
+    patch:
+      operationId: updateSource
+      summary: updateSource
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: source_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SourcePatch'
+    delete:
+      operationId: deleteSource
+      summary: deleteSource
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: source_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+  /v1/projects/{project_id}/memories/{memory_id}:
+    patch:
+      operationId: updateMemory
+      summary: updateMemory
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: memory_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemoryPatch'
+    delete:
+      operationId: deleteMemory
+      summary: deleteMemory
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: memory_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+  /v1/projects/{project_id}/watches/{watch_id}:
+    patch:
+      operationId: updateWatch
+      summary: updateWatch
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: watch_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/WatchPatch'
+    delete:
+      operationId: deleteWatch
+      summary: deleteWatch
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: watch_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+  /v1/projects/{project_id}/ingestions:
+    get:
+      operationId: listIngestions
+      summary: listIngestions
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Ingestion'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: createIngestion
+      summary: createIngestion
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/IngestionCreate'
+  /v1/projects/{project_id}/search:
+    post:
+      operationId: searchKnowledge
+      summary: searchKnowledge
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SearchResult'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SearchRequest'
+  /v1/projects/{project_id}/recommendations:
+    get:
+      operationId: getRecommendations
+      summary: getRecommendations
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Recommendations'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+  /v1/projects/{project_id}/feedback:
+    post:
+      operationId: recordFeedback
+      summary: recordFeedback
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FeedbackCreate'
+  /v1/projects/{project_id}/skills/{skill_id}/evaluate:
+    post:
+      operationId: evaluateSkill
+      summary: evaluateSkill
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: skill_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkillEvaluate'
+  /v1/projects/{project_id}/skills/{skill_id}/deployments:
+    post:
+      operationId: deploySkill
+      summary: deploySkill
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: skill_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: If-Match
+        in: header
+        required: true
+        schema: *id008
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SkillDeploy'
+  /v1/projects/{project_id}/costs:
+    get:
+      operationId: getCosts
+      summary: getCosts
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CostSnapshot'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: from
+        in: query
+        schema: &id010
+          type: string
+          format: date-time
+      - name: to
+        in: query
+        schema: *id010
+  /v1/admin/connectors:
+    get:
+      operationId: listConnectors
+      summary: listConnectors
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                type: object
+                additionalProperties: false
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Connector'
+                  next_cursor:
+                    anyOf:
+                    - *id008
+                    - type: 'null'
+                required:
+                - items
+                - next_cursor
+      parameters:
+      - name: cursor
+        in: query
+        schema: *id008
+      - name: limit
+        in: query
+        schema:
+          type: integer
+          minimum: 1
+          maximum: 100
+          default: 20
+    post:
+      operationId: registerConnector
+      summary: registerConnector
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ConnectorCreate'
+  /v1/admin/connectors/{connector_id}/probe:
+    post:
+      operationId: probeConnector
+      summary: Owner-only reviewed non-side-effect probe; never expands connector scope.
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResult'
+      parameters:
+      - name: connector_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+  /v1/admin/models/probe:
+    post:
+      operationId: probeModel
+      summary: probeModel
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '200':
+          description: Success
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ProbeResult'
+      parameters:
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ModelProbeRequest'
+  /v1/projects/{project_id}/artifacts:
+    post:
+      operationId: uploadArtifact
+      summary: Upload owner-provided file with a 25 MiB limit; do not auto-expand archives.
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema:
+          type: string
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - file
+              properties:
+                file:
+                  type: string
+                  format: binary
+      responses:
+        '201':
+          description: Authenticated immutable artifact stored.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ArtifactRef'
+        '413':
+          description: Upload exceeds authorized size.
+        '401':
+          description: Unauthenticated
+        '403':
+          description: Unauthorized project
+        '409':
+          description: Idempotency body hash conflict
+        '422':
+          description: Invalid or prohibited content
+components:
+  securitySchemes:
+    sessionCookie:
+      type: apiKey
+      in: cookie
+      name: aether_session
+  schemas:
+    AcceptanceCriterion:
+      additionalProperties: false
+      properties:
+        criterion_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Criterion Id
+          type: string
+        template:
+          enum:
+          - artifact_exists
+          - json_schema
+          - trusted_test_suite
+          - citation_integrity
+          - source_coverage
+          - human_review
+          title: Template
+          type: string
+        description:
+          maxLength: 2000
+          minLength: 1
+          title: Description
+          type: string
+        mandatory:
+          default: true
+          title: Mandatory
+          type: boolean
+        parameters:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          title: Parameters
+          type: object
+        trusted_suite_hash:
+          anyOf:
+          - pattern: ^[0-9a-f]{64}$
+            type: string
+          - type: 'null'
+          default: null
+          title: Trusted Suite Hash
+      required:
+      - criterion_id
+      - template
+      - description
+      title: AcceptanceCriterion
+      type: object
+    ApprovalGrant:
+      additionalProperties: false
+      properties:
+        approval_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Approval Id
+          type: string
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        intent_digest:
+          pattern: ^[0-9a-f]{64}$
+          title: Intent Digest
+          type: string
+        issued_to_owner:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Issued To Owner
+          type: string
+        expires_at:
+          format: date-time
+          title: Expires At
+          type: string
+        decision:
+          enum:
+          - approved
+          - rejected
+          title: Decision
+          type: string
+      required:
+      - approval_id
+      - project_id
+      - task_id
+      - intent_digest
+      - issued_to_owner
+      - expires_at
+      - decision
+      title: ApprovalGrant
+      type: object
+    ArtifactRef:
+      additionalProperties: false
+      properties:
+        artifact_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Artifact Id
+          type: string
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Sha256
+          type: string
+        byte_size:
+          minimum: 0
+          title: Byte Size
+          type: integer
+        media_type:
+          title: Media Type
+          type: string
+        classification:
+          default: project_private
+          enum:
+          - public
+          - project_private
+          - sensitive
+          title: Classification
+          type: string
+      required:
+      - artifact_id
+      - project_id
+      - sha256
+      - byte_size
+      - media_type
+      title: ArtifactRef
+      type: object
+    BudgetSpec:
+      additionalProperties: false
+      properties:
+        max_cost_micro_usd:
+          default: 2000000
+          minimum: 0
+          title: Max Cost Micro Usd
+          type: integer
+        max_tokens:
+          default: 100000
+          minimum: 1
+          title: Max Tokens
+          type: integer
+        max_model_requests:
+          default: 48
+          minimum: 1
+          title: Max Model Requests
+          type: integer
+        active_seconds:
+          default: 1800
+          minimum: 1
+          title: Active Seconds
+          type: integer
+        verification_reserve_fraction:
+          default: 0.2
+          exclusiveMaximum: 1
+          minimum: 0
+          title: Verification Reserve Fraction
+          type: number
+      title: BudgetSpec
+      type: object
+    Citation:
+      additionalProperties: false
+      properties:
+        source_version_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Source Version Id
+          type: string
+        source_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Source Sha256
+          type: string
+        start:
+          minimum: 0
+          title: Start
+          type: integer
+        end:
+          minimum: 1
+          title: End
+          type: integer
+        quote:
+          minLength: 1
+          title: Quote
+          type: string
+        page:
+          anyOf:
+          - minimum: 1
+            type: integer
+          - type: 'null'
+          default: null
+          title: Page
+      required:
+      - source_version_id
+      - source_sha256
+      - start
+      - end
+      - quote
+      title: Citation
+      type: object
+    CodingJobRequest:
+      additionalProperties: false
+      properties:
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        intent_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Intent Id
+          type: string
+        base_artifact:
+          $ref: '#/components/schemas/ArtifactRef'
+        objective:
+          title: Objective
+          type: string
+        contract_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Contract Sha256
+          type: string
+        allowed_tools:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Allowed Tools
+          type: array
+        deadline:
+          format: date-time
+          title: Deadline
+          type: string
+      required:
+      - project_id
+      - task_id
+      - intent_id
+      - base_artifact
+      - objective
+      - contract_sha256
+      - allowed_tools
+      - deadline
+      title: CodingJobRequest
+      type: object
+    CodingJobResult:
+      additionalProperties: false
+      properties:
+        job_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Job Id
+          type: string
+        status:
+          enum:
+          - QUEUED
+          - STARTING
+          - ACTIVE
+          - EXPORTING
+          - FINISHED
+          - FAILED
+          - CANCELLED
+          title: Status
+          type: string
+        artifact:
+          anyOf:
+          - $ref: '#/components/schemas/ArtifactRef'
+          - type: 'null'
+          default: null
+        patch:
+          anyOf:
+          - $ref: '#/components/schemas/ArtifactRef'
+          - type: 'null'
+          default: null
+        event_artifact:
+          anyOf:
+          - $ref: '#/components/schemas/ArtifactRef'
+          - type: 'null'
+          default: null
+      required:
+      - job_id
+      - status
+      title: CodingJobResult
+      type: object
+    Decision:
+      additionalProperties: false
+      properties:
+        kind:
+          enum:
+          - call_tools
+          - submit_candidate
+          - request_clarification
+          - stop_blocked
+          title: Kind
+          type: string
+        tool_calls:
+          items:
+            $ref: '#/components/schemas/ToolCallProposal'
+          maxItems: 3
+          title: Tool Calls
+          type: array
+        artifact_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Artifact Ids
+          type: array
+        message:
+          default: ''
+          title: Message
+          type: string
+      required:
+      - kind
+      title: Decision
+      type: object
+    EventEnvelope:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: '1.0'
+          default: '1.0'
+          title: Schema Version
+          type: string
+        event_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Event Id
+          type: string
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        sequence:
+          minimum: 1
+          title: Sequence
+          type: integer
+        event_type:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Event Type
+          type: string
+        occurred_at:
+          format: date-time
+          title: Occurred At
+          type: string
+        payload:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          title: Payload
+          type: object
+      required:
+      - event_id
+      - project_id
+      - task_id
+      - sequence
+      - event_type
+      - occurred_at
+      - payload
+      title: EventEnvelope
+      type: object
+    GoalContract:
+      additionalProperties: false
+      properties:
+        schema_version:
+          const: '1.0'
+          default: '1.0'
+          title: Schema Version
+          type: string
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        contract_version:
+          minimum: 1
+          title: Contract Version
+          type: integer
+        goal:
+          maxLength: 16000
+          minLength: 1
+          title: Goal
+          type: string
+        assumptions:
+          items:
+            type: string
+          title: Assumptions
+          type: array
+        allowed_source_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Allowed Source Ids
+          type: array
+        required_artifacts:
+          items:
+            type: string
+          minItems: 1
+          title: Required Artifacts
+          type: array
+        criteria:
+          items:
+            $ref: '#/components/schemas/AcceptanceCriterion'
+          minItems: 1
+          title: Criteria
+          type: array
+        budget:
+          $ref: '#/components/schemas/BudgetSpec'
+        created_at:
+          format: date-time
+          title: Created At
+          type: string
+      required:
+      - project_id
+      - task_id
+      - contract_version
+      - goal
+      - required_artifacts
+      - criteria
+      - created_at
+      title: GoalContract
+      type: object
+    IdempotencyClass:
+      enum:
+      - read_only
+      - idempotent_write
+      - reconcilable_write
+      - non_idempotent
+      title: IdempotencyClass
+      type: string
+    JsonValue: {}
+    ModelRequest:
+      additionalProperties: false
+      properties:
+        request_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Request Id
+          type: string
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        role:
+          enum:
+          - planner
+          - actor
+          - coder
+          - judge
+          - extractor
+          title: Role
+          type: string
+        input_artifact_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Input Artifact Ids
+          type: array
+        output_schema_name:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Output Schema Name
+        max_output_tokens:
+          minimum: 1
+          title: Max Output Tokens
+          type: integer
+        reservation_micro_usd:
+          minimum: 0
+          title: Reservation Micro Usd
+          type: integer
+      required:
+      - request_id
+      - project_id
+      - task_id
+      - role
+      - input_artifact_ids
+      - output_schema_name
+      - max_output_tokens
+      - reservation_micro_usd
+      title: ModelRequest
+      type: object
+    ModelResult:
+      additionalProperties: false
+      properties:
+        request_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Request Id
+          type: string
+        output:
+          $ref: '#/components/schemas/JsonValue'
+        usage_status:
+          enum:
+          - known
+          - unknown
+          - scripted
+          title: Usage Status
+          type: string
+        input_tokens:
+          anyOf:
+          - minimum: 0
+            type: integer
+          - type: 'null'
+          title: Input Tokens
+        output_tokens:
+          anyOf:
+          - minimum: 0
+            type: integer
+          - type: 'null'
+          title: Output Tokens
+        actual_cost_micro_usd:
+          anyOf:
+          - minimum: 0
+            type: integer
+          - type: 'null'
+          title: Actual Cost Micro Usd
+        provider_request_id:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Provider Request Id
+      required:
+      - request_id
+      - output
+      - usage_status
+      - input_tokens
+      - output_tokens
+      - actual_cost_micro_usd
+      - provider_request_id
+      title: ModelResult
+      type: object
+    OperationIntent:
+      additionalProperties: false
+      description: Constructed by the trusted gateway, never accepted from an actor verbatim.
+      properties:
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        task_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Task Id
+          type: string
+        intent_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Intent Id
+          type: string
+        tool_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Tool Id
+          type: string
+        arguments:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          title: Arguments
+          type: object
+        resource_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Resource Id
+          type: string
+        resource_version:
+          title: Resource Version
+          type: string
+        payload_sha256:
+          anyOf:
+          - pattern: ^[0-9a-f]{64}$
+            type: string
+          - type: 'null'
+          default: null
+          title: Payload Sha256
+        risk:
+          $ref: '#/components/schemas/RiskClass'
+        idempotency:
+          $ref: '#/components/schemas/IdempotencyClass'
+        max_cost_micro_usd:
+          minimum: 0
+          title: Max Cost Micro Usd
+          type: integer
+        capability_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Capability Id
+          type: string
+      required:
+      - project_id
+      - task_id
+      - intent_id
+      - tool_id
+      - arguments
+      - resource_id
+      - resource_version
+      - risk
+      - idempotency
+      - max_cost_micro_usd
+      - capability_id
+      title: OperationIntent
+      type: object
+    Plan:
+      additionalProperties: false
+      properties:
+        nodes:
+          items:
+            $ref: '#/components/schemas/TaskNode'
+          maxItems: 32
+          minItems: 1
+          title: Nodes
+          type: array
+        max_parallel:
+          default: 2
+          maximum: 2
+          minimum: 1
+          title: Max Parallel
+          type: integer
+      required:
+      - nodes
+      title: Plan
+      type: object
+    PromotionMetrics:
+      additionalProperties: false
+      properties:
+        independent_task_families:
+          minimum: 0
+          title: Independent Task Families
+          type: integer
+        success_improvement:
+          maximum: 1
+          minimum: -1
+          title: Success Improvement
+          type: number
+        paired_ci_lower:
+          maximum: 1
+          minimum: -1
+          title: Paired Ci Lower
+          type: number
+        cost_ratio:
+          anyOf:
+          - minimum: 0
+            type: number
+          - type: 'null'
+          title: Cost Ratio
+        new_safety_failures:
+          minimum: 0
+          title: New Safety Failures
+          type: integer
+        mandatory_regressions:
+          minimum: 0
+          title: Mandatory Regressions
+          type: integer
+        evaluator_report_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Evaluator Report Sha256
+          type: string
+      required:
+      - independent_task_families
+      - success_improvement
+      - paired_ci_lower
+      - cost_ratio
+      - new_safety_failures
+      - mandatory_regressions
+      - evaluator_report_sha256
+      title: PromotionMetrics
+      type: object
+    RiskClass:
+      enum:
+      - R0
+      - R1
+      - R2
+      - R3
+      title: RiskClass
+      type: string
+    SearchHit:
+      additionalProperties: false
+      properties:
+        chunk_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Chunk Id
+          type: string
+        document_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Document Id
+          type: string
+        text:
+          title: Text
+          type: string
+        score:
+          title: Score
+          type: number
+        citation:
+          $ref: '#/components/schemas/Citation'
+      required:
+      - chunk_id
+      - document_id
+      - text
+      - score
+      - citation
+      title: SearchHit
+      type: object
+    SearchRequest:
+      additionalProperties: false
+      properties:
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        query:
+          maxLength: 4000
+          minLength: 1
+          title: Query
+          type: string
+        mode:
+          default: hybrid
+          enum:
+          - lexical
+          - dense
+          - hybrid
+          title: Mode
+          type: string
+        limit:
+          default: 8
+          maximum: 50
+          minimum: 1
+          title: Limit
+          type: integer
+        source_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Source Ids
+          type: array
+      required:
+      - project_id
+      - query
+      title: SearchRequest
+      type: object
+    SearchResult:
+      additionalProperties: false
+      properties:
+        hits:
+          items:
+            $ref: '#/components/schemas/SearchHit'
+          title: Hits
+          type: array
+        index_generation:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Index Generation
+          type: string
+        embedding_revision:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Embedding Revision
+        degraded:
+          default: false
+          title: Degraded
+          type: boolean
+        degraded_reason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Degraded Reason
+      required:
+      - hits
+      - index_generation
+      - embedding_revision
+      title: SearchResult
+      type: object
+    SkillManifest:
+      additionalProperties: false
+      properties:
+        name:
+          maxLength: 64
+          minLength: 1
+          pattern: ^[a-z0-9]+(?:-[a-z0-9]+)*$
+          title: Name
+          type: string
+        version:
+          minimum: 1
+          title: Version
+          type: integer
+        project_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Project Id
+          type: string
+        parent_version:
+          anyOf:
+          - minimum: 1
+            type: integer
+          - type: 'null'
+          default: null
+          title: Parent Version
+        bundle_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Bundle Sha256
+          type: string
+        training_trace_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Training Trace Ids
+          type: array
+        required_tool_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Required Tool Ids
+          type: array
+        required_risk:
+          $ref: '#/components/schemas/RiskClass'
+        applicable_task_types:
+          items:
+            type: string
+          minItems: 1
+          title: Applicable Task Types
+          type: array
+        status:
+          enum:
+          - DRAFT
+          - QUARANTINED
+          - STATIC_PASSED
+          - EVALUATING
+          - ELIGIBLE
+          - CANARY
+          - ACTIVE
+          - REJECTED
+          - ROLLED_BACK
+          title: Status
+          type: string
+      required:
+      - name
+      - version
+      - project_id
+      - bundle_sha256
+      - training_trace_ids
+      - required_tool_ids
+      - required_risk
+      - applicable_task_types
+      - status
+      title: SkillManifest
+      type: object
+    TaskNode:
+      additionalProperties: false
+      properties:
+        node_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Node Id
+          type: string
+        role:
+          enum:
+          - research
+          - coding
+          - extraction
+          - verification
+          title: Role
+          type: string
+        objective:
+          minLength: 1
+          title: Objective
+          type: string
+        dependencies:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Dependencies
+          type: array
+        resource_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          title: Resource Ids
+          type: array
+        max_turns:
+          default: 16
+          maximum: 64
+          minimum: 1
+          title: Max Turns
+          type: integer
+      required:
+      - node_id
+      - role
+      - objective
+      title: TaskNode
+      type: object
+    ToolCallProposal:
+      additionalProperties: false
+      properties:
+        tool_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Tool Id
+          type: string
+        arguments:
+          additionalProperties:
+            $ref: '#/components/schemas/JsonValue'
+          title: Arguments
+          type: object
+        reason:
+          maxLength: 2000
+          minLength: 1
+          title: Reason
+          type: string
+      required:
+      - tool_id
+      - arguments
+      - reason
+      title: ToolCallProposal
+      type: object
+    VerificationResult:
+      additionalProperties: false
+      properties:
+        criterion_id:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Criterion Id
+          type: string
+        verdict:
+          enum:
+          - PASS
+          - FAIL
+          - UNVERIFIABLE
+          - AWAITING_HUMAN
+          title: Verdict
+          type: string
+        artifact_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Artifact Sha256
+          type: string
+        contract_sha256:
+          pattern: ^[0-9a-f]{64}$
+          title: Contract Sha256
+          type: string
+        verifier_identity:
+          maxLength: 128
+          minLength: 1
+          pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+          title: Verifier Identity
+          type: string
+        evidence_ids:
+          items:
+            maxLength: 128
+            minLength: 1
+            pattern: ^[A-Za-z0-9][A-Za-z0-9_.:-]*$
+            type: string
+          minItems: 1
+          title: Evidence Ids
+          type: array
+        reason:
+          title: Reason
+          type: string
+        checked_at:
+          format: date-time
+          title: Checked At
+          type: string
+      required:
+      - criterion_id
+      - verdict
+      - artifact_sha256
+      - contract_sha256
+      - verifier_identity
+      - evidence_ids
+      - reason
+      - checked_at
+      title: VerificationResult
+      type: object
+    Error:
+      type: object
+      additionalProperties: false
+      properties:
+        code: *id008
+        message: *id008
+        request_id: *id008
+        retryable: &id013
+          type: boolean
+        details: &id012
+          type: object
+          additionalProperties: true
+      required:
+      - code
+      - message
+      - request_id
+      - retryable
+      - details
+    Accepted:
+      type: object
+      additionalProperties: false
+      properties:
+        request_id: *id008
+        command_id: *id009
+        resource_id: *id009
+        status:
+          const: accepted
+      required:
+      - request_id
+      - command_id
+      - resource_id
+      - status
+    Project:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        name: *id008
+        version: &id011
+          type: integer
+        visibility_epoch: *id011
+        created_at: *id010
+      required:
+      - id
+      - name
+      - version
+      - visibility_epoch
+      - created_at
+    ProjectCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 200
+      required:
+      - name
+    TaskCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        goal:
+          type: string
+          minLength: 1
+          maxLength: 16000
+        budget:
+          $ref: '#/components/schemas/BudgetSpec'
+        allowed_source_ids:
+          type: array
+          items: *id009
+      required:
+      - goal
+    CostSnapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        limit_micro_usd: *id011
+        actual_known_micro_usd: *id011
+        held_micro_usd: *id011
+        unknown_request_count: *id011
+        tokens_used: *id011
+        request_count: *id011
+      required:
+      - limit_micro_usd
+      - actual_known_micro_usd
+      - held_micro_usd
+      - unknown_request_count
+      - tokens_used
+      - request_count
+    TaskSnapshot:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        project_id: *id009
+        status:
+          $ref: '#/components/schemas/TaskState'
+        version: *id011
+        contract_version:
+          anyOf:
+          - *id011
+          - type: 'null'
+        contract_sha256:
+          anyOf:
+          - *id008
+          - type: 'null'
+        projection_updated_at:
+          anyOf:
+          - *id010
+          - type: 'null'
+        budget:
+          $ref: '#/components/schemas/CostSnapshot'
+        artifact_ids:
+          type: array
+          items: *id009
+        verification_results:
+          type: array
+          items:
+            $ref: '#/components/schemas/VerificationResult'
+      required:
+      - id
+      - project_id
+      - status
+      - version
+      - contract_version
+      - contract_sha256
+      - projection_updated_at
+      - budget
+      - artifact_ids
+      - verification_results
+    TaskCommand:
+      type: object
+      additionalProperties: false
+      properties:
+        command_id: *id009
+        kind:
+          type: string
+          enum:
+          - approve_goal
+          - pause
+          - resume
+          - cancel
+        expected_contract_sha256:
+          anyOf:
+          - *id008
+          - type: 'null'
+        reason: *id008
+      required:
+      - command_id
+      - kind
+    Approval:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        task_id: *id009
+        intent_digest: *id008
+        normalized_payload: *id012
+        risk:
+          $ref: '#/components/schemas/RiskClass'
+        expires_at: *id010
+        decision:
+          type: string
+          enum:
+          - pending
+          - approved
+          - rejected
+          - expired
+        version: *id011
+      required:
+      - id
+      - task_id
+      - intent_digest
+      - normalized_payload
+      - risk
+      - expires_at
+      - decision
+      - version
+    ApprovalDecision:
+      type: object
+      additionalProperties: false
+      properties:
+        decision:
+          type: string
+          enum:
+          - approve
+          - reject
+        expected_intent_hash:
+          type: string
+          pattern: ^[0-9a-f]{64}$
+        reason: *id008
+      required:
+      - decision
+      - expected_intent_hash
+    SourceCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        kind:
+          type: string
+          enum:
+          - url
+          - rss
+          - local_document
+          - github_api
+          - arxiv_api
+        locator: *id008
+        allowed_domains:
+          type: array
+          items: *id008
+        fetch_interval_seconds:
+          type: integer
+          minimum: 60
+      required:
+      - kind
+      - locator
+    SourcePatch:
+      type: object
+      additionalProperties: false
+      properties:
+        allowed_domains:
+          type: array
+          items: *id008
+        fetch_interval_seconds:
+          type: integer
+          minimum: 60
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+      required: []
+    Source:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        kind: *id008
+        locator: *id008
+        status: *id008
+        version: *id011
+        latest_source_version_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+        index_status: *id008
+      required:
+      - id
+      - kind
+      - locator
+      - status
+      - version
+      - latest_source_version_id
+      - index_status
+    IngestionCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        source_id: *id009
+      required:
+      - source_id
+    Ingestion:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        source_id: *id009
+        status: *id008
+        source_version_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+        error_code:
+          anyOf:
+          - *id008
+          - type: 'null'
+      required:
+      - id
+      - source_id
+      - status
+      - source_version_id
+      - error_code
+    MemoryCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        claim:
+          type: string
+          minLength: 1
+        kind:
+          type: string
+          enum:
+          - episodic
+          - semantic
+          - procedural
+        source_artifact_ids:
+          type: array
+          items: *id009
+        category:
+          type: string
+          enum:
+          - fact
+          - preference
+          - procedure
+          - episode
+          - project_decision
+      required:
+      - claim
+      - kind
+      - category
+    MemoryPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        claim: *id008
+        action:
+          type: string
+          enum:
+          - confirm
+          - correct
+          - supersede
+      required:
+      - action
+    Memory:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        claim: *id008
+        kind: *id008
+        revision: *id011
+        epistemic_status: *id008
+        provenance: *id012
+        valid_from:
+          anyOf:
+          - *id010
+          - type: 'null'
+        valid_to:
+          anyOf:
+          - *id010
+          - type: 'null'
+        conflict_group:
+          anyOf:
+          - *id009
+          - type: 'null'
+        category:
+          type: string
+      required:
+      - id
+      - claim
+      - kind
+      - revision
+      - epistemic_status
+      - provenance
+      - valid_from
+      - valid_to
+      - conflict_group
+      - category
+    Recommendation:
+      type: object
+      additionalProperties: false
+      properties:
+        source_id: *id009
+        title: *id008
+        score:
+          type: number
+        reasons:
+          type: array
+          items: *id008
+        exploration: *id013
+        propensity:
+          type: number
+          exclusiveMinimum: 0
+          maximum: 1
+      required:
+      - source_id
+      - title
+      - score
+      - reasons
+      - exploration
+      - propensity
+    Recommendations:
+      type: object
+      additionalProperties: false
+      properties:
+        impression_id: *id009
+        profile_version: *id011
+        policy_version: *id008
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Recommendation'
+      required:
+      - impression_id
+      - profile_version
+      - policy_version
+      - items
+    FeedbackCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        event_id: *id009
+        impression_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+        source_id: *id009
+        kind:
+          type: string
+          enum:
+          - click
+          - save
+          - helpful
+          - dwell
+          - hide
+          - unsave
+        dwell_seconds:
+          type: number
+          minimum: 0
+        event_time: *id010
+      required:
+      - event_id
+      - source_id
+      - kind
+      - event_time
+    SkillImport:
+      type: object
+      additionalProperties: false
+      properties:
+        bundle_artifact_id: *id009
+      required:
+      - bundle_artifact_id
+    Skill:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        name: *id008
+        description: *id008
+        versions:
+          type: array
+          items:
+            $ref: '#/components/schemas/SkillManifest'
+      required:
+      - id
+      - name
+      - description
+      - versions
+    SkillEvaluate:
+      type: object
+      additionalProperties: false
+      properties:
+        candidate_version_id: *id009
+        baseline_version_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+        dataset_manifest_id: *id009
+        budget:
+          $ref: '#/components/schemas/BudgetSpec'
+      required:
+      - candidate_version_id
+      - dataset_manifest_id
+      - budget
+    SkillDeploy:
+      type: object
+      additionalProperties: false
+      properties:
+        action:
+          type: string
+          enum:
+          - promote
+          - rollback
+        target_version_id: *id009
+        evaluation_id: *id009
+        expected_previous_version_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+        approval_id: *id009
+        report_sha256: *id008
+      required:
+      - action
+      - target_version_id
+      - evaluation_id
+      - expected_previous_version_id
+      - approval_id
+      - report_sha256
+    WatchCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        purpose: *id008
+        source_ids:
+          type: array
+          items: *id009
+        schedule:
+          type: object
+          additionalProperties: false
+          properties:
+            interval_seconds:
+              type: integer
+              minimum: 300
+            timezone: *id008
+          required:
+          - interval_seconds
+        budget:
+          $ref: '#/components/schemas/BudgetSpec'
+      required:
+      - purpose
+      - source_ids
+      - schedule
+      - budget
+    WatchPatch:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+          - ACTIVE
+          - PAUSED
+        interval_seconds:
+          type: integer
+          minimum: 300
+        expected_source_ids:
+          type: array
+          items: *id009
+      required: []
+    Watch:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        purpose: *id008
+        source_ids:
+          type: array
+          items: *id009
+        schedule: *id012
+        status: *id008
+        version: *id011
+        last_run_at:
+          anyOf:
+          - *id010
+          - type: 'null'
+      required:
+      - id
+      - purpose
+      - source_ids
+      - schedule
+      - status
+      - version
+      - last_run_at
+    EvaluationCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        purpose:
+          type: string
+          enum:
+          - development
+          - validation
+          - release
+        dataset_manifest_id: *id009
+        configuration: *id012
+        budget:
+          $ref: '#/components/schemas/BudgetSpec'
+      required:
+      - purpose
+      - dataset_manifest_id
+      - configuration
+      - budget
+    Evaluation:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        purpose: *id008
+        status: *id008
+        dataset_manifest_sha256: *id008
+        configuration: *id012
+        metrics:
+          anyOf:
+          - *id012
+          - type: 'null'
+        report_artifact_id:
+          anyOf:
+          - *id009
+          - type: 'null'
+      required:
+      - id
+      - purpose
+      - status
+      - dataset_manifest_sha256
+      - configuration
+      - metrics
+      - report_artifact_id
+    ConnectorCreate:
+      type: object
+      additionalProperties: false
+      properties:
+        project_id: *id009
+        connector_key: *id008
+        transport:
+          type: string
+          enum:
+          - stdio
+          - streamable_http
+        manifest: *id012
+        secret_value:
+          type: string
+          writeOnly: true
+      required:
+      - project_id
+      - connector_key
+      - transport
+      - manifest
+    Connector:
+      type: object
+      additionalProperties: false
+      properties:
+        id: *id009
+        project_id: *id009
+        connector_key: *id008
+        transport: *id008
+        review_status: *id008
+        manifest_sha256: *id008
+        secret_configured: *id013
+      required:
+      - id
+      - project_id
+      - connector_key
+      - transport
+      - review_status
+      - manifest_sha256
+      - secret_configured
+    ModelProbeRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        alias: *id008
+        allow_billable_probe:
+          const: true
+        max_cost_micro_usd:
+          type: integer
+          minimum: 1
+      required:
+      - alias
+      - allow_billable_probe
+      - max_cost_micro_usd
+    ProbeResult:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+          - passed
+          - failed
+          - unavailable
+        checks:
+          type: array
+          items: *id012
+        cost:
+          $ref: '#/components/schemas/CostSnapshot'
+      required:
+      - status
+      - checks
+      - cost
+    BootstrapRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        bootstrap_secret:
+          type: string
+          writeOnly: true
+        display_name: *id008
+        passphrase:
+          type: string
+          minLength: 12
+          writeOnly: true
+      required:
+      - bootstrap_secret
+      - display_name
+      - passphrase
+    LoginRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        passphrase:
+          type: string
+          writeOnly: true
+      required:
+      - passphrase
+    Session:
+      type: object
+      additionalProperties: false
+      properties:
+        owner_id: *id009
+        display_name: *id008
+        csrf_token: *id008
+        expires_at: *id010
+      required:
+      - owner_id
+      - display_name
+      - csrf_token
+      - expires_at
+    Health:
+      type: object
+      additionalProperties: false
+      properties:
+        status:
+          type: string
+          enum:
+          - ok
+          - degraded
+          - unavailable
+        dependencies: *id012
+      required:
+      - status
+      - dependencies
+    TaskState:
+      type: string
+      enum:
+      - DRAFT
+      - QUEUED
+      - RUNNING
+      - VERIFYING
+      - WAITING_APPROVAL
+      - PAUSED
+      - NEEDS_REVIEW
+      - SUCCEEDED
+      - FAILED
+      - CANCELLED
+    OperationState:
+      type: string
+      enum:
+      - PREPARED
+      - DISPATCHED
+      - CONFIRMED
+      - FAILED
+      - UNKNOWN
