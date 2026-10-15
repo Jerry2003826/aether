@@ -1,6 +1,6 @@
 # F15 验收与测试
 
-每条验收对应至少一个会真实执行的测试。没有 skip。产品默认仍然关闭。探针安装 npm 上核对过 sha512 的 `@colbymchenry/codegraph@1.6.2` 和 `@colbymchenry/codegraph-linux-x64@1.6.2`。没有执行 `codegraph install`。
+每条验收对应至少一个会真实执行的测试。没有 skip。产品默认仍然关闭。探针安装 npm 上核对过 sha512 的 `@colbymchenry/codegraph@1.6.2` 和 `@colbymchenry/codegraph-linux-x64@1.6.2`。CLI 跑在 `--network none` 的 Debian 容器里。没有执行 `codegraph install`。
 
 | 验收 | 测试 |
 |---|---|

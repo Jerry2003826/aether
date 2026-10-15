@@ -93,7 +93,7 @@ def test_codegraph_release_snapshot_network_and_fallback(binary: Path, tmp_path:
     assert report["graph_status"] == "ready"
     assert report["fallback_status"] == "degraded"
     assert report["vendor_savings_claimed"] is False
-    blocked = adapter.measure_blocked_network(PROJECT, "snap-1", "add")
+    blocked = adapter.measure_blocked_network(PROJECT, "snap-1", "add", probe_host="1.1.1.1")  # NOSONAR
     assert blocked["network_errno"] == 101
     assert blocked["explore_ok"] is True
     assert blocked["telemetry"] == "off"
@@ -115,5 +115,8 @@ def test_codegraph_release_snapshot_network_and_fallback(binary: Path, tmp_path:
     assert secret_search["matches"] == []
     assert all(command[0] != "install" for command in adapter.commands)
     assert all("/etc" not in " ".join(command) and str(Path.home()) not in " ".join(command) for command in adapter.commands)
+    assert adapter.invocations
+    assert all(invocation[invocation.index("--network") + 1] == "none" for invocation in adapter.invocations)
+    assert all("docker.sock" not in " ".join(invocation) for invocation in adapter.invocations)
     adapter.cancel(PROJECT, "snap-1")
     assert not snapshot.exists()

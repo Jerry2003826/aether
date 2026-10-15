@@ -14,8 +14,6 @@ import uuid
 from pathlib import Path
 from typing import Any
 
-from aether_worker.runner import probe_linux_isolation
-
 ROOT = Path(__file__).resolve().parents[3]
 LOCK = json.loads((ROOT / "config" / "codegraph.lock.json").read_text(encoding="utf-8"))
 RELEASE = str(LOCK["version"])
@@ -27,8 +25,8 @@ SYMBOL_KINDS = frozenset({"function", "method", "class", "module", "interface", 
 
 
 class CodeGraphError(Exception):
-    def __init__(self, code: str) -> None:
-        super().__init__(code)
+    def __init__(self, code: str, detail: str = "") -> None:
+        super().__init__(code if not detail else f"{code}: {detail}")
         self.code = code
 
 
@@ -89,7 +87,8 @@ def install_cli(prefix: Path) -> Path:
         env=_npm_env(prefix),
     )
     binary = prefix / "node_modules" / ".bin" / "codegraph"
-    if installed.returncode != 0 or not binary.is_file():
+    launcher = prefix / "node_modules" / "@colbymchenry" / "codegraph-linux-x64" / "bin" / "codegraph"
+    if installed.returncode != 0 or not binary.is_file() or not launcher.is_file():
         raise CodeGraphError("install_failed")
     return binary
 
@@ -164,7 +163,12 @@ class CodeGraphAdapter:
         self.home.mkdir(parents=True, exist_ok=True)
         self.max_files = int(max_files if max_files is not None else LOCK["max_files"])
         self.max_context_chars = int(max_context_chars if max_context_chars is not None else LOCK["max_context_chars"])
+        self.launcher = binary.resolve().parents[1] / "codegraph-linux-x64" / "bin" / "codegraph"
+        self.bundle = self.launcher.parents[1]
+        if not self.launcher.is_file() or not (self.bundle / "node").is_file():
+            raise CodeGraphError("install_failed")
         self.commands: list[list[str]] = []
+        self.invocations: list[list[str]] = []
         self._bound: dict[tuple[str, str], dict[str, Any]] = {}
 
     @property
@@ -176,15 +180,8 @@ class CodeGraphAdapter:
             raise CodeGraphError("owner_confirmation_required")
         raise CodeGraphError("product_disabled")
 
-    def _env(self) -> dict[str, str]:
-        return {
-            "PATH": os.environ.get("PATH", ""),
-            "HOME": str(self.home),
-            "LANG": "C.UTF-8",
-            "CODEGRAPH_TELEMETRY": "0",
-            "DO_NOT_TRACK": "1",
-            "CODEGRAPH_NO_DOWNLOAD": "1",
-        }
+    def _client_env(self) -> dict[str, str]:
+        return {"PATH": os.environ.get("PATH", ""), "HOME": str(self.home)}
 
     def _inside(self, path: Path) -> None:
         resolved = path.resolve()
@@ -192,21 +189,76 @@ class CodeGraphAdapter:
         if resolved != home and home not in resolved.parents:
             raise CodeGraphError("path_escape")
 
-    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
-        if not args or args[0] not in ALLOWED_COMMANDS:
-            raise CodeGraphError("command_rejected")
-        self.commands.append(list(args))
+    def _ensure_image(self) -> None:
+        image = str(LOCK["runner_image"])
+        inspected = subprocess.run(["docker", "image", "inspect", image], capture_output=True, text=True, check=False, timeout=30, env=self._client_env())
+        if inspected.returncode == 0:
+            return
+        pulled = subprocess.run(["docker", "pull", image], capture_output=True, text=True, check=False, timeout=180, env=self._client_env())
+        if pulled.returncode != 0:
+            raise CodeGraphError("runner_image_missing", (pulled.stderr or "")[-200:])
+
+    def _mounts(self, args: list[str]) -> list[Path]:
+        home = self.home.resolve()
+        mounts: list[Path] = []
+        for arg in args:
+            if not arg.startswith("/"):
+                continue
+            candidate = Path(arg)
+            if not candidate.exists():
+                continue
+            resolved = candidate.resolve()
+            directory = resolved if resolved.is_dir() else resolved.parent
+            if directory != home and home not in directory.parents:
+                continue
+            if directory not in mounts:
+                mounts.append(directory)
+        return mounts
+
+    def _docker(self, argv: list[str], mounts: list[tuple[Path, str]]) -> subprocess.CompletedProcess[str]:
+        self._ensure_image()
+        command = [
+            "docker", "run", "--rm",
+            "--network", "none",
+            "--read-only",
+            "--cap-drop", "ALL",
+            "--security-opt", "no-new-privileges",
+            "--pids-limit", "64",
+            "--user", f"{os.getuid()}:{os.getgid()}",
+            "--tmpfs", "/run/aether:rw,nosuid,nodev,mode=0700",
+            "-e", "HOME=/run/aether",
+            "-e", "PATH=/usr/bin:/bin",
+            "-e", "LANG=C.UTF-8",
+            "-e", "CODEGRAPH_TELEMETRY=0",
+            "-e", "DO_NOT_TRACK=1",
+            "-e", "CODEGRAPH_NO_DOWNLOAD=1",
+            "-e", "NO_COLOR=1",
+        ]
+        for path, mode in mounts:
+            if mode not in {"ro", "rw"} or "docker.sock" in path.as_posix():
+                raise CodeGraphError("socket_mount_rejected")
+            command.extend(["-v", f"{path}:{path}:{mode}"])
+        command.append(str(LOCK["runner_image"]))
+        command.extend(argv)
+        self.invocations.append(command)
         completed = subprocess.run(
-            ["unshare", "--user", "--map-root-user", "--net", str(self.binary), *args],
+            command,
             capture_output=True,
             text=True,
             check=False,
             timeout=int(LOCK["max_wall_seconds"]),
-            env=self._env(),
+            env=self._client_env(),
         )
         if len(completed.stdout) > 1_000_000:
             raise CodeGraphError("output_limit")
         return completed
+
+    def _run(self, args: list[str]) -> subprocess.CompletedProcess[str]:
+        if not args or args[0] not in ALLOWED_COMMANDS:
+            raise CodeGraphError("command_rejected")
+        self.commands.append(list(args))
+        mounts = [(self.bundle, "ro"), *[(path, "rw") for path in self._mounts(args)]]
+        return self._docker([str(self.launcher), *args], mounts)
 
     def _copy_snapshot(self, source: Path, destination: Path) -> None:
         copied = 0
@@ -280,12 +332,13 @@ class CodeGraphAdapter:
         help_text = self._run(["--help"])
         telemetry = self._run(["telemetry", "status"])
         visible = ("explore", "impact", "affected")
-        if version.returncode != 0 or version.stdout.strip() != RELEASE:
-            raise CodeGraphError("release_mismatch")
+        version_line = version.stdout.strip().splitlines()[-1].strip() if version.stdout.strip() else ""
+        if version.returncode != 0 or version_line != RELEASE:
+            raise CodeGraphError("release_mismatch", (version.stderr or version.stdout)[-300:])
         if help_text.returncode != 0 or any(name not in help_text.stdout for name in visible):
-            raise CodeGraphError("schema_mismatch")
+            raise CodeGraphError("schema_mismatch", (help_text.stderr or "")[-300:])
         if "Telemetry: disabled" not in telemetry.stdout:
-            raise CodeGraphError("telemetry_enabled")
+            raise CodeGraphError("telemetry_enabled", (telemetry.stderr or telemetry.stdout)[-300:])
         return {"version": RELEASE, "telemetry": "off", "model_tools": ["codegraph_explore"]}
 
     def index(self, project_id: str, snapshot_id: str) -> dict[str, Any]:
@@ -294,7 +347,7 @@ class CodeGraphAdapter:
         completed = self._run(["init", "-y", str(record["path"])])
         elapsed = time.perf_counter() - started
         if completed.returncode != 0:
-            raise CodeGraphError("index_failed")
+            raise CodeGraphError("index_failed", (completed.stderr or completed.stdout)[-300:])
         record["indexed"] = True
         record["cold_index_seconds"] = elapsed
         return {"cold_index_seconds": elapsed, "telemetry": "off", "cache_key": record["cache_key"]}
@@ -308,7 +361,8 @@ class CodeGraphAdapter:
         explored = self._run(["explore", "--path", str(record["path"]), "--max-files", "2", query])
         listed = self._run(["query", "--path", str(record["path"]), "--json", "--limit", "20", query])
         if explored.returncode != 0 or listed.returncode != 0:
-            raise CodeGraphError("explore_failed")
+            detail = explored.stderr or listed.stderr or explored.stdout or listed.stdout
+            raise CodeGraphError("explore_failed", detail[-300:])
         try:
             rows = json.loads(listed.stdout)
         except json.JSONDecodeError as exc:
@@ -330,7 +384,7 @@ class CodeGraphAdapter:
             raise CodeGraphError("not_indexed")
         completed = self._run(["impact", "--path", str(record["path"]), "--json", symbol])
         if completed.returncode != 0:
-            raise CodeGraphError("impact_failed")
+            raise CodeGraphError("impact_failed", (completed.stderr or completed.stdout)[-300:])
         try:
             body = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -346,7 +400,7 @@ class CodeGraphAdapter:
             raise CodeGraphError("not_indexed")
         completed = self._run(["affected", "--path", str(record["path"]), "--json", filename])
         if completed.returncode != 0:
-            raise CodeGraphError("affected_failed")
+            raise CodeGraphError("affected_failed", (completed.stderr or completed.stdout)[-300:])
         try:
             body = json.loads(completed.stdout)
         except json.JSONDecodeError as exc:
@@ -393,14 +447,30 @@ class CodeGraphAdapter:
             "vendor_savings_claimed": False,
         }
 
-    def measure_blocked_network(self, project_id: str, snapshot_id: str, query: str) -> dict[str, Any]:
+    def measure_blocked_network(self, project_id: str, snapshot_id: str, query: str, *, probe_host: str) -> dict[str, Any]:
         self._record(project_id, snapshot_id)
-        report = probe_linux_isolation(self.home / "net-probe")
-        if report.get("status") != "probed":
-            raise CodeGraphError("network_probe_failed")
+        if not probe_host or probe_host.startswith("-") or any(char.isspace() for char in probe_host):
+            raise CodeGraphError("bad_probe")
+        script = (
+            "const net=require('net');"
+            "const socket=net.connect(443, process.argv[1]);"
+            "socket.setTimeout(2000);"
+            "const done=(payload)=>{process.stdout.write(JSON.stringify(payload));process.exit(0)};"
+            "socket.on('error',(error)=>done({errno:error.errno,code:error.code}));"
+            "socket.on('timeout',()=>done({errno:'timeout'}));"
+        )
+        probed = self._docker([str(self.bundle / "node"), "--liftoff-only", "-e", script, probe_host], [(self.bundle, "ro")])
+        if probed.returncode != 0:
+            raise CodeGraphError("network_probe_failed", (probed.stderr or probed.stdout)[-300:])
+        try:
+            payload = json.loads(probed.stdout.strip().splitlines()[-1])
+        except json.JSONDecodeError as exc:
+            raise CodeGraphError("network_probe_failed") from exc
+        errno = payload.get("errno")
+        number = abs(errno) if isinstance(errno, int) else 0
         found = self.explore(project_id, snapshot_id, query)
         return {
-            "network_errno": report["network_errno"],
+            "network_errno": number,
             "explore_ok": found["index_status"] == "ready" and query in str(found["context_text"]),
             "telemetry": "off",
         }
