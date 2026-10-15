@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F15 CodeGraph adapter. Do not mark it done unless the release probe, snapshot hash, and network block are real.",
+  "next_action": "F14 is in_progress until the sandbox grader fix is green on PR CI and SonarCloud. F15 waits.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
@@ -84,7 +84,8 @@
     "openhands_live_model": "not_run"
   },
   "f14": {
-    "status": "done",
-    "ci_run": "38677249818"
+    "status": "in_progress",
+    "ci_run": "38677249818",
+    "reopened": "grade must use the bound suite inside the sandbox"
   }
 }

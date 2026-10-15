@@ -126,3 +126,63 @@ def test_memory_statuses_stay_separate_and_conflicts_do_not_overwrite(client, ro
     apply_memory_commands(database, store, owner_id=owner_id, project_id=project_id)
     final = client.get(f"/v1/projects/{project_id}/memories").json()["items"]
     assert all("密钥" not in item["claim"] for item in final)
+
+
+def test_observed_test_requires_a_project_test_run_artifact(client, role_urls, tmp_path) -> None:
+    owner_id, project_id, headers = _session(client)
+    database = Database(role_urls["aether_worker"])
+    store = ArtifactStore(tmp_path / "artifacts", database)
+    note = store.put(owner_id=owner_id, project_id=project_id, data=b"just a note", media_type="text/plain")
+    other = client.post("/v1/projects", headers={**headers, "Idempotency-Key": "memory-test-run-other"}, json={"name": "另一个"})
+    assert other.status_code == 201, other.text
+    foreign = store.put(
+        owner_id=owner_id,
+        project_id=other.json()["id"],
+        data=json.dumps({"kind": "test_run"}).encode(),
+        media_type="application/json",
+    )
+    report = store.put(
+        owner_id=owner_id,
+        project_id=project_id,
+        data=json.dumps({"kind": "test_run", "passed": True}).encode(),
+        media_type="application/json",
+    )
+    plain_id = remember(
+        database,
+        store,
+        owner_id=owner_id,
+        project_id=project_id,
+        claim="普通文件不是测试记录",
+        kind="semantic",
+        category="fact",
+        requested_status="observed_test",
+        test_run_artifact_id=str(note["artifact_id"]),
+    )
+    foreign_id = remember(
+        database,
+        store,
+        owner_id=owner_id,
+        project_id=project_id,
+        claim="别的项目的测试记录不算",
+        kind="semantic",
+        category="fact",
+        requested_status="observed_test",
+        test_run_artifact_id=str(foreign["artifact_id"]),
+    )
+    verified_id = remember(
+        database,
+        store,
+        owner_id=owner_id,
+        project_id=project_id,
+        claim="这次测试运行记录了结果",
+        kind="semantic",
+        category="fact",
+        requested_status="observed_test",
+        test_run_artifact_id=str(report["artifact_id"]),
+    )
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        rows = conn.execute(text("SELECT id::text, epistemic_status FROM memories")).all()
+    statuses = {item[0]: item[1] for item in rows}
+    assert statuses[plain_id] == "proposed"
+    assert statuses[foreign_id] == "proposed"
+    assert statuses[verified_id] == "observed_test"

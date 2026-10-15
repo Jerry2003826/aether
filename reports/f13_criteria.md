@@ -1,6 +1,6 @@
 # F13 验收与测试
 
-每条验收对应至少一个会真实执行的测试。没有 skip。Docker 没有安装，报告里是 `not_supported`，没有写成支持。OpenHands 只构造了指向网关的 LLM，没有调用 live 模型，也没有创建容器。
+每条验收对应至少一个会真实执行的测试。没有 skip。PR #1 的 CI 在带 Docker 的 GitHub runner 上跑过容器：同一个 job 只有一个容器，重启后重新挂上；容器内公网、云元数据和 Docker socket 不可达，密钥不在环境里，只能访问该 job 的脚本网关。OpenHands 只构造了指向网关的 LLM，没有 live 模型调用。
 
 | 验收 | 测试 |
 |---|---|

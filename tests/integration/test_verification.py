@@ -10,15 +10,35 @@ from sqlalchemy.exc import DBAPIError
 
 from aether_storage.db import Database
 from aether_worker.runner import LinuxRunner, _docker, _job_label, docker_available, release_containers
-from aether_worker.verification import accept_actor_verdict, export_candidate, grade, prepare_workspace
+from aether_worker.verification import accept_actor_verdict, export_candidate, grade, text_sha256
 from reference.models import ArtifactRef, CodingJobRequest
 
 
-def _tree(root: Path, passing: bool) -> None:
+def _candidate(root: Path, value: int, *, conftest: bool = False) -> None:
     root.mkdir(parents=True)
-    (root / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
-    body = "def test_value():\n    assert True\n" if passing else "def test_value():\n    assert False\n"
-    (root / "test_app.py").write_text(body, encoding="utf-8")
+    (root / "app.py").write_text(f"VALUE = {value}\n", encoding="utf-8")
+    (root / "test_app.py").write_text("def test_x():\n    pass\n", encoding="utf-8")
+    if conftest:
+        (root / "conftest.py").write_text(
+            "def pytest_sessionfinish(session, exitstatus):\n    session.exitstatus = 0\n",
+            encoding="utf-8",
+        )
+
+
+def _suite(root: Path) -> None:
+    root.mkdir(parents=True)
+    (root / "test_bound.py").write_text("import app\n\ndef test_value():\n    assert app.VALUE == 1\n", encoding="utf-8")
+
+
+def _grade(candidate: Path, suite: Path, contract: str = "合同：VALUE 必须是 1", **overrides: str):
+    bound = {
+        "suite_sha256": export_candidate(suite)["candidate_sha256"],
+        "contract_text": contract,
+        "contract_sha256": text_sha256(contract),
+        "candidate_sha256": export_candidate(candidate)["candidate_sha256"],
+    }
+    bound.update(overrides)
+    return grade(candidate, suite, **bound)
 
 
 def _request() -> CodingJobRequest:
@@ -35,45 +55,97 @@ def _request() -> CodingJobRequest:
 
 
 def test_changed_candidate_invalidates_the_previous_pass(tmp_path: Path) -> None:
-    source = tmp_path / "candidate"
-    _tree(source, passing=True)
-    exported = export_candidate(source)
-    workspace = tmp_path / "workspace"
-    prepare_workspace(source, workspace)
-    suite = "a" * 64
-    contract = "b" * 64
-    first = grade(workspace, suite_sha256=suite, contract_sha256=contract, candidate_sha256=exported["candidate_sha256"])
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 1)
+    _suite(suite)
+    first = _grade(candidate, suite)
     assert first["verdict"] == "PASS"
-    (source / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
-    changed = export_candidate(source)
-    assert changed["candidate_sha256"] != exported["candidate_sha256"]
-    prepare_workspace(source, workspace)
-    second = grade(workspace, suite_sha256=suite, contract_sha256=contract, candidate_sha256=exported["candidate_sha256"])
+    (candidate / "app.py").write_text("VALUE = 2\n", encoding="utf-8")
+    second = _grade(candidate, suite, candidate_sha256=first["candidate_sha256"])
     assert second["verdict"] == "FAIL"
     ignored = accept_actor_verdict("PASS", second)
     assert ignored["verdict"] == "FAIL"
     assert "actor" in ignored["reason"]
 
 
-def test_empty_skipped_and_forged_junit_do_not_pass(tmp_path: Path) -> None:
+def test_candidate_vacuous_tests_fail(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 0)
+    _suite(suite)
+    graded = _grade(candidate, suite)
+    assert graded["verdict"] == "FAIL"
+
+
+def test_candidate_conftest_cannot_rewrite_the_report(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 0, conftest=True)
+    _suite(suite)
+    graded = _grade(candidate, suite)
+    assert graded["verdict"] == "FAIL"
+
+
+def test_suite_or_contract_hash_mismatch_fails(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 1)
+    _suite(suite)
+    suite_mismatch = _grade(candidate, suite, suite_sha256="a" * 64)
+    contract_mismatch = _grade(candidate, suite, contract_sha256="b" * 64)
+    assert suite_mismatch["verdict"] == "FAIL"
+    assert suite_mismatch["reason"] == "套件哈希不一致"
+    assert contract_mismatch["verdict"] == "FAIL"
+    assert contract_mismatch["reason"] == "合同哈希不一致"
+
+
+def test_grader_cannot_read_host_files_or_credentials(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    sentinel = tmp_path / "host-only-secret"
+    sentinel.write_text("HOST_SECRET", encoding="utf-8")
+    monkeypatch.setenv("AETHER_PROVIDER_KEY", "provider-secret-should-not-leak")
+    monkeypatch.setenv("AETHER_ADMIN_DATABASE_URL", "postgresql://postgres:admin-secret@127.0.0.1/postgres")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 1)
+    _suite(suite)
+    graded = grade(
+        candidate,
+        suite,
+        suite_sha256=export_candidate(suite)["candidate_sha256"],
+        contract_text="合同：VALUE 必须是 1",
+        contract_sha256=text_sha256("合同：VALUE 必须是 1"),
+        candidate_sha256=export_candidate(candidate)["candidate_sha256"],
+        host_sentinel=sentinel,
+    )
+    assert graded["sentinel_visible"] is False
+    assert graded["credential_present"] is False
+    assert "HOST_SECRET" not in graded["reason"]
+    assert "provider-secret-should-not-leak" not in graded["reason"]
+    assert "admin-secret" not in graded["reason"]
+
+
+def test_empty_or_skipped_suite_does_not_pass(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    _candidate(candidate, 1)
     empty = tmp_path / "empty"
     empty.mkdir()
     (empty / "readme.txt").write_text("no tests\n", encoding="utf-8")
-    empty_export = export_candidate(empty)
-    empty_grade = grade(empty, suite_sha256="a" * 64, contract_sha256="b" * 64, candidate_sha256=empty_export["candidate_sha256"])
-    assert empty_grade["verdict"] == "FAIL"
+    assert _grade(candidate, empty)["verdict"] == "FAIL"
     skipped = tmp_path / "skipped"
     skipped.mkdir()
     (skipped / "test_skip.py").write_text("import pytest\n\n@pytest.mark.skip(reason='all')\ndef test_skip():\n    assert False\n", encoding="utf-8")
-    skipped_export = export_candidate(skipped)
-    skipped_grade = grade(skipped, suite_sha256="a" * 64, contract_sha256="b" * 64, candidate_sha256=skipped_export["candidate_sha256"])
-    assert skipped_grade["verdict"] == "FAIL"
-    forged = tmp_path / "forged"
-    _tree(forged, passing=False)
-    (forged / "junit.xml").write_text('<testsuite tests="1" failures="0" errors="0"></testsuite>\n', encoding="utf-8")
-    forged_export = export_candidate(forged)
-    forged_grade = grade(forged, suite_sha256="a" * 64, contract_sha256="b" * 64, candidate_sha256=forged_export["candidate_sha256"])
-    assert forged_grade["verdict"] == "FAIL"
+    assert _grade(candidate, skipped)["verdict"] == "FAIL"
 
 
 def test_actor_cannot_write_verification_results(role_urls: dict[str, str]) -> None:

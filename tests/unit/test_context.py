@@ -12,15 +12,8 @@ def test_confirmation_is_not_a_create_status() -> None:
     assert classify_memory(claim="发布日：十月", source_artifact_ids=["11111111-1111-1111-1111-111111111111"]) == "source_claim"
     assert classify_memory(claim="发布日：十月", source_artifact_ids=[]) == "proposed"
     assert classify_memory(claim="测试通过了", source_artifact_ids=[], requested="observed_test") == "proposed"
-    assert (
-        classify_memory(
-            claim="测试通过了",
-            source_artifact_ids=[],
-            requested="observed_test",
-            test_run_artifact_id="22222222-2222-2222-2222-222222222222",
-        )
-        == "observed_test"
-    )
+    assert classify_memory(claim="测试通过了", source_artifact_ids=[], requested="observed_test", test_run_verified=False) == "proposed"
+    assert classify_memory(claim="测试通过了", source_artifact_ids=[], requested="observed_test", test_run_verified=True) == "observed_test"
 
 
 def test_context_budget_drops_history_and_unauthorized_text() -> None:

@@ -8,7 +8,7 @@ from typing import Any
 
 from sqlalchemy import text
 
-from aether_storage.artifacts import ArtifactStore
+from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
 
 STATUSES = {"proposed", "source_claim", "user_confirmed", "observed_test", "inference", "superseded"}
@@ -28,7 +28,7 @@ def classify_memory(
     claim: str,
     source_artifact_ids: list[str],
     requested: str | None = None,
-    test_run_artifact_id: str | None = None,
+    test_run_verified: bool = False,
 ) -> str:
     """User input cannot declare itself confirmed. Sources become source claims."""
     if _blocked_claim(claim):
@@ -38,12 +38,34 @@ def classify_memory(
     if requested == "inference":
         return "inference"
     if requested == "observed_test":
-        if test_run_artifact_id:
+        if test_run_verified:
             return "observed_test"
         return "proposed"
     if source_artifact_ids:
         return "source_claim"
     return "proposed"
+
+
+def _is_project_test_run(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, artifact_id: object) -> bool:
+    if not artifact_id:
+        return False
+    row = conn.execute(
+        text("SELECT media_type FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+        {"project_id": project_id, "id": str(artifact_id)},
+    ).mappings().first()
+    if row is None or row["media_type"] != "application/json":
+        return False
+    try:
+        data, media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(artifact_id))
+    except ArtifactError:
+        return False
+    if media != "application/json":
+        return False
+    try:
+        body = json.loads(data.decode())
+    except (UnicodeError, json.JSONDecodeError):
+        return False
+    return isinstance(body, dict) and body.get("kind") == "test_run"
 
 
 def _blocked_claim(claim: str) -> bool:
@@ -163,6 +185,7 @@ def remember(
     category: str,
     source_artifact_ids: list[str] | None = None,
     requested_status: str | None = None,
+    test_run_artifact_id: str | None = None,
     sensitivity: str = "standard",
 ) -> str:
     """Record one memory directly. Callers cannot pass user_confirmed."""
@@ -176,6 +199,7 @@ def remember(
         "source_artifact_ids": source_artifact_ids or [],
         "requested_status": requested_status,
         "sensitivity": sensitivity,
+        "test_run_artifact_id": test_run_artifact_id,
     }
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         _create(conn, store, owner_id=owner_id, project_id=project_id, payload=payload)
@@ -246,19 +270,11 @@ def _create(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, 
         ).first()
         if found is None:
             raise MemoryError("source_rejected")
-    test_run = payload.get("test_run_artifact_id")
-    if test_run:
-        found = conn.execute(
-            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
-            {"project_id": project_id, "id": str(test_run)},
-        ).first()
-        if found is None:
-            test_run = None
     status = classify_memory(
         claim=claim,
         source_artifact_ids=sources,
         requested=payload.get("requested_status"),
-        test_run_artifact_id=None if test_run is None else str(test_run),
+        test_run_verified=_is_project_test_run(conn, store, owner_id=owner_id, project_id=project_id, artifact_id=payload.get("test_run_artifact_id")),
     )
     existing = conn.execute(
         text(
