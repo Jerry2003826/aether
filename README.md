@@ -1,30 +1,214 @@
-# AETHER V1.4 · 开工冻结版
+# AETHER V1.4
 
-**这是主方案的统一施工包，不是另一份补丁，也不是已经跑通的完整应用。**
-主干延续 AETHER V1–V1.2；V1.3 与 DeepSeek 只补强边界、测试和供应链。
+AETHER 是本地/私有部署、面向一个所有者的可持续工作 Agent 工作台。用户可以让它研究资料、修改授权代码仓库、跟踪明确主题；能看见实际过程、审批、成本、证据、失败与恢复。经验以可删除记忆和经过评测的技能保留下来。
 
-## 交给 Codex
-新项目：把本包解压到空项目根目录，在此目录打开 Codex，发送 `CODEX_START.md`。
-已有代码：把本包放在独立临时目录，按 `docs/16_MERGE_EXISTING.md` 合并；不要覆盖已有代码、迁移、锁文件或进度。
+V1 的初始发布是单账户、多项目。研究资料、搜索索引、偏好和执行记录由本机控制。它以技术资料研究为主要知识场景，并可在隔离环境执行代码任务。是否优于 Hermes 留给对照实验。完整定义见 [`docs/00_FREEZE.md`](docs/00_FREEZE.md)、[`docs/01_product.md`](docs/01_product.md) 和阅读版 [`MASTER_SPEC.md`](MASTER_SPEC.md)。
 
-## 从哪里读
-- `docs/00_FREEZE.md`：最终裁决、开工范围、非目标。
-- `MASTER_SPEC.md`：完整阅读版；各 docs 章节是维护源，更新后重新生成。
-- `docs/03_repository_map.md`：仓库、取用部分、边界和适配器位置。
-- `tasks/backlog.yaml`：唯一施工队列。
-- `tasks/legacy_mapping.yaml`：V1.2 的73项和V1.3的13项旧任务逐条归并/延期记录。
-- `contracts/`、`reference/`、`fixtures/`：接口/数据合同和非生产参考代码。
-- `reports/PACK_VALIDATION.md`：本次实际执行的包检查，明确尚未完成的集成。
+当前交付矩阵以 [`STATUS.json`](STATUS.json) 为准（`as_of` 2026-10-15，`main` 合并提交 `8eade30`）。
 
-## 范围
-先做可恢复、可授权、可验收的 Agent 内核；随后在同一内核上完成研究、编码、记忆、MCP、跟踪推荐和技能实验。
-默认原生记忆、静态抓取、Playwright、OpenHands；不安装几个同类平台让 Codex 再选。
-CodeGraph 是计划实施的增强能力：独立启用门、失败可降级。没有它仍必须能编程。
+## 架构
 
-## 现在可运行的仅是包检查
-```bash
-python scripts/verify_freeze.py
-python -m unittest discover -s tests -p 'test_*.py' -v
+控制面是一个 Python 单体仓库。API、领域模块和 worker 共用源码，按进程、数据库角色和网络分权。权威划分：
+
+| 状态 | 权威 |
+|---|---|
+| 执行进度、DAG、等待、取消、重试 | Temporal Workflow history |
+| 目标、合同、权限、审批、成本账本、知识版本 | PostgreSQL |
+| 某次外部操作是否发生 | 外部系统与 operation ledger 的对账 |
+| 字节产物 | 按项目隔离的内容寻址 ArtifactStore |
+| 编码会话内的临时执行 | 有界 OpenHands job |
+
+逻辑分层：
+
+```text
+Next.js 控制台 ── HTTPS / REST / SSE
+FastAPI API ── PostgreSQL（领域、命令、操作、投影）
+        │ durable command outbox
+Temporal ── Task / Research / Watch / SkillEvaluation workflow
+        │ activities（全部非确定性 I/O）
+Worker
+  ├─ 有界 typed turn loop 与 DAG
+  ├─ BM25S 快照 + pgvector + BGE-M3 / BGE reranker
+  ├─ 可信网关（模型、已批准工具、成本与能力）
+  ├─ Runner：隔离的 OpenHands 编码作业
+  │    └─ CodeGraph：已启用的只读仓库图谱，限定在获准快照内
+  └─ 独立验证器
 ```
-需要 Python 3.11+、Pydantic 2 和 PyYAML；这些是检查器依赖，不是应用的生产锁文件。
-应用初始化/Compose/模型探针由 Codex 按 F00 起实现。`archive/` 中旧资料不参与任务自动发现。
+
+Workflow 代码不做网络、数据库或文件系统 I/O。副作用走 activities 和可信服务。模型适配只使用网关里的 LiteLLM。UI 经 REST 与可重放的 SSE 访问 API，直接调用模型、OpenHands Agent Server 或 Temporal 管理接口不在这条路径上。目录和接口见 [`docs/02_architecture.md`](docs/02_architecture.md)、[`docs/03_repository_map.md`](docs/03_repository_map.md)。
+
+## 安全模型
+
+细则在 [`docs/06_security.md`](docs/06_security.md)、[`docs/09_data.md`](docs/09_data.md)、[`docs/04_execution.md`](docs/04_execution.md) 和 [`docs/DECISIONS.md`](docs/DECISIONS.md)。
+
+### 单所有者
+
+V1 只建立一个所有者。数据库约束 `one_owner_v1` 使第二次创建所有者失败。启动绑定 loopback，经本机一次性 enrollment 登录，没有默认公开密码。会话使用 HttpOnly、SameSite cookie；改变状态的请求核对 CSRF 与 Origin。`/v1/admin/*` 依赖这个单所有者不变量：已登录会话就是该所有者。非 loopback 绑定同时要求 `AETHER_ALLOW_NON_LOOPBACK=1`、`AETHER_COOKIE_SECURE=1`，以及 TLS 证书和私钥文件，否则进程拒绝启动。
+
+### 数据库行级隔离
+
+业务表带 `project_id`，引用使用 `(project_id, id)` 复合外键。应用层鉴权与 PostgreSQL 行级安全同时生效。每个事务用 `set_config('aether.owner_id', ..., true)` 和 `set_config('aether.project_id', ..., true)` 设置范围，第三个参数使设置只在当前事务有效。`aether_api`、`aether_worker`、`aether_verifier`、`aether_dispatcher` 都是 `NOSUPERUSER NOBYPASSRLS`。`packages/storage/aether_storage/db.py` 的 `Database` 使用 SQLAlchemy `NullPool`：每个事务单独连接，提交或回滚后关闭，避免连接池把上一个 owner 或 project 留在同一条物理连接上。API 角色不能写验证结果、技能评测和任务的最终成功状态。
+
+### 离线容器评分器
+
+独立验证器核对不可变合同、候选清单哈希和可信套件哈希，然后在新的评分容器里只跑绑定套件。容器是 `aether-grader:local`，运行参数包含 `--network none`、`--read-only`、`no-new-privileges` 和 pid 限制；工作目录以只读方式挂入。评分进程使用 `python -I`。子进程先导入 pytest，再把 `/work/src` 加到 `sys.path` 末尾。pytest 返回后把通过数和退出码写进父进程事先打开的管道，然后 `os._exit`。父进程只认这根管道。容器标准输出里的隔离结果以评分器写出的第一行为准。候选顶层的 `pytest.py` 和 `sitecustomize.py` 直接失败。Actor 不能写 `verification_results`，也不能用自己的日志充当通过。
+
+### 删除是 tombstone
+
+删除先写 tombstone，并增加项目的 `visibility_epoch`。BM25 generation 退休，已删 chunk 的向量被清空，推荐特征快照记为失效。搜索缓存同时绑定 visibility epoch 和索引代。晚到的向量和记忆文本写入必须看见同一个 epoch，而且该行还没有 `deleted_at`。这次删除不清除备份和 Temporal 历史。见 ADR-F16。
+
+## 安装与运行
+
+控制面是 Python 3.13，前端是 Node 24，依赖服务是 PostgreSQL 17（pgvector）和 Temporal。版本与镜像摘要在 `uv.lock`、`apps/web/pnpm-lock.yaml` 和 [`infra/compose.yaml`](infra/compose.yaml)。
+
+```sh
+uv sync --locked --no-build
+```
+
+Compose 只发布到 `127.0.0.1`。其中的 Temporal 命令是 `server start-dev`，用于开发；发布要用持久服务配置，见 [`docs/10_operations.md`](docs/10_operations.md)。
+
+```sh
+export AETHER_POSTGRES_USER=aether
+export AETHER_POSTGRES_PASSWORD='生成本机口令，不要写入仓库'
+docker compose -f infra/compose.yaml up
+```
+
+库和角色由 `aether_storage.bootstrap.ensure_database` 创建。它生成四个角色的口令并返回连接串，口令不进 Git。下面这条会把带口令的 URL 打到终端，用完即从终端记录中去掉：
+
+```sh
+export AETHER_ADMIN_DATABASE_URL='postgresql://postgres:口令@127.0.0.1:5432/postgres'
+uv run --locked --no-build python -c 'import json, os; from aether_storage.bootstrap import ensure_database; print(json.dumps(ensure_database(os.environ["AETHER_ADMIN_DATABASE_URL"]), indent=2))'
+```
+
+把返回的 `aether_api` URL 设为 `AETHER_DATABASE_URL`。产品配置名见 [`.env.example`](.env.example)，示例里的值是空的：
+
+| 变量 | 作用 |
+|---|---|
+| `AETHER_BIND_HOST` | API 绑定地址，默认 `127.0.0.1` |
+| `AETHER_DATABASE_URL` | API 使用的 `aether_api` 连接串 |
+| `AETHER_ADMIN_DATABASE_URL` | 建库、`doctor` 和集成测试用的管理员连接串 |
+| `AETHER_TEMPORAL_ADDRESS` | 例如 `127.0.0.1:7233` |
+| `AETHER_ARTIFACT_ROOT` | 产物目录，默认 `data/artifacts` |
+| `AETHER_BOOTSTRAP_PATH` | 引导文件，默认 `secrets/bootstrap.json`，必须留在 `secrets/` |
+| `AETHER_ALLOW_LIVE` | 示例里是 `false` |
+| `AETHER_MODEL_API_KEY` | [`config/models.example.yaml`](config/models.example.yaml) 指向的供应商密钥环境变量名 |
+
+Live 探针和 F26 验收另认三个变量，缺任何一个就记 `blocked`：
+
+```sh
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+```
+
+上面是 DeepSeek 的 OpenAI 兼容根地址和模型名。密钥、数据库口令和引导明文只留在本机。`.env`、`secrets/` 已被忽略；不要把它们提交进 Git，也不要写入日志或结果 JSON。
+
+API 默认监听 `127.0.0.1:8000`：
+
+```sh
+uv run --locked --no-build python -m aether_api.main
+```
+
+引导密钥由 `issue_bootstrap_secret` 写入 `secrets/bootstrap.json`（文件里是哈希）。终端只显示一次明文。随后向 loopback 的 `POST /v1/auth/bootstrap` 提交 `bootstrap_secret`、`display_name` 和至少 12 个字符的 `passphrase`。
+
+```sh
+uv run --locked --no-build python -c 'from pathlib import Path; from aether_api.auth_service import issue_bootstrap_secret; print(issue_bootstrap_secret(Path("secrets/bootstrap.json")))'
+```
+
+控制台：
+
+```sh
+corepack enable
+corepack prepare pnpm@10.18.2 --activate
+cd apps/web
+pnpm install --frozen-lockfile
+pnpm dev
+```
+
+`pnpm dev` 绑定 `127.0.0.1:3000`。`AETHER_API_BASE` 与 `NEXT_PUBLIC_AETHER_API_BASE` 默认 `http://127.0.0.1:8000`。
+
+依赖探针：
+
+```sh
+uv run --locked --no-build python scripts/doctor.py --require-services
+```
+
+## 测试
+
+单元测试不要求数据库。集成测试要求 `AETHER_REQUIRE_SERVICES=1`，并设置 `AETHER_ADMIN_DATABASE_URL` 与 `AETHER_TEMPORAL_ADDRESS`。CI 使用与下面相同的锁定解释器：
+
+```sh
+uv run --locked --no-build pytest -q tests/unit
+AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration
+```
+
+Makefile 里已有的目标：`check-pack`、`test-reference`、`doctor`、`test-unit`、`test-integration`、`test-security`、`acceptance-report`、`demo-live`。`make backup` 和 `make restore` 只打印所需参数，不执行备份或恢复。`make demo-live` 跑的是短探针 `scripts/run_f26_live.py`，短探针的 `probed` 不是完整验收。
+
+### `scripts/run_f26_acceptance.py`
+
+完整 live 验收需要本机 Docker、uv，以及两个独立环境。OpenHands 四个包钉在 1.54.0。ML 环境提供 `FlagEmbedding`，第一次会下载 `BAAI/bge-m3`（revision `5617a9f61b028005a4858fdac845db406aefb181`）。独立测试和网络隔离使用 `python:3.12-alpine`。
+
+```sh
+cd environments/openhands && uv sync --frozen
+cd ../ml && uv sync --frozen
+docker pull python:3.12-alpine
+cd ../..
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 为 0，`failed` 为 1，`blocked` 为 2，`incomplete` 为 3。硬上限是 8 次补全、累计 20000 token、单次输出最多 512 token。供应商没有返回费用时 `cost_status` 为 `unknown`。验收步骤、引用规则和已记录结果见 [`reports/f26_criteria.md`](reports/f26_criteria.md)。
+
+## 当前状态
+
+F00–F27 的 `status` 都是 `done`。`readiness`：
+
+| 项 | 值 |
+|---|---|
+| `kernel_engineering` | `passed` |
+| `product_engineering` | `passed` |
+| `live_ready` | `passed` |
+| `codegraph_enabled` | `passed` |
+| `comparative_evidence` | `not_run` |
+
+`f27` 对象里仍留着该任务关闭时写入的 `live_ready: false` 和 `codegraph_enabled: false`。当前结论看上表的 `readiness`。
+
+F26 在 `cb22fbc` 上由 `scripts/run_f26_acceptance.py` 跑通，退出码 0，`status=probed`。协议、现场 BGE 混合检索、OpenHands 补丁和 Linux 隔离都通过。比较报告 488 token。`semantic_support` 仍是 `not_judged`：引用写齐不等于已经判断比较内容成立。`cost_status` 仍是 `unknown`。结果文件 [`reports/f26_acceptance_result.json`](reports/f26_acceptance_result.json) 里的 `live_ready` 仍是 `false`，脚本不自证；交付矩阵按产品工程加 F26 记为 `passed`。
+
+CodeGraph 已启用。所有者打开的是已安装锁 [`config/codegraph.lock.json`](config/codegraph.lock.json)（`product_enabled: true`，CLI `@colbymchenry/codegraph@1.6.2`）。[`config/codegraph.example.yaml`](config/codegraph.example.yaml) 和 `config/feature_matrix.yaml` 仍然关闭，新检出不会自动打开。证据在 [`reports/f15_product_result.json`](reports/f15_product_result.json)：`status` 为 `passed`，索引 162 个文件、2674 个节点、7081 条边，库 8892416 字节，冷索引约 2.00 秒，状态 `complete`。调用关系与 AST 一致，改快照后查询返回 `stale_snapshot`，容器带 `--network none`，遥测关闭。复现命令见 [`reports/f15_criteria.md`](reports/f15_criteria.md)：
+
+```sh
+uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json
+```
+
+该命令需要本机 Docker，以及能 `npm pack` 到 registry.npmjs.org 的网络。图谱建议不能改可信套件。
+
+Hermes 四组对照仍是 `not_run`，`comparative_evidence` 也是 `not_run`。F24 已安装并核对 Hermes CLI v0.22.1，没有领先结论。F25 的漏洞库仍是 `offline_not_run`。交接记录在 [`reports/HANDOFF.md`](reports/HANDOFF.md)。
+
+## 文档
+
+维护源是 `docs/`。`MASTER_SPEC.md` 由这些章节生成。
+
+| 文档 | 内容 |
+|---|---|
+| [`docs/00_FREEZE.md`](docs/00_FREEZE.md) | 最终裁决、范围、选型 |
+| [`docs/01_product.md`](docs/01_product.md) | 产品范围与完成定义 |
+| [`docs/02_architecture.md`](docs/02_architecture.md) | 架构与权威 |
+| [`docs/03_repository_map.md`](docs/03_repository_map.md) | 上游取用与边界 |
+| [`docs/04_execution.md`](docs/04_execution.md) | 执行、编码作业、独立验证 |
+| [`docs/05_knowledge.md`](docs/05_knowledge.md) | 采集、检索、记忆 |
+| [`docs/06_security.md`](docs/06_security.md) | 权限、隔离、注入防线 |
+| [`docs/07_learning_evaluation.md`](docs/07_learning_evaluation.md) | 技能评测与对照 |
+| [`docs/08_api_ui.md`](docs/08_api_ui.md) | API 与控制台 |
+| [`docs/09_data.md`](docs/09_data.md) | 数据模型、RLS、保留 |
+| [`docs/10_operations.md`](docs/10_operations.md) | 运行模式、模型、预算 |
+| [`docs/11_delivery.md`](docs/11_delivery.md) | 施工顺序与就绪定义 |
+| [`docs/12_integration_details.md`](docs/12_integration_details.md) | 集成接缝 |
+| [`docs/13_codegraph.md`](docs/13_codegraph.md) | CodeGraph 边界 |
+| [`docs/14_BOUNDARIES_AND_FAILURES.md`](docs/14_BOUNDARIES_AND_FAILURES.md) | 跨组件故障 |
+| [`docs/16_MERGE_EXISTING.md`](docs/16_MERGE_EXISTING.md) | 合并已有代码 |
+| [`docs/DECISIONS.md`](docs/DECISIONS.md) | 冻结决策 |
+| [`docs/SOURCES.md`](docs/SOURCES.md) | 上游依据 |
+| [`tasks/backlog.yaml`](tasks/backlog.yaml) | 任务队列 |
