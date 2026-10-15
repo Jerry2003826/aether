@@ -15,6 +15,7 @@ AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/
 
 - F00、F02、F03、F04、F05、F06：done
 - F01：blocked。BGE 权重未加载，`dimension_probed` 为 null。
-- 下一步：F07 Temporal 任务循环。
+- F07 done。`pytest -q tests/unit/test_planning.py tests/integration/test_workflow.py` → 7 passed。真实 Temporal 上去重 command，32 节点链、环、33 节点和读写并行限制由 planning 测试覆盖。
+- 下一步：F08 最小真实 UI。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

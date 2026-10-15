@@ -166,8 +166,12 @@ tickets:
   - task+command事务提交；稳定workflow ID和command去重
   - Workflow无外部I/O；actor不能直接mark_success
   - 32节点长链支持；循环/33节点拒绝；写资源串行、读并行最多2
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/workflows.py
+  - services/worker/aether_worker/planning.py
+  - tests/unit/test_planning.py
+  - tests/integration/test_workflow.py
 - id: F08
   stage: G2
   scope: core
