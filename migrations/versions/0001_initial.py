@@ -9,10 +9,11 @@ down_revision = None
 branch_labels = None
 depends_on = None
 SQL = Path(__file__).resolve().parents[1] / "sql"
+SCHEMA = Path(__file__).resolve().parents[2] / "contracts" / "schema.sql"
 
 
 def upgrade() -> None:
-    op.execute(SQL.joinpath("0001_contract.sql").read_text(encoding="utf-8"))
+    op.execute(SCHEMA.read_text(encoding="utf-8"))
     op.execute(
         """
         DO $$

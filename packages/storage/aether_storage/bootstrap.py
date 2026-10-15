@@ -83,7 +83,7 @@ def ensure_database(admin_url: str, database: str = "aether", *, rotate_password
             "SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'owners'"
         ).fetchone()
         if applied is None:
-            _execute_script(conn, SQL_DIR / "0001_contract.sql")
+            _execute_script(conn, ROOT / "contracts" / "schema.sql")
             _execute_script(conn, SQL_DIR / "task_status_guard.sql")
             _execute_script(conn, SQL_DIR / "0002_privileges.sql")
         grants = (SQL_DIR / "0003_grants.sql").read_text(encoding="utf-8")

@@ -20,6 +20,17 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "config" / "hermes.lock.json"
+REPOSITORY = "https://github.com/NousResearch/hermes-agent.git"
+TAG = "v0.22.1"
+COMMIT = "297552a9d646119871391d202509822cd86330df"
+TAG_OBJECT = "28106ea1a3230177edb30a0a4e8a099d839bbc2f"
+VERSION = "0.22.1"
+ARCHIVE_URL = "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v0.22.1.tar.gz"
+ARCHIVE_SHA256 = "45ebe864dbf65ecd31693a811ddd6e2e449b1878b835b563cf0a28d6a9c4bf38"
+ARCHIVE_ROOT = "hermes-agent-0.22.1"
+PYTHON = "3.14"
+OPENAI_SDK = "2.24.0"
+BOUND_FILES = ("pyproject.toml", "hermes_cli/main.py")
 
 
 def _sha256(path: Path) -> str:
@@ -83,43 +94,59 @@ def _clean_env() -> dict[str, str]:
     return env
 
 
-def _ensure_checkout(dest: Path, lock: dict[str, object]) -> None:
-    repository = str(lock["repository"])
-    tag = str(lock["tag"])
-    commit = str(lock["commit"])
-    if (dest / ".git").is_dir() and _git(dest, "rev-parse", "HEAD") == commit:
+def _lock_matches(lock: dict[str, object]) -> bool:
+    return lock == {
+        "name": "hermes-agent",
+        "version": VERSION,
+        "tag": TAG,
+        "repository": REPOSITORY,
+        "commit": COMMIT,
+        "tag_object": TAG_OBJECT,
+        "archive_url": ARCHIVE_URL,
+        "archive_sha256": ARCHIVE_SHA256,
+        "archive_root": ARCHIVE_ROOT,
+        "python": PYTHON,
+        "openai_sdk": OPENAI_SDK,
+        "bound_files": list(BOUND_FILES),
+    }
+
+
+def _ensure_checkout(dest: Path) -> None:
+    if (dest / ".git").is_dir() and _git(dest, "rev-parse", "HEAD") == COMMIT:
         return
     if dest.exists():
         shutil.rmtree(dest)
     dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "--depth", "1", "--branch", tag, repository, str(dest)], check=True)
+    subprocess.run(["git", "clone", "--depth", "1", "--branch", TAG, REPOSITORY, str(dest)], check=True)
 
 
 def install(dest: Path) -> str:
     lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
-    archive = dest.parent / f"hermes-v{lock['version']}.tar.gz"
-    if not archive.is_file() or _sha256(archive) != lock["archive_sha256"]:
-        _download(str(lock["archive_url"]), archive)
+    if not _lock_matches(lock):
+        _fail("hermes.lock.json does not match the pinned install")
+    archive = dest.parent / f"hermes-v{VERSION}.tar.gz"
+    if not archive.is_file() or _sha256(archive) != ARCHIVE_SHA256:
+        _download(ARCHIVE_URL, archive)
     actual = _sha256(archive)
-    if actual != lock["archive_sha256"]:
+    if actual != ARCHIVE_SHA256:
         archive.unlink(missing_ok=True)
-        _fail(f"hermes archive sha256 {actual} != {lock['archive_sha256']}")
-    _ensure_checkout(dest, lock)
-    if _git(dest, "rev-parse", "HEAD") != lock["commit"]:
-        _fail(f"hermes HEAD is not {lock['commit']}")
-    if _git(dest, "rev-parse", str(lock["tag"])) != lock["tag_object"]:
-        _fail(f"hermes tag object is not {lock['tag_object']}")
-    if _git(dest, "rev-parse", f"{lock['tag']}^{{}}") != lock["commit"]:
-        _fail(f"hermes tag does not peel to {lock['commit']}")
-    for relative in lock["bound_files"]:
-        member = f"{lock['archive_root']}/{relative}"
-        cloned = hashlib.sha256((dest / str(relative)).read_bytes()).hexdigest()
+        _fail(f"hermes archive sha256 {actual} != {ARCHIVE_SHA256}")
+    _ensure_checkout(dest)
+    if _git(dest, "rev-parse", "HEAD") != COMMIT:
+        _fail(f"hermes HEAD is not {COMMIT}")
+    if _git(dest, "rev-parse", TAG) != TAG_OBJECT:
+        _fail(f"hermes tag object is not {TAG_OBJECT}")
+    if _git(dest, "rev-parse", f"{TAG}^{{}}") != COMMIT:
+        _fail(f"hermes tag does not peel to {COMMIT}")
+    for relative in BOUND_FILES:
+        member = f"{ARCHIVE_ROOT}/{relative}"
+        cloned = hashlib.sha256((dest / relative).read_bytes()).hexdigest()
         if cloned != _archive_sha(archive, member):
             _fail(f"{relative} does not match the checksummed archive")
     env = _clean_env()
-    subprocess.run(["uv", "python", "install", str(lock["python"])], check=True, env=env)
+    subprocess.run(["uv", "python", "install", PYTHON], check=True, env=env)
     subprocess.run(
-        ["uv", "sync", "--python", str(lock["python"]), "--frozen", "--no-dev"],
+        ["uv", "sync", "--python", PYTHON, "--frozen", "--no-dev"],
         cwd=dest,
         check=True,
         env=env,
@@ -143,8 +170,8 @@ def install(dest: Path) -> str:
     if completed.stderr:
         print(completed.stderr, end="", file=sys.stderr)
     version_line = completed.stdout.splitlines()[0] if completed.stdout else ""
-    prefix = f"Hermes Agent v{lock['version']} "
-    if completed.returncode != 0 or not version_line.startswith(prefix) or str(lock["commit"])[:12] not in version_line:
+    prefix = f"Hermes Agent v{VERSION} "
+    if completed.returncode != 0 or not version_line.startswith(prefix) or COMMIT[:12] not in version_line:
         _fail(f"hermes version probe failed: {completed.returncode} {version_line}")
     github_path = os.environ.get("GITHUB_PATH")
     if github_path:
