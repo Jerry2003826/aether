@@ -66,6 +66,8 @@ export default function ConsolePage() {
   const [watches, setWatches] = useState<Watch[]>([]);
   const [evaluations, setEvaluations] = useState<Evaluation[]>([]);
   const [costs, setCosts] = useState<Cost | null>(null);
+  const [goal, setGoal] = useState("");
+  const [claim, setClaim] = useState("");
 
   async function loadProject(id: string, token: string) {
     const [taskBody, approvalBody, sourceBody, memoryBody, recommendationBody, skillBody, watchBody, evaluationBody, costBody] =
@@ -162,6 +164,56 @@ export default function ConsolePage() {
     }
   }
 
+  async function createTask(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const response = await readJson(`/v1/projects/${projectId}/tasks`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+          "Idempotency-Key": `task-${goal.length}-${Date.now()}`,
+        },
+        body: JSON.stringify({ goal }),
+      });
+      if (response.status !== 202) {
+        setPhase("error");
+        setMessage("任务没有接收。");
+        return;
+      }
+      setGoal("");
+      await loadProject(projectId, csrf);
+    } catch {
+      setPhase("offline");
+      setMessage("API 未连接。进程恢复前这里保持空状态。");
+    }
+  }
+
+  async function createMemory(event: FormEvent) {
+    event.preventDefault();
+    try {
+      const response = await readJson(`/v1/projects/${projectId}/memories`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+          "Idempotency-Key": `memory-${claim.length}-${Date.now()}`,
+        },
+        body: JSON.stringify({ claim, kind: "semantic", category: "fact" }),
+      });
+      if (response.status !== 202) {
+        setPhase("error");
+        setMessage("记忆没有接收。");
+        return;
+      }
+      setClaim("");
+      await loadProject(projectId, csrf);
+    } catch {
+      setPhase("offline");
+      setMessage("API 未连接。进程恢复前这里保持空状态。");
+    }
+  }
+
   async function createProject(event: FormEvent) {
     event.preventDefault();
     try {
@@ -237,6 +289,13 @@ export default function ConsolePage() {
             <>
               <h2>任务</h2>
               {tasks.length === 0 ? <p>还没有任务。可以新建。</p> : null}
+              <form onSubmit={(event) => void createTask(event)}>
+                <label>
+                  任务目标
+                  <textarea value={goal} onChange={(event) => setGoal(event.target.value)} />
+                </label>
+                <button type="submit">新建任务</button>
+              </form>
               {tasks.map((task) => (
                 <article key={task.id}>
                   <p>
@@ -276,6 +335,13 @@ export default function ConsolePage() {
               ))}
               <h2>记忆</h2>
               {memories.length === 0 ? <p>还没有记忆。</p> : null}
+              <form onSubmit={(event) => void createMemory(event)}>
+                <label>
+                  记忆说法
+                  <textarea value={claim} onChange={(event) => setClaim(event.target.value)} />
+                </label>
+                <button type="submit">记下这条</button>
+              </form>
               {memories.map((memory) => (
                 <article key={memory.id}>
                   <p>

@@ -252,6 +252,17 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
         command = {**stable, "skill_id": skill_id, "expected_deployment_version": _match(request)}
         return _accept(app, settings, request, project_id, "skill.deploy", command, command, skill_id)
 
+    @app.post("/v1/projects/{project_id}/coding-jobs", status_code=202, operation_id="createCodingJob", responses=_ERRORS)
+    def create_coding_job(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
+        stable = _coding_body(body)
+        command = {
+            **stable,
+            "coding_job_id": str(uuid.uuid4()),
+            "operation_id": str(uuid.uuid4()),
+            "capability_id": str(uuid.uuid4()),
+        }
+        return _accept(app, settings, request, project_id, "coding.create", stable, command, command["coding_job_id"])
+
     @app.get("/v1/projects/{project_id}/watches", operation_id="listWatches", responses=_ERRORS)
     def list_watches(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         owner = _owner(app, request)
@@ -629,6 +640,25 @@ def _deploy_body(body: dict[str, Any]) -> dict[str, Any]:
         "expected_previous_version_id": body["expected_previous_version_id"],
         "approval_id": str(body["approval_id"]),
         "report_sha256": digest,
+    }
+
+
+def _coding_body(body: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(body, dict) or set(body) != {"task_id", "base_artifact_id", "job_key", "objective"}:
+        raise ApiError(422, "invalid_coding_job", "编码作业不合法")
+    _task_id(str(body["task_id"]))
+    _task_id(str(body["base_artifact_id"]))
+    job_key = body["job_key"]
+    objective = body["objective"]
+    if not isinstance(job_key, str) or not job_key.strip() or len(job_key) > 128:
+        raise ApiError(422, "invalid_coding_job", "作业键不合法")
+    if not isinstance(objective, str) or not objective.strip() or len(objective) > 4000:
+        raise ApiError(422, "invalid_coding_job", "目标不合法")
+    return {
+        "task_id": str(body["task_id"]),
+        "base_artifact_id": str(body["base_artifact_id"]),
+        "job_key": job_key.strip(),
+        "objective": objective.strip(),
     }
 
 

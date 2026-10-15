@@ -1830,6 +1830,63 @@ paths:
           application/json:
             schema:
               $ref: '#/components/schemas/ModelProbeRequest'
+  /v1/projects/{project_id}/coding-jobs:
+    post:
+      operationId: createCodingJob
+      summary: Queue a coding job. Acceptance is not a passing grade.
+      responses:
+        '401': *id001
+        '403': *id002
+        '404': *id003
+        '409': *id004
+        '422': *id005
+        '429': *id006
+        '503': *id007
+        '202':
+          description: Accepted asynchronous command; not task success.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Accepted'
+      parameters:
+      - name: project_id
+        in: path
+        required: true
+        schema: *id009
+      - name: Idempotency-Key
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 8
+          maxLength: 128
+      - name: X-CSRF-Token
+        in: header
+        required: true
+        schema: *id008
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              additionalProperties: false
+              required:
+              - task_id
+              - base_artifact_id
+              - job_key
+              - objective
+              properties:
+                task_id: *id009
+                base_artifact_id: *id009
+                job_key:
+                  type: string
+                  minLength: 1
+                  maxLength: 128
+                objective:
+                  type: string
+                  minLength: 1
+                  maxLength: 4000
   /v1/projects/{project_id}/artifacts:
     post:
       operationId: uploadArtifact

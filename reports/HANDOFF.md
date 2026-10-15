@@ -58,5 +58,5 @@ P1 覆盖：
 - F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
 - F21 done。PR #1 CI run `38686730319`：unit `40 passed in 7.73s`，integration `118 passed, 1 warning in 75.07s`。SonarCloud quality gate OK。对照表 `reports/f21_criteria.md`。
 - F20、F21 done。PR #1 CI run `38687896639`：unit `40 passed in 7.43s`，integration `123 passed, 1 warning in 72.10s`。SonarCloud quality gate OK。密钥整段替换。脚本整目录哈希后在容器里用 `python -I` 执行。回滚中途失败时指针和 canary 状态都不提交。对照表 `reports/f20_criteria.md`、`reports/f21_criteria.md`。
-- F22 done。PR #1 CI run `38690927397`：unit `42 passed in 10.84s`，integration `129 passed, 1 warning in 94.24s`。SonarCloud quality gate OK。49 个操作与合同一致。控制台读真实 API。对照表 `reports/f22_criteria.md`。
-- 下一步：F23 安全与故障回归。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F22 重新打开为 in_progress。任务、记忆、编码作业要走控制台同一条创建接口，并和数据库里的行一致。`/v1/admin/*` 写明只靠单所有者不变量。还没标 done。
+- 下一步：这次 PR CI 和 Sonar 通过后再标 F22 done，然后继续 F23。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

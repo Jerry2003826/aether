@@ -8,6 +8,7 @@ from typing import Any
 
 from sqlalchemy import bindparam, text
 
+from aether_domain.security import sha256_text
 from aether_storage.db import Database
 from aether_worker.skill_eval import SkillEvalError, rollback_active
 
@@ -23,6 +24,7 @@ _KINDS = (
     "watch.patch",
     "watch.delete",
     "connector.register",
+    "coding.create",
 )
 _VERIFIER_KINDS = ("evaluation.create", "skill.evaluate")
 _FORBIDDEN_SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
@@ -127,6 +129,8 @@ def _apply(conn: Any, *, owner_id: str, project_id: str, outbox_id: str, kind: s
         _watch_delete(conn, project_id, payload)
     elif kind == "connector.register":
         _connector(conn, project_id, payload)
+    elif kind == "coding.create":
+        _coding_create(conn, project_id, payload)
     else:
         raise ConsoleCommandError("command_rejected")
 
@@ -446,6 +450,68 @@ def _connector(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
             "manifest": json.dumps(payload["manifest"], ensure_ascii=False),
             "digest": payload["manifest_sha256"],
             "secret_reference": payload.get("secret_reference"),
+        },
+    )
+
+
+def _coding_create(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
+    job_id = str(payload["coding_job_id"])
+    if _exists(conn, "SELECT 1 FROM coding_jobs WHERE project_id = :project_id AND id = :id", project_id, job_id):
+        return
+    if not _exists(conn, "SELECT 1 FROM tasks WHERE project_id = :project_id AND id = :id", project_id, str(payload["task_id"])):
+        raise ConsoleCommandError("task_missing")
+    if not _exists(
+        conn,
+        "SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL",
+        project_id,
+        str(payload["base_artifact_id"]),
+    ):
+        raise ConsoleCommandError("artifact_missing")
+    arguments = {"objective": payload["objective"], "base_artifact_id": payload["base_artifact_id"]}
+    digest = sha256_text(json.dumps(arguments, sort_keys=True, separators=(",", ":")))
+    conn.execute(
+        text(
+            "INSERT INTO capability_grants (id, project_id, task_id, grantee_service, token_hash, capability_type, scope, expires_at, policy_version) "
+            "VALUES (:id, :project_id, :task_id, 'aether_worker', :token_hash, 'coding:execute', CAST(:scope AS jsonb), now() + interval '1 hour', 'v1')"
+        ),
+        {
+            "id": payload["capability_id"],
+            "project_id": project_id,
+            "task_id": payload["task_id"],
+            "token_hash": sha256_text(job_id),
+            "scope": json.dumps({"project_id": project_id}),
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO operations (id, project_id, task_id, intent_key, tool_id, args_sha256, intent_digest, normalized_arguments, "
+            "resource_id, resource_version, idempotency_class, risk, capability_id, state) "
+            "VALUES (:id, :project_id, :task_id, :intent_key, 'coding.start', :digest, :digest, CAST(:arguments AS jsonb), "
+            ":resource_id, '1', 'idempotent_write', 'R1', :capability_id, 'PREPARED')"
+        ),
+        {
+            "id": payload["operation_id"],
+            "project_id": project_id,
+            "task_id": payload["task_id"],
+            "intent_key": job_id,
+            "digest": digest,
+            "arguments": json.dumps(arguments, ensure_ascii=False),
+            "resource_id": payload["base_artifact_id"],
+            "capability_id": payload["capability_id"],
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO coding_jobs (id, project_id, task_id, operation_id, job_key, state, base_artifact_id, deadline) "
+            "VALUES (:id, :project_id, :task_id, :operation_id, :job_key, 'QUEUED', :artifact_id, now() + interval '1 hour')"
+        ),
+        {
+            "id": job_id,
+            "project_id": project_id,
+            "task_id": payload["task_id"],
+            "operation_id": payload["operation_id"],
+            "job_key": payload["job_key"],
+            "artifact_id": payload["base_artifact_id"],
         },
     )
 

@@ -30,7 +30,7 @@ def test_generated_openapi_matches_the_contract_operations() -> None:
     expected = _operations(contract["paths"])
     actual = _operations(generated["paths"])
     assert actual == expected
-    assert len(actual) == 49
+    assert len(actual) == 50
 
 
 def _operations(paths: dict) -> set[tuple[str, str, str]]:

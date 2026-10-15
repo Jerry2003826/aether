@@ -2,12 +2,16 @@ import json
 import threading
 import time
 import uuid
+from pathlib import Path
 
+import psycopg
+import pytest
 from fastapi.testclient import TestClient
+from psycopg.errors import UniqueViolation
 from sqlalchemy import text
 
 from aether_api.app import create_app
-from aether_api.auth_service import AuthService
+from aether_api.auth_service import AuthService, issue_bootstrap_secret
 from aether_api.errors import ApiError
 from aether_api.settings import Settings
 from tests.integration.conftest import insert_task
@@ -71,6 +75,23 @@ def test_concurrent_bootstrap_is_conflict(client: TestClient) -> None:
     for thread in threads:
         thread.join()
     assert sorted(statuses) == [201, 409]
+
+
+def test_second_owner_account_cannot_be_created(client: TestClient, aether_admin: str) -> None:
+    _bootstrap(client)
+    secret = issue_bootstrap_secret(Path("secrets/bootstrap.json"))
+    again = client.post(
+        "/v1/auth/bootstrap",
+        headers=ORIGIN,
+        json={"bootstrap_secret": secret, "display_name": "第二人", "passphrase": PASSPHRASE},
+    )
+    assert again.status_code == 409
+    assert again.json()["code"] == "owner_exists"
+    with psycopg.connect(aether_admin, autocommit=True) as conn:
+        assert conn.execute("SELECT count(*) FROM owners").fetchone()[0] == 1
+        with pytest.raises(UniqueViolation):
+            conn.execute("INSERT INTO owners (display_name, password_hash) VALUES ('另一个', 'not-a-real-hash')")
+        assert conn.execute("SELECT count(*) FROM owners").fetchone()[0] == 1
 
 
 def test_project_list_does_not_rotate_csrf(client: TestClient) -> None:

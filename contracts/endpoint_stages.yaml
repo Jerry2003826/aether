@@ -173,6 +173,11 @@ paths:
   - post
   implemented_by: F05
   status: implemented
+- path: /v1/projects/{project_id}/coding-jobs
+  methods:
+  - post
+  implemented_by: F22
+  status: implemented
 - path: /v1/projects/{project_id}/artifacts
   methods:
   - post
