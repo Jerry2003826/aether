@@ -14,7 +14,7 @@
   "not_run": [
     "Hermes four-way comparison"
   ],
-  "next_action": "comparative_evidence stays not_run. On the supervisor machine install pinned Hermes with scripts/install_hermes.py, then uv run --locked --no-build python scripts/run_hermes_compare.py --out reports/hermes_compare_result.json. Env: AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1, AETHER_LIVE_MODEL_ALIAS=deepseek-chat, AETHER_LIVE_MODEL_KEY. Cap is 8 calls, 8000 tokens, 128 output tokens. Do not mark a winner until that file is reviewed. semantic_support stays not_judged.",
+  "next_action": "comparative_evidence stays not_run. On the supervisor machine install pinned Hermes with scripts/install_hermes.py, then uv run --locked --no-build python scripts/run_hermes_compare.py --out reports/hermes_compare_result.json. Env: AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1, AETHER_LIVE_MODEL_ALIAS=deepseek-chat, AETHER_LIVE_MODEL_KEY. The script checks the pinned Hermes commit and version before spending, isolates HOME/HERMES_HOME, disables host toolsets, preserves stream, and meters calls that fail. Cap is 8 calls, 8000 tokens, 128 output tokens, 45s wall clock. Do not mark a winner until that file is reviewed. semantic_support stays not_judged.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
