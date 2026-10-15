@@ -365,8 +365,11 @@ tickets:
   - 旧摘要/embedding任务不能在删除后重新写入已删内容
   - 记忆/向量/BM25/cache/推荐特征联动失效
   - 备份保留与history局限明确，未删除物理副本不能声称全删
-  status: in_progress
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/retention.py
+  - tests/integration/test_retention.py
+  - reports/f16_criteria.md
 - id: F17
   stage: G5
   scope: core
