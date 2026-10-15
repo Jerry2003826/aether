@@ -8,7 +8,7 @@ import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -19,6 +19,7 @@ from aether_api.health import ready_payload
 from aether_api.settings import Settings
 from aether_api.throttle import LoginThrottle, client_address
 from aether_domain.security import sha256_text
+from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
 
 COOKIE = "aether_session"
@@ -165,7 +166,78 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return JSONResponse(status_code=201, content=project)
 
+    @app.post("/v1/projects/{project_id}/artifacts", status_code=201)
+    async def upload_artifact(project_id: str, request: Request, file: UploadFile) -> JSONResponse:
+        _require_origin(request, resolved)
+        owner = _service(app).require_csrf(_cookie(request), request.headers.get("x-csrf-token"))
+        key = request.headers.get("idempotency-key")
+        if key is None or not 8 <= len(key) <= 128:
+            raise ApiError(422, "invalid_idempotency_key", "Idempotency-Key 长度必须在 8 到 128 之间")
+        _require_owned_project(app.state.database, owner["owner_id"], project_id)
+        data = await file.read()
+        media_type = (file.content_type or "").split(";")[0].strip()
+        payload_hash = sha256_text(f"{media_type}:{sha256_text(data.decode('utf-8', 'surrogateescape'))}")
+        route = f"POST /v1/projects/{project_id}/artifacts"
+        with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:
+            existing = conn.execute(
+                text("SELECT payload_sha256, response_status, response_body FROM idempotency_keys WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key"),
+                {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key},
+            ).mappings().first()
+        if existing is not None:
+            if existing["payload_sha256"] != payload_hash:
+                raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容")
+            return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
+        try:
+            stored = _artifacts(app, resolved).put(owner_id=owner["owner_id"], project_id=project_id, data=data, media_type=media_type)
+        except ArtifactError as exc:
+            status = 413 if exc.code == "size_rejected" else 422
+            raise ApiError(status, exc.code, exc.message) from exc
+        with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:
+            conn.execute(
+                text("INSERT INTO idempotency_keys (owner_id, project_id, route, idempotency_key, payload_sha256, response_status, response_body) VALUES (:owner, :project_id, :route, :key, :payload_hash, 201, CAST(:body AS jsonb))"),
+                {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key, "payload_hash": payload_hash, "body": json.dumps(stored)},
+            )
+        return JSONResponse(status_code=201, content=stored)
+
+    @app.get("/v1/projects/{project_id}/artifacts/{artifact_id}")
+    def download_artifact(project_id: str, artifact_id: str, request: Request) -> Response:
+        owner = _service(app).authenticate(_cookie(request))
+        _require_owned_project(app.state.database, owner["owner_id"], project_id)
+        try:
+            data, media_type = _artifacts(app, resolved).get(owner_id=owner["owner_id"], project_id=project_id, artifact_id=artifact_id)
+        except ArtifactError as exc:
+            raise ApiError(404, exc.code, exc.message) from exc
+        return Response(content=data, media_type=media_type)
+
+    @app.delete("/v1/projects/{project_id}/artifacts/{artifact_id}", status_code=204)
+    def delete_artifact(project_id: str, artifact_id: str, request: Request) -> Response:
+        _require_origin(request, resolved)
+        owner = _service(app).require_csrf(_cookie(request), request.headers.get("x-csrf-token"))
+        _require_owned_project(app.state.database, owner["owner_id"], project_id)
+        try:
+            _artifacts(app, resolved).tombstone(owner_id=owner["owner_id"], project_id=project_id, artifact_id=artifact_id)
+        except ArtifactError as exc:
+            raise ApiError(404, exc.code, exc.message) from exc
+        return Response(status_code=204)
+
     return app
+
+
+def _artifacts(app: FastAPI, settings: Settings) -> ArtifactStore:
+    if app.state.database is None:
+        raise ApiError(503, "database_unconfigured", "数据库未配置")
+    return ArtifactStore(settings.artifact_root, app.state.database)
+
+
+def _require_owned_project(database: Database, owner_id: str, project_id: str) -> None:
+    try:
+        uuid.UUID(project_id)
+    except ValueError as exc:
+        raise ApiError(404, "not_found", "项目不存在") from exc
+    with database.transaction(owner_id=owner_id) as conn:
+        row = conn.execute(text("SELECT id FROM projects WHERE id = :id AND deleted_at IS NULL"), {"id": project_id}).first()
+    if row is None:
+        raise ApiError(404, "not_found", "项目不存在")
 
 
 def _service(app: FastAPI) -> AuthService:

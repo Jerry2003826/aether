@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F03",
+  "current_task": "F04",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F03 artifact store and safe archive import.",
+  "next_action": "Implement F04 model and tool gateway.",
   "last_executed_commands": [
-    "AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/unit tests/integration"
+    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "19 passed",
+  "last_test_result": "32 passed",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -31,5 +31,8 @@
   "f02": {
     "status": "done",
     "postgres_role": "aether_api is not superuser and does not bypass RLS"
+  },
+  "f03": {
+    "status": "done"
   }
 }

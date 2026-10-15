@@ -87,8 +87,10 @@ tickets:
   - hash/长度/媒体类型核实，目录由server生成
   - zip-slip/symlink/hardlink/解压限额用例拒绝
   - 落盘而DB未提交等故障可恢复；不挂host repo/home
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/artifacts.py
+  - tests/integration/test_artifacts.py
 - id: F04
   stage: G1
   scope: core

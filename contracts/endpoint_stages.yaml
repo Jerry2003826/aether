@@ -71,7 +71,7 @@ paths:
   - get
   - delete
   implemented_by: F03
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/sources
   methods:
   - get
@@ -177,4 +177,4 @@ paths:
   methods:
   - post
   implemented_by: F03
-  status: not_implemented
+  status: implemented

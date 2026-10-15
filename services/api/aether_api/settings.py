@@ -14,6 +14,7 @@ class Settings:
     allow_testclient: bool
     origins: frozenset[str]
     cookie_secure: bool
+    artifact_root: Path = Path("data/artifacts")
     session_hours: int = 12
     idle_minutes: int = 30
     login_failure_limit: int = 5
@@ -29,6 +30,7 @@ class Settings:
             allow_testclient=os.environ.get("AETHER_ALLOW_TESTCLIENT") == "1",
             origins=frozenset(item.strip() for item in origins.split(",") if item.strip()),
             cookie_secure=os.environ.get("AETHER_COOKIE_SECURE") == "1",
+            artifact_root=Path(os.environ.get("AETHER_ARTIFACT_ROOT", "data/artifacts")),
             trust_forwarded_for=os.environ.get("AETHER_TRUST_FORWARDED_FOR") == "1",
         )
 

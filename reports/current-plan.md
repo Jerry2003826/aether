@@ -1,15 +1,15 @@
-# F03 不可变产物与安全导入
+# F04 模型与工具准入网关
 
-目标：项目内 content-addressed 产物，上传校验 hash、长度和媒体类型，拒绝 zip-slip、符号链接、硬链接和解压超额。
+目标：ModelGateway 和 ToolRegistry。job token 不能被请求体改写 project/task。provider key 不进入 actor、UI 或日志。用本地 fake upstream 测真实 HTTP，而不是返回固定成功。
 
-合同：`contracts/schema.sql` 的 artifacts；`POST/GET/DELETE /v1/projects/{project_id}/artifacts`。
+合同：`contracts/interfaces.py` 的 ModelGateway；`config/tools.example.yaml`。
 
-拟改路径：`packages/storage/aether_storage/artifacts.py`、`services/api/aether_api/app.py`、`tests/integration/test_artifacts.py`。
+拟改路径：`services/gateway/aether_gateway/`、`tests/integration/test_gateway.py`。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_artifacts.py`
+测试：`AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_gateway.py`
 
 进度：未开始。
 
 结果：无。
 
-阻塞：无。
+阻塞：无。live 模型仍 not_run。

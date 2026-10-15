@@ -61,7 +61,7 @@ def clean_db(admin_url: str) -> Iterator[None]:
 
 
 @pytest.fixture
-def client(role_urls: dict[str, str], clean_db: None) -> Iterator[TestClient]:
+def client(role_urls: dict[str, str], clean_db: None, tmp_path: Path) -> Iterator[TestClient]:
     bootstrap_path = Path("secrets/bootstrap.json")
     secret = issue_bootstrap_secret(bootstrap_path)
     settings = Settings(
@@ -70,6 +70,7 @@ def client(role_urls: dict[str, str], clean_db: None) -> Iterator[TestClient]:
         allow_testclient=True,
         origins=frozenset({"http://127.0.0.1:3000"}),
         cookie_secure=False,
+        artifact_root=tmp_path / "artifacts",
     )
     app = create_app(settings)
     with TestClient(app) as test_client:
