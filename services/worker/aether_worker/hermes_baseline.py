@@ -24,7 +24,7 @@ def probe_cli(binary: str | None = None) -> dict[str, Any]:
     path = binary or shutil.which("hermes")
     if not path:
         return {"status": "not_run", "reason": "hermes_cli_missing", "version": None, "path": None}
-    completed = subprocess.run([path, "--version"], capture_output=True, text=True, check=False, timeout=20)
+    completed = subprocess.run([path, "--version"], capture_output=True, text=True, check=False, timeout=90)
     version = completed.stdout.strip() or completed.stderr.strip()
     return {
         "status": "probed" if completed.returncode == 0 and version else "failed",

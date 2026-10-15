@@ -1,0 +1,14 @@
+{
+  "name": "hermes-agent",
+  "version": "0.22.1",
+  "tag": "v0.22.1",
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "commit": "297552a9d646119871391d202509822cd86330df",
+  "tag_object": "28106ea1a3230177edb30a0a4e8a099d839bbc2f",
+  "archive_url": "https://github.com/NousResearch/hermes-agent/archive/refs/tags/v0.22.1.tar.gz",
+  "archive_sha256": "45ebe864dbf65ecd31693a811ddd6e2e449b1878b835b563cf0a28d6a9c4bf38",
+  "archive_root": "hermes-agent-0.22.1",
+  "python": "3.14",
+  "openai_sdk": "2.24.0",
+  "bound_files": ["pyproject.toml", "hermes_cli/main.py"]
+}
