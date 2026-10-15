@@ -144,6 +144,32 @@ def test_fixture_download_is_real_and_parser_stays_static(client, api_db, role_u
     assert all(item[3] is True for item in rows)
 
 
+def test_fixture_switch_still_rejects_unlisted_loopback(monkeypatch) -> None:
+    monkeypatch.setenv(FIXTURE_ENV, "1")
+    hits = {"n": 0}
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:  # noqa: N802
+            hits["n"] += 1
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(b"secret")
+
+        def log_message(self, format: str, *args) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(IngestError) as rejected:
+            fetch_url(f"http://127.0.0.1:{server.server_address[1]}/secret", allow_hosts={"docs.example"})
+        assert rejected.value.code == "ssrf_rejected"
+        assert hits["n"] == 0
+    finally:
+        server.shutdown()
+
+
 def test_allow_hosts_is_refused_outside_test_configuration(monkeypatch) -> None:
     monkeypatch.delenv(FIXTURE_ENV, raising=False)
     hits = {"n": 0}
@@ -199,7 +225,7 @@ def test_stream_disconnects_when_body_exceeds_limit(monkeypatch) -> None:
     thread.start()
     try:
         with pytest.raises(IngestError) as rejected:
-            fetch_url(f"http://127.0.0.1:{server.server_address[1]}/big", max_bytes=128)
+            fetch_url(f"http://127.0.0.1:{server.server_address[1]}/big", allow_hosts={"127.0.0.1"}, max_bytes=128)
         assert rejected.value.code == "size_rejected"
         assert done.wait(timeout=3)
         assert 0 < sent["n"] < 32_768
@@ -263,6 +289,7 @@ def test_tls_pins_ip_and_verifies_the_hostname(monkeypatch, tmp_path: Path) -> N
         body = fetch_url(
             f"https://ingest.fixture.example:{port}/note",
             resolve=resolve,
+            allow_hosts={"ingest.fixture.example"},
             verify=ssl.create_default_context(cafile=str(cert)),
         )
     finally:

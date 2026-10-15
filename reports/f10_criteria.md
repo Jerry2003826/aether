@@ -11,6 +11,7 @@
 | HTTPS 钉住解析地址，证书和 SNI 仍核对原主机名 | `tests/integration/test_ingest.py::test_tls_pins_ip_and_verifies_the_hostname` |
 | 响应体按流计数，超限即断开 | `tests/integration/test_ingest.py::test_stream_disconnects_when_body_exceeds_limit` |
 | allow_hosts 只在测试配置下生效 | `tests/integration/test_ingest.py::test_allow_hosts_is_refused_outside_test_configuration` |
+| 测试开关打开时，不在 allow_hosts 里的 127.0.0.1 仍拒绝 | `tests/integration/test_ingest.py::test_fixture_switch_still_rejects_unlisted_loopback` |
 | RSS 在受限子进程里用 defusedxml 解析，实体扩展被拒绝 | `tests/integration/test_ingest.py::test_rss_parser_is_isolated_and_rejects_entities` |
 | Playwright 受控 profile 实际执行页面脚本 | `tests/integration/test_ingest.py::test_playwright_profile_renders_javascript` |
 | 解析器有体积上限，且采集模块不加载 Playwright | `tests/integration/test_ingest.py::test_fixture_download_is_real_and_parser_stays_static` |

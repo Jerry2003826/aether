@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F11 stays blocked until BGE-M3 dimension is measured. F17 has a local stdio fixture but is not done until the official MCP SDK is the client.",
+  "next_action": "Implement F11 hybrid retrieval. F17 stays not_started until the official MCP SDK is the client.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "F10 TLS/stream/parser fixes: 99 passed, 2 warnings in 22.99s, EXIT:0.",
+  "last_test_result": "F10 fixture-host bypass narrowed: 100 passed, 2 warnings in 24.21s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -64,7 +64,8 @@
   },
   "f10": {
     "status": "done",
-    "embedding": "not_filled"
+    "embedding": "not_filled",
+    "fixture_bypass": "allow_hosts and AETHER_INGEST_ALLOW_FIXTURES=1 only"
   },
   "f11": {
     "status": "not_started"

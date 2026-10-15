@@ -100,14 +100,14 @@ def assert_public_target(
     if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or not host:
         raise IngestError("ssrf_rejected")
     permitted = fixtures_enabled() and bool(allow_hosts) and host in allow_hosts
-    if parsed.port not in {None, 80, 443} and not permitted and not fixtures_enabled():
+    if parsed.port not in {None, 80, 443} and not permitted:
         raise IngestError("ssrf_rejected")
     try:
         literal = ipaddress.ip_address(host)
     except ValueError:
         literal = None
     addresses = [literal] if literal is not None else resolve(host)
-    if any(address is None or _blocked(address) for address in addresses) and not (permitted or fixtures_enabled()):
+    if any(address is None or _blocked(address) for address in addresses) and not permitted:
         raise IngestError("ssrf_rejected")
     if not addresses or addresses[0] is None:
         raise IngestError("dns_rejected")
