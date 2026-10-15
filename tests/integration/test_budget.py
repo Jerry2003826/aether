@@ -4,11 +4,12 @@ import pytest
 from sqlalchemy import text
 
 from aether_storage.budget import BudgetError, BudgetLedger
+from aether_storage.db import Database
 from tests.integration.conftest import insert_task
 from tests.integration.test_auth import _bootstrap
 
 
-def _open(client, api_db, key: str, *, limit=100, tokens=100, requests=10, fraction=0.2):
+def _open(client, api_db, role_urls, key: str, *, limit=100, tokens=100, requests=10, fraction=0.2):
     _bootstrap(client)
     session = client.get("/v1/auth/session").json()
     project = client.post(
@@ -18,7 +19,7 @@ def _open(client, api_db, key: str, *, limit=100, tokens=100, requests=10, fract
     )
     assert project.status_code == 201, project.text
     task_id = insert_task(api_db, session["owner_id"], project.json()["id"], key)
-    ledger = BudgetLedger(api_db)
+    ledger = BudgetLedger(Database(role_urls["aether_worker"]))
     ledger.open_account(
         owner_id=session["owner_id"],
         project_id=project.json()["id"],
@@ -31,15 +32,15 @@ def _open(client, api_db, key: str, *, limit=100, tokens=100, requests=10, fract
     return session["owner_id"], project.json()["id"], task_id, ledger
 
 
-def test_budget_overrun_is_rejected(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "overrun", fraction=0)
+def test_budget_overrun_is_rejected(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "overrun", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="one", amount=70, role="actor") is True
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="two", amount=40, role="actor") is False
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["held_micro_usd"] == 70
 
 
-def test_concurrent_reservation_is_atomic(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "race", fraction=0)
+def test_concurrent_reservation_is_atomic(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "race", fraction=0)
     results: list[bool] = []
     barrier = threading.Barrier(2)
 
@@ -56,8 +57,8 @@ def test_concurrent_reservation_is_atomic(client, api_db) -> None:
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["held_micro_usd"] == 60
 
 
-def test_duplicate_settlement_does_not_double_charge(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "settle", fraction=0)
+def test_duplicate_settlement_does_not_double_charge(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "settle", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="once", amount=30, role="actor") is True
     ledger.settle(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="once", actual=30, input_tokens=1, output_tokens=1)
     ledger.settle(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="once", actual=30, input_tokens=1, output_tokens=1)
@@ -67,8 +68,8 @@ def test_duplicate_settlement_does_not_double_charge(client, api_db) -> None:
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["actual_known_micro_usd"] == 30
 
 
-def test_timeout_keeps_reservation_held(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "held", fraction=0)
+def test_timeout_keeps_reservation_held(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "held", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="slow", amount=25, role="actor") is True
     ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="slow")
     snapshot = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
@@ -77,8 +78,8 @@ def test_timeout_keeps_reservation_held(client, api_db) -> None:
     assert snapshot["unknown_request_count"] == 1
 
 
-def test_unknown_usage_is_not_stored_as_zero(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "unknown", fraction=0)
+def test_unknown_usage_is_not_stored_as_zero(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "unknown", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="priced", amount=10, role="actor") is True
     ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="priced")
     with pytest.raises(BudgetError) as rejected:
@@ -89,8 +90,8 @@ def test_unknown_usage_is_not_stored_as_zero(client, api_db) -> None:
     assert actual is None
 
 
-def test_internal_roles_share_one_ledger(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "roles", limit=1000, fraction=0)
+def test_internal_roles_share_one_ledger(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "roles", limit=1000, fraction=0)
     for role in ("planner", "repair", "judge", "coder"):
         assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=role, amount=10, role=role) is True
     with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -99,16 +100,16 @@ def test_internal_roles_share_one_ledger(client, api_db) -> None:
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["held_micro_usd"] == 40
 
 
-def test_same_key_different_request_is_rejected(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "hash", fraction=0)
+def test_same_key_different_request_is_rejected(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "hash", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="same", amount=10, role="actor", request={"prompt": "one"}) is True
     with pytest.raises(BudgetError) as mismatch:
         ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="same", amount=10, role="actor", request={"prompt": "two"})
     assert mismatch.value.code == "idempotency_mismatch"
 
 
-def test_concurrent_token_reservations_stay_within_limit(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "tokens", limit=1000, tokens=10, fraction=0)
+def test_concurrent_token_reservations_stay_within_limit(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "tokens", limit=1000, tokens=10, fraction=0)
     results: list[bool] = []
     barrier = threading.Barrier(2)
 
@@ -125,8 +126,8 @@ def test_concurrent_token_reservations_stay_within_limit(client, api_db) -> None
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["tokens_held"] == 6
 
 
-def test_settle_rejects_actual_above_reservation(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "cap", fraction=0)
+def test_settle_rejects_actual_above_reservation(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "cap", fraction=0)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="cap", amount=15, role="actor") is True
     with pytest.raises(BudgetError) as rejected:
         ledger.settle(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="cap", actual=16, input_tokens=1, output_tokens=1)
@@ -135,8 +136,8 @@ def test_settle_rejects_actual_above_reservation(client, api_db) -> None:
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["held_micro_usd"] == 15
 
 
-def test_verification_reserve_is_protected(client, api_db) -> None:
-    owner_id, project_id, task_id, ledger = _open(client, api_db, "reserve", limit=100, fraction=0.2)
+def test_verification_reserve_is_protected(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "reserve", limit=100, fraction=0.2)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="planner", amount=80, role="planner") is True
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="planner-more", amount=1, role="planner") is False
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="judge", amount=20, role="judge", verification=True) is True

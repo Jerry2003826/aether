@@ -19,14 +19,7 @@ CREATE POLICY idempotency_owner ON idempotency_keys
   USING (owner_id = nullif(current_setting('aether.owner_id', true), '')::uuid)
   WITH CHECK (owner_id = nullif(current_setting('aether.owner_id', true), '')::uuid);
 
-CREATE FUNCTION aether_reject_api_task_projection() RETURNS trigger LANGUAGE plpgsql AS $$
-BEGIN
-  IF current_user = 'aether_api' AND NEW.status IS DISTINCT FROM OLD.status AND NEW.status NOT IN ('DRAFT', 'QUEUED') THEN
-    RAISE EXCEPTION 'api role cannot advance task projection to %', NEW.status;
-  END IF;
-  RETURN NEW;
-END;
-$$;
+-- Function body lives in task_status_guard.sql and must already exist.
 CREATE TRIGGER tasks_no_api_projection BEFORE UPDATE ON tasks
   FOR EACH ROW EXECUTE FUNCTION aether_reject_api_task_projection();
 

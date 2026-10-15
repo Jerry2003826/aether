@@ -38,4 +38,10 @@ class Settings:
 def bind_is_allowed(host: str) -> bool:
     if host in {"127.0.0.1", "::1"}:
         return True
-    return os.environ.get("AETHER_ALLOW_NON_LOOPBACK") == "1"
+    if os.environ.get("AETHER_ALLOW_NON_LOOPBACK") != "1":
+        return False
+    if os.environ.get("AETHER_COOKIE_SECURE") != "1":
+        return False
+    certificate = os.environ.get("AETHER_TLS_CERTFILE", "")
+    key = os.environ.get("AETHER_TLS_KEYFILE", "")
+    return bool(certificate and key and Path(certificate).is_file() and Path(key).is_file())

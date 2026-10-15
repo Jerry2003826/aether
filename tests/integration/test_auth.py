@@ -1,10 +1,14 @@
 import json
+import threading
+import time
 import uuid
 
 from fastapi.testclient import TestClient
 from sqlalchemy import text
 
 from aether_api.app import create_app
+from aether_api.auth_service import AuthService
+from aether_api.errors import ApiError
 from aether_api.settings import Settings
 from tests.integration.conftest import insert_task
 
@@ -164,6 +168,43 @@ def test_login_rate_limit_and_expiry(client: TestClient, aether_admin: str) -> N
     with psycopg.connect(aether_admin) as conn:
         revoked = conn.execute("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NOT NULL").fetchone()
     assert revoked is not None and revoked[0] >= 1
+
+
+def test_concurrent_login_failures_share_one_window(client: TestClient) -> None:
+    _bootstrap(client)
+    client.cookies.clear()
+    entered: list[int] = []
+    release = threading.Event()
+
+    def slow_login(self: AuthService, passphrase: str) -> dict:
+        entered.append(1)
+        assert release.wait(timeout=3)
+        raise ApiError(401, "login_failed", "口令不正确")
+
+    original = AuthService.login
+    AuthService.login = slow_login  # type: ignore[method-assign]
+    statuses: list[int] = []
+
+    def attempt() -> None:
+        response = client.post("/v1/auth/session", headers=ORIGIN, json={"passphrase": "wrong-passphrase"})
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=attempt) for _ in range(8)]
+    try:
+        for thread in threads:
+            thread.start()
+        deadline = time.time() + 2
+        while time.time() < deadline and len(entered) < 5:
+            time.sleep(0.01)
+        assert len(entered) == 5
+        release.set()
+        for thread in threads:
+            thread.join(timeout=3)
+    finally:
+        release.set()
+        AuthService.login = original  # type: ignore[method-assign]
+        client.app.state.login_throttle.clear()
+    assert sorted(statuses) == [401, 401, 401, 401, 401, 429, 429, 429]
 
 
 def test_idle_timeout(client: TestClient, aether_admin: str) -> None:

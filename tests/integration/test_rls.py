@@ -4,6 +4,7 @@ from psycopg.errors import ForeignKeyViolation, InsufficientPrivilege
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError, ProgrammingError
 
+from aether_storage.db import Database
 from tests.integration.conftest import insert_task
 
 
@@ -24,8 +25,9 @@ def test_composite_fk_and_api_cannot_mark_success(client, api_db, role_urls) -> 
     project_a = client.post("/v1/projects", headers={**headers, "Idempotency-Key": "fk-key-0001"}, json={"name": "甲"}).json()["id"]
     project_b = client.post("/v1/projects", headers={**headers, "Idempotency-Key": "fk-key-0002"}, json={"name": "乙"}).json()["id"]
     task_a = insert_task(api_db, owner_id, project_a, "约束任务")
+    worker = Database(role_urls["aether_worker"])
     with pytest.raises(DBAPIError) as raised:
-        with api_db.transaction(owner_id=owner_id, project_id=project_b) as conn:
+        with worker.transaction(owner_id=owner_id, project_id=project_b) as conn:
             conn.execute(
                 text(
                     "INSERT INTO task_nodes (project_id, task_id, node_key, role, objective, state, max_turns) "
@@ -44,6 +46,34 @@ def test_composite_fk_and_api_cannot_mark_success(client, api_db, role_urls) -> 
         with api_db.transaction(owner_id=owner_id, project_id=project_a) as conn:
             conn.execute(text("INSERT INTO verification_results DEFAULT VALUES"))
     assert isinstance(denied.value.orig, (InsufficientPrivilege, ProgrammingError))
+
+
+def test_terminal_status_cannot_become_schedulable(client, api_db, role_urls) -> None:
+    from aether_storage.db import Database
+    from tests.integration.test_auth import _bootstrap
+
+    _bootstrap(client)
+    session = client.get("/v1/auth/session").json()
+    owner_id = session["owner_id"]
+    csrf = session["csrf_token"]
+    project_id = client.post(
+        "/v1/projects",
+        headers={"Origin": "http://127.0.0.1:3000", "X-CSRF-Token": csrf, "Idempotency-Key": "terminal-key"},
+        json={"name": "终态"},
+    ).json()["id"]
+    worker = Database(role_urls["aether_worker"])
+    for terminal, schedulable in (("SUCCEEDED", "QUEUED"), ("FAILED", "DRAFT"), ("CANCELLED", "RUNNING")):
+        task_id = insert_task(api_db, owner_id, project_id, f"{terminal}-{schedulable}")
+        with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            conn.execute(text("UPDATE tasks SET status = :status WHERE id = :id"), {"status": terminal, "id": task_id})
+        with pytest.raises(DBAPIError) as worker_rejected:
+            with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+                conn.execute(text("UPDATE tasks SET status = :status WHERE id = :id"), {"status": schedulable, "id": task_id})
+        assert "terminal task cannot return" in str(worker_rejected.value)
+        with pytest.raises(DBAPIError) as api_rejected:
+            with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
+                conn.execute(text("UPDATE tasks SET status = 'QUEUED' WHERE id = :id"), {"id": task_id})
+        assert "terminal task cannot return" in str(api_rejected.value)
 
 
 def test_worker_can_mark_success(client, api_db, role_urls) -> None:

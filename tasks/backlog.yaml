@@ -69,9 +69,12 @@ tickets:
   status: done
   evidence:
   - migrations/versions/0001_initial.py
+  - migrations/sql/0003_grants.sql
+  - packages/storage/aether_storage/bootstrap.py
   - tests/integration/test_auth.py
   - tests/integration/test_rls.py
   - tests/integration/test_migration.py
+  - tests/integration/test_privileges.py
 - id: F03
   stage: G1
   scope: core

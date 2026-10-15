@@ -68,15 +68,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ApiError(503, "database_unconfigured", "数据库未配置")
         host = client_address(_client_host(request), request.headers.get("x-forwarded-for"), trust_forwarded_for=resolved.trust_forwarded_for)
         now = datetime.now(UTC)
-        if app.state.login_throttle.blocked(host, now):
+        if not app.state.login_throttle.acquire(host, now):
             raise ApiError(429, "rate_limited", "登录尝试过多", retryable=True)
         try:
             session = app.state.auth.login(str(body["passphrase"]))
         except ApiError as exc:
-            if exc.status == 401:
-                app.state.login_throttle.record_failure(host, now)
+            if exc.status != 401:
+                app.state.login_throttle.release(host)
             raise
-        app.state.login_throttle.clear(host)
+        app.state.login_throttle.release(host)
         return _session_response(session, resolved, status=200)
 
     @app.get("/v1/auth/session")

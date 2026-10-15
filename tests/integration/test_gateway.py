@@ -78,7 +78,7 @@ def _gateway(client, api_db, role_urls, aether_admin, upstream, *, timeout=5):
     )
     assert project.status_code == 201, project.text
     project_id = project.json()["id"]
-    issuer = ModelGateway(api_db, upstream_base=upstream, provider_key=PROVIDER_KEY, timeout=timeout)
+    issuer = ModelGateway(Database(role_urls["aether_worker"]), upstream_base=upstream, provider_key=PROVIDER_KEY, timeout=timeout)
     token = issuer.issue_token(
         owner_id=session["owner_id"],
         project_id=project_id,

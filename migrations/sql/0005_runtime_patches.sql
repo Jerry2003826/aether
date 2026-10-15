@@ -12,4 +12,6 @@ DROP POLICY IF EXISTS resource_heads_project_scope ON resource_heads;
 CREATE POLICY resource_heads_project_scope ON resource_heads
   USING (project_id = nullif(current_setting('aether.project_id', true), '')::uuid)
   WITH CHECK (project_id = nullif(current_setting('aether.project_id', true), '')::uuid);
-GRANT SELECT, INSERT, UPDATE, DELETE ON resource_heads TO aether_api, aether_worker;
+REVOKE ALL ON resource_heads FROM aether_api, aether_worker;
+GRANT SELECT ON resource_heads TO aether_api;
+GRANT SELECT, INSERT, UPDATE ON resource_heads TO aether_worker;

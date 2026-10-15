@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F08",
+  "current_task": "F07",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F08 minimal real UI and replayable events.",
+  "next_action": "Deliver command_outbox rows through a real Temporal dispatcher. Do not treat enqueue alone as delivery.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "60 passed for F04-F06; F07 planning+workflow 7 passed",
+  "last_test_result": "Before P1: 67 passed, 2 warnings in 12.57s, EXIT:0. After P1: 72 passed, 2 warnings in 15.23s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -37,15 +37,19 @@
   },
   "f04": {
     "status": "done",
-    "live_model": "not_run"
+    "live_model": "not_run",
+    "full_suite": "67 passed before P1; 72 passed after P1"
   },
   "f05": {
-    "status": "done"
+    "status": "done",
+    "full_suite": "67 passed before P1; 72 passed after P1"
   },
   "f06": {
-    "status": "done"
+    "status": "done",
+    "full_suite": "67 passed before P1; 72 passed after P1"
   },
   "f07": {
-    "status": "done"
+    "status": "done",
+    "dispatcher_delivery": "not_implemented"
   }
 }

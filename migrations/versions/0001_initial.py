@@ -33,6 +33,7 @@ def upgrade() -> None:
         $$;
         """
     )
+    op.execute(SQL.joinpath("task_status_guard.sql").read_text(encoding="utf-8"))
     op.execute(SQL.joinpath("0002_privileges.sql").read_text(encoding="utf-8"))
     op.execute(SQL.joinpath("0003_grants.sql").read_text(encoding="utf-8"))
 

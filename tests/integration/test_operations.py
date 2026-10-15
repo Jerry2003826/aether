@@ -23,7 +23,8 @@ def _ledger(client, api_db, role_urls, key: str):
     owner_id = session["owner_id"]
     project_id = project.json()["id"]
     task_id = insert_task(api_db, owner_id, project_id, key)
-    with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
+    worker = Database(role_urls["aether_worker"])
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         capability_id = conn.execute(
             text(
                 "INSERT INTO capability_grants (project_id, task_id, grantee_service, token_hash, capability_type, scope, expires_at, policy_version) "
