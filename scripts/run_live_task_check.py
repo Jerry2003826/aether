@@ -55,13 +55,7 @@ def _artifact_root() -> Path:
         return assert_storage_root(candidate)
     except ArtifactError:
         shutil.rmtree(candidate, ignore_errors=True)
-    fallback = Path("/tmp") / f"aether-live-task-{uuid.uuid4().hex}"
-    fallback.mkdir()
-    try:
-        return assert_storage_root(fallback)
-    except ArtifactError:
-        shutil.rmtree(fallback, ignore_errors=True)
-        raise
+        raise ArtifactError("host_home_rejected", "临时目录在宿主 home 下。把 TMPDIR 指到 home 之外再跑。") from None
 
 
 def _port() -> int:
