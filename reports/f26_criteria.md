@@ -1,6 +1,6 @@
 # F26 验收与测试
 
-没有 key 就记 blocked。脚本模型不代替这次 live 验收。`live_ready` 保持 false。
+没有 key 就记 blocked。脚本模型不代替这次 live 验收。`live_ready` 保持 false。F26 在 `STATUS.json` 和 `tasks/backlog.yaml` 里是 `blocked`，不是 `done`。`blocked` 不是通过。
 
 要跑真实探针，三个变量都要有：
 

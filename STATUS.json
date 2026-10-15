@@ -140,10 +140,10 @@
     "vulnerability_db": "offline_not_run"
   },
   "f26": {
-    "status": "done",
-    "ci_run": "38694676859",
+    "status": "blocked",
     "live_ready": false,
-    "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"]
+    "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"],
+    "reason": "缺少 AETHER_LIVE_MODEL_KEY、AETHER_LIVE_MODEL_BASE、AETHER_LIVE_MODEL_ALIAS。blocked 不是通过。"
   },
   "f27": {
     "status": "done",
