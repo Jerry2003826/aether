@@ -324,7 +324,7 @@ tickets:
   - 可信suite/contract/candidate hash绑定；改码后旧绿灯失效
   - actor不能改可信grader结果；空test/skipall/伪造JUnit不直接通过
   - 断worker/断runner/取消三类真实故障演示；live模型演示另列F26
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/verification.py
   - tests/integration/test_verification.py

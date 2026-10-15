@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F14 is implemented and in_progress until PR CI and SonarCloud are green. Then F15.",
+  "next_action": "Implement F15 CodeGraph adapter. Do not mark it done unless the release probe, snapshot hash, and network block are real.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "PR #1 CI run 38676628928: pack-and-unit 32 passed; integration 91 passed, 2 warnings in 35.83s. SonarCloud quality gate OK (reliability 1, security 1).",
+  "last_test_result": "PR #1 CI run 38677249818: unit 32 passed; integration 95 passed, 2 warnings in 38.76s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -82,5 +82,9 @@
     "linux_namespace": "probed",
     "network_errno": 101,
     "openhands_live_model": "not_run"
+  },
+  "f14": {
+    "status": "done",
+    "ci_run": "38677249818"
   }
 }
