@@ -11,6 +11,7 @@ import hashlib
 import importlib.util
 import json
 import re
+import urllib.error
 import urllib.request
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,18 @@ _DICT_SHA256 = str(_MANIFEST["dict_sha256"])
 _CACHE = _ROOT / ".cache" / "tokenizer" / "jieba-0.42.1.dict.txt"
 _LATIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _OPERATORS = ("!=", "==", "<=", ">=", "&&", "||", "->", "::")
+
+
+def _download_dictionary() -> None:
+    last: Exception | None = None
+    for _ in range(3):
+        try:
+            urllib.request.urlretrieve(str(_MANIFEST["dict_url"]), _CACHE)
+            return
+        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+            last = exc
+            _CACHE.unlink(missing_ok=True)
+    raise RuntimeError("jieba dictionary download failed") from last
 
 
 def _sha256(path: Path) -> str:
@@ -45,7 +58,7 @@ def _dictionary_path() -> Path:
         if candidate is not None and candidate.is_file() and _sha256(candidate) == _DICT_SHA256:
             return candidate
     _CACHE.parent.mkdir(parents=True, exist_ok=True)
-    urllib.request.urlretrieve(str(_MANIFEST["dict_url"]), _CACHE)
+    _download_dictionary()
     if _sha256(_CACHE) != _DICT_SHA256:
         _CACHE.unlink(missing_ok=True)
         raise RuntimeError("jieba dictionary hash mismatch")
