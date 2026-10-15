@@ -17,6 +17,8 @@ class Settings:
     session_hours: int = 12
     idle_minutes: int = 30
     login_failure_limit: int = 5
+    login_window_seconds: int = 900
+    trust_forwarded_for: bool = False
 
     @classmethod
     def from_env(cls) -> Settings:
@@ -27,6 +29,7 @@ class Settings:
             allow_testclient=os.environ.get("AETHER_ALLOW_TESTCLIENT") == "1",
             origins=frozenset(item.strip() for item in origins.split(",") if item.strip()),
             cookie_secure=os.environ.get("AETHER_COOKIE_SECURE") == "1",
+            trust_forwarded_for=os.environ.get("AETHER_TRUST_FORWARDED_FOR") == "1",
         )
 
 

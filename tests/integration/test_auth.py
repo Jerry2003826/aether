@@ -46,6 +46,29 @@ def test_bootstrap_rejects_non_loopback(role_urls, clean_db, tmp_path) -> None:
     assert response.json()["code"] == "bootstrap_not_loopback"
 
 
+def test_concurrent_bootstrap_is_conflict(client: TestClient) -> None:
+    import threading
+
+    barrier = threading.Barrier(2)
+    statuses: list[int] = []
+
+    def attempt() -> None:
+        barrier.wait()
+        response = client.post(
+            "/v1/auth/bootstrap",
+            headers=ORIGIN,
+            json={"bootstrap_secret": client.bootstrap_secret, "display_name": "所有者", "passphrase": PASSPHRASE},
+        )
+        statuses.append(response.status_code)
+
+    threads = [threading.Thread(target=attempt), threading.Thread(target=attempt)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(statuses) == [201, 409]
+
+
 def test_project_list_does_not_rotate_csrf(client: TestClient) -> None:
     created = _bootstrap(client)
     original = created["csrf_token"]
@@ -128,7 +151,7 @@ def test_login_rate_limit_and_expiry(client: TestClient, aether_admin: str) -> N
     blocked = client.post("/v1/auth/session", headers=ORIGIN, json={"passphrase": PASSPHRASE})
     assert blocked.status_code == 429
 
-    client.app.state.login_failures.clear()
+    client.app.state.login_throttle.clear()
     logged = client.post("/v1/auth/session", headers=ORIGIN, json={"passphrase": PASSPHRASE})
     assert logged.status_code == 200, logged.text
     import psycopg
@@ -136,6 +159,11 @@ def test_login_rate_limit_and_expiry(client: TestClient, aether_admin: str) -> N
     with psycopg.connect(aether_admin, autocommit=True) as conn:
         conn.execute("UPDATE auth_sessions SET expires_at = now() - interval '1 minute'")
     assert client.get("/v1/auth/session").status_code == 401
+    import psycopg
+
+    with psycopg.connect(aether_admin) as conn:
+        revoked = conn.execute("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NOT NULL").fetchone()
+    assert revoked is not None and revoked[0] >= 1
 
 
 def test_idle_timeout(client: TestClient, aether_admin: str) -> None:
@@ -145,6 +173,11 @@ def test_idle_timeout(client: TestClient, aether_admin: str) -> None:
     with psycopg.connect(aether_admin, autocommit=True) as conn:
         conn.execute("UPDATE auth_sessions SET last_seen_at = now() - interval '31 minutes'")
     assert client.get("/v1/auth/session").status_code == 401
+    import psycopg
+
+    with psycopg.connect(aether_admin) as conn:
+        revoked = conn.execute("SELECT count(*) FROM auth_sessions WHERE revoked_at IS NOT NULL").fetchone()
+    assert revoked is not None and revoked[0] >= 1
 
 
 def test_project_scope_does_not_leak(client: TestClient, api_db) -> None:

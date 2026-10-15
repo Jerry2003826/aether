@@ -11,6 +11,7 @@ from typing import Any
 from argon2 import PasswordHasher
 from argon2.exceptions import VerifyMismatchError
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from aether_api.errors import ApiError
 from aether_domain.security import hashes_match, sha256_text
@@ -68,18 +69,21 @@ class AuthService:
             raise ApiError(409, "bootstrap_consumed", "引导密钥已使用")
         if not hashes_match(str(record.get("secret_sha256")), secret):
             raise ApiError(401, "bootstrap_rejected", "引导密钥不正确")
-        with self.database.transaction() as conn:
-            existing = conn.execute(text("SELECT id FROM owners")).first()
-            if existing is not None:
-                raise ApiError(409, "owner_exists", "已经有所有者")
-            owner = conn.execute(
-                text(
-                    "INSERT INTO owners (display_name, password_hash) VALUES (:name, :password_hash) "
-                    "RETURNING id::text AS id, display_name"
-                ),
-                {"name": display_name.strip(), "password_hash": HASHER.hash(passphrase)},
-            ).mappings().one()
-            session = self._insert_session(conn, owner["id"])
+        try:
+            with self.database.transaction() as conn:
+                existing = conn.execute(text("SELECT id FROM owners")).first()
+                if existing is not None:
+                    raise ApiError(409, "owner_exists", "已经有所有者")
+                owner = conn.execute(
+                    text(
+                        "INSERT INTO owners (display_name, password_hash) VALUES (:name, :password_hash) "
+                        "RETURNING id::text AS id, display_name"
+                    ),
+                    {"name": display_name.strip(), "password_hash": HASHER.hash(passphrase)},
+                ).mappings().one()
+                session = self._insert_session(conn, owner["id"])
+        except IntegrityError as exc:
+            raise ApiError(409, "owner_exists", "已经有所有者") from exc
         record["consumed"] = True
         _save_bootstrap(path, record)
         return self._public_session(owner["id"], owner["display_name"], session)
@@ -169,9 +173,16 @@ class AuthService:
             raise ApiError(401, "unauthenticated", "未登录")
         now = datetime.now(UTC)
         if row["expires_at"] <= now or now - row["last_seen_at"] > timedelta(minutes=self.idle_minutes):
-            conn.execute(text("UPDATE auth_sessions SET revoked_at = now() WHERE id = :id"), {"id": row["id"]})
+            self._revoke_expired(row["id"])
             raise ApiError(401, "session_expired", "会话已过期")
         return dict(row)
+
+    def _revoke_expired(self, session_id: str) -> None:
+        with self.database.transaction() as conn:
+            conn.execute(
+                text("UPDATE auth_sessions SET revoked_at = now() WHERE id = :id AND revoked_at IS NULL"),
+                {"id": session_id},
+            )
 
     @staticmethod
     def _public_session(owner_id: str, display_name: str, session: dict[str, Any]) -> dict[str, Any]:

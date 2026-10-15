@@ -5,8 +5,7 @@ from __future__ import annotations
 import base64
 import json
 import uuid
-from collections import defaultdict
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -18,6 +17,7 @@ from aether_api.auth_service import AuthService
 from aether_api.errors import ApiError
 from aether_api.health import ready_payload
 from aether_api.settings import Settings
+from aether_api.throttle import LoginThrottle, client_address
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
@@ -30,7 +30,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.state.settings = resolved
     app.state.database = Database(resolved.database_url) if resolved.database_url else None
     app.state.auth = AuthService(app.state.database, session_hours=resolved.session_hours, idle_minutes=resolved.idle_minutes) if app.state.database else None
-    app.state.login_failures = defaultdict(int)
+    app.state.login_throttle = LoginThrottle(limit=resolved.login_failure_limit, window=timedelta(seconds=resolved.login_window_seconds))
 
     @app.middleware("http")
     async def request_id(request: Request, call_next):  # type: ignore[no-untyped-def]
@@ -65,16 +65,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _require_fields(body, "passphrase")
         if app.state.auth is None:
             raise ApiError(503, "database_unconfigured", "数据库未配置")
-        host = _client_host(request)
-        if app.state.login_failures[host] >= resolved.login_failure_limit:
+        host = client_address(_client_host(request), request.headers.get("x-forwarded-for"), trust_forwarded_for=resolved.trust_forwarded_for)
+        now = datetime.now(UTC)
+        if app.state.login_throttle.blocked(host, now):
             raise ApiError(429, "rate_limited", "登录尝试过多", retryable=True)
         try:
             session = app.state.auth.login(str(body["passphrase"]))
         except ApiError as exc:
             if exc.status == 401:
-                app.state.login_failures[host] += 1
+                app.state.login_throttle.record_failure(host, now)
             raise
-        app.state.login_failures[host] = 0
+        app.state.login_throttle.clear(host)
         return _session_response(session, resolved, status=200)
 
     @app.get("/v1/auth/session")
@@ -124,16 +125,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ApiError(422, "invalid_project", "项目名称不合法")
         payload_hash = sha256_text(json.dumps({"name": name}, sort_keys=True, separators=(",", ":")))
         with app.state.database.transaction(owner_id=owner["owner_id"]) as conn:
-            existing = conn.execute(
+            inserted = conn.execute(
                 text(
-                    "SELECT payload_sha256, response_status, response_body FROM idempotency_keys "
-                    "WHERE owner_id = :owner AND project_id IS NULL AND route = :route AND idempotency_key = :key"
+                    "INSERT INTO idempotency_keys (owner_id, route, idempotency_key, payload_sha256, response_status, response_body) "
+                    "VALUES (:owner, 'POST /v1/projects', :key, :payload_hash, 0, '{}'::jsonb) "
+                    "ON CONFLICT (owner_id, route, idempotency_key) WHERE project_id IS NULL DO NOTHING "
+                    "RETURNING id"
                 ),
-                {"owner": owner["owner_id"], "route": "POST /v1/projects", "key": key},
-            ).mappings().first()
-            if existing is not None:
-                if existing["payload_sha256"] != payload_hash:
-                    raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容")
+                {"owner": owner["owner_id"], "key": key, "payload_hash": payload_hash},
+            ).first()
+            if inserted is None:
+                existing = conn.execute(
+                    text(
+                        "SELECT payload_sha256, response_status, response_body FROM idempotency_keys "
+                        "WHERE owner_id = :owner AND project_id IS NULL AND route = 'POST /v1/projects' AND idempotency_key = :key"
+                    ),
+                    {"owner": owner["owner_id"], "key": key},
+                ).mappings().one()
+                if existing["payload_sha256"] != payload_hash or existing["response_status"] == 0:
+                    raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容或尚未完成")
                 return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
             try:
                 row = conn.execute(
@@ -148,16 +158,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             project = _project(row)
             conn.execute(
                 text(
-                    "INSERT INTO idempotency_keys (owner_id, route, idempotency_key, payload_sha256, response_status, response_body) "
-                    "VALUES (:owner, :route, :key, :payload_hash, 201, CAST(:body AS jsonb))"
+                    "UPDATE idempotency_keys SET response_status = 201, response_body = CAST(:body AS jsonb) "
+                    "WHERE owner_id = :owner AND project_id IS NULL AND route = 'POST /v1/projects' AND idempotency_key = :key"
                 ),
-                {
-                    "owner": owner["owner_id"],
-                    "route": "POST /v1/projects",
-                    "key": key,
-                    "payload_hash": payload_hash,
-                    "body": json.dumps(project),
-                },
+                {"owner": owner["owner_id"], "key": key, "body": json.dumps(project)},
             )
         return JSONResponse(status_code=201, content=project)
 
