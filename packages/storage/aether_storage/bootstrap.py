@@ -12,8 +12,8 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parents[3]
 SQL_DIR = ROOT / "migrations" / "sql"
 ROLES = ("aether_api", "aether_worker", "aether_verifier", "aether_dispatcher")
-ALEMBIC_HEAD = "0007"
-_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006")
+ALEMBIC_HEAD = "0008"
+_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006", "0007")
 
 
 def _execute_script(conn: psycopg.Connection, path: Path) -> None:

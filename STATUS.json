@@ -135,8 +135,7 @@
     "live": "not_run"
   },
   "f25": {
-    "status": "done",
-    "ci_run": "38694676859",
+    "status": "in_progress",
     "vulnerability_db": "offline_not_run"
   },
   "f26": {

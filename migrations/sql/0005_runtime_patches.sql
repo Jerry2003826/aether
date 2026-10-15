@@ -15,3 +15,7 @@ CREATE POLICY resource_heads_project_scope ON resource_heads
 REVOKE ALL ON resource_heads FROM aether_api, aether_worker;
 GRANT SELECT ON resource_heads TO aether_api;
 GRANT SELECT, INSERT, UPDATE ON resource_heads TO aether_worker;
+
+ALTER TABLE command_outbox DROP CONSTRAINT IF EXISTS command_outbox_status_check;
+ALTER TABLE command_outbox ADD CONSTRAINT command_outbox_status_check
+  CHECK (status IN ('PENDING', 'DELIVERING', 'DELIVERED', 'FAILED', 'STOPPED'));

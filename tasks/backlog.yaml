@@ -561,7 +561,7 @@ tickets:
   - 使用实际构建产物生成SBOM；漏洞库时效与离线/在线模式可见
   - 固定依赖和完整许可文件；不得用README宽松标签替代依赖审计
   - 恢复DB+artifact后先停止外部dispatch并对账；不down -v删数据
-  status: done
+  status: in_progress
   evidence:
   - services/worker/aether_worker/supply.py
   - tests/unit/test_supply_chain.py
