@@ -15,6 +15,7 @@ from sqlalchemy.exc import IntegrityError
 
 from aether_api.auth_service import AuthService
 from aether_api.control import register_control_routes
+from aether_api.memory_routes import register_memory_routes
 from aether_api.errors import ApiError
 from aether_api.health import ready_payload
 from aether_api.settings import Settings
@@ -232,6 +233,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         return Response(status_code=204)
 
     register_control_routes(app, resolved)
+    register_memory_routes(app, resolved)
     return app
 
 

@@ -33,6 +33,7 @@ def _claim(database: Database, limit: int) -> list[dict[str, Any]]:
                   SELECT project_id, id
                   FROM command_outbox
                   WHERE status IN ('PENDING', 'DELIVERING')
+                    AND kind NOT LIKE 'memory.%'
                   ORDER BY created_at, command_key
                   FOR UPDATE SKIP LOCKED
                   LIMIT :limit

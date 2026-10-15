@@ -278,8 +278,12 @@ tickets:
   - 事实/来源声称/推断/用户确认分开，冲突不悄悄覆盖
   - 预算化目标+计划+证据+记忆+渐进skill，不回灌全量历史
   - 高敏/跨project数据不能由摘要或CodeGraph绕过出口授权
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/memory.py
+  - services/api/aether_api/memory_routes.py
+  - tests/integration/test_memory.py
+  - reports/f12_criteria.md
 - id: F13
   stage: G4
   scope: core

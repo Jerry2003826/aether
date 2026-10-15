@@ -83,7 +83,7 @@ paths:
   - get
   - post
   implemented_by: F12
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/skills
   methods:
   - get
@@ -113,8 +113,8 @@ paths:
   methods:
   - patch
   - delete
-  implemented_by: F16
-  status: not_implemented
+  implemented_by: F12
+  status: implemented
 - path: /v1/projects/{project_id}/watches/{watch_id}
   methods:
   - patch
