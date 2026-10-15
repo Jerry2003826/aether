@@ -107,8 +107,11 @@ tickets:
   - 无授权工具/出口拒绝；body不能改变token的project/task
   - provider key不进actor/UI/log；read-only仍要审查数据出口
   - LiteLLM只适配模型；用fake upstream测真实HTTP/token路径而非return固定成功
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/gateway/aether_gateway/model.py
+  - services/gateway/aether_gateway/registry.py
+  - tests/integration/test_gateway.py
 - id: F05
   stage: G1
   scope: core

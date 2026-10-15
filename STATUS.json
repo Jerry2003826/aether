@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F04",
+  "current_task": "F05",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F04 model and tool gateway.",
+  "next_action": "Implement F05 transactional budget ledger.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "32 passed",
+  "last_test_result": "gateway 1 passed; full suite not re-run after F04",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -34,5 +34,9 @@
   },
   "f03": {
     "status": "done"
+  },
+  "f04": {
+    "status": "done",
+    "live_model": "not_run"
   }
 }
