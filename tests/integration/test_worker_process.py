@@ -26,6 +26,7 @@ from tests.integration.test_auth import ORIGIN
 
 PASSPHRASE = "correct horse battery"
 ORIGIN_VALUE = "http://127.0.0.1:3000"
+ROOT = Path(__file__).resolve().parents[2]
 
 
 def _port() -> int:
@@ -121,7 +122,7 @@ def _wait_http(url: str) -> None:
 
 
 def _start(args: list[str], env: dict[str, str], bucket: list[str]) -> subprocess.Popen[str]:
-    proc = subprocess.Popen(args, cwd="/workspace", env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(args, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     threading.Thread(target=_drain, args=(proc.stdout, bucket), daemon=True).start()
     return proc
 
@@ -142,7 +143,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
     api_port = _port()
     queue = f"aether-audit-{uuid.uuid4()}"
     artifact_root = tmp_path / "artifacts"
-    secret_path = Path("secrets") / f"audit-worker-{uuid.uuid4().hex}.json"
+    secret_path = ROOT / "secrets" / f"audit-worker-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(secret_path)
     env = os.environ.copy()
     env.update(
