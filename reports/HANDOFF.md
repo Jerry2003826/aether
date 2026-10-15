@@ -63,5 +63,6 @@ P1 覆盖：
 - F25 done。同一对 CI。恢复在同一事务里写回 `tables.json`，并把 `PENDING`/`DELIVERING` 改成 `STOPPED`。产物先复制到临时目录再改名。漏洞库仍是 offline not_run。
 - F26 是 blocked，不是 done。`live_ready` 是 false。要跑真实探针必须同时提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`。缺任何一个就是 blocked，脚本模型不代替。
 - `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
-- CodeGraph 产品开关仍然关闭，`codegraph_enabled` 是 false，仍是 not_run。
-- 下一步：等这次 head 的 PR CI 和 Sonar。绿了再把 F24 和 F25 标 done。F26 保持 blocked。
+- 最新绿的是 head `86eb0d7`。PR CI run `38699224527`：unit `51 passed in 8.25s`，integration `137 passed, 1 warning in 97.68s`。push run `38699216284`。SonarCloud quality gate OK。F00–F25 与 F27 是 done。F26 是 blocked。
+- 仍是 not_run：F26 live 探针、Hermes 四组对照、CodeGraph 产品启用。漏洞库仍是 offline not_run。
+- 下一步：用户提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS` 后再跑 F26 live。不宣布 live 可用，也不宣布对照领先。

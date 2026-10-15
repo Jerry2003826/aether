@@ -1,21 +1,27 @@
 {
   "spec_version": "1.4",
   "as_of": "2026-10-15",
-  "artifact_type": "implementation_in_progress",
-  "current_task": "F22",
-  "product_implementation": "in_progress",
+  "artifact_type": "core_done_live_blocked",
+  "current_task": "F26",
+  "product_implementation": "done",
   "readiness": {
-    "kernel_engineering": "not_run",
-    "product_engineering": "not_run",
-    "live_ready": "not_run",
+    "kernel_engineering": "passed",
+    "product_engineering": "passed",
+    "live_ready": "blocked",
     "codegraph_enabled": "not_run",
-    "comparative_evidence": "not_evaluated"
+    "comparative_evidence": "not_run"
   },
-  "next_action": "Implement F22 console and the remaining API operations.",
-  "last_executed_commands": [
-    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
+  "not_run": [
+    "F26 live model probe",
+    "Hermes four-way comparison",
+    "CodeGraph product enablement"
   ],
-  "last_test_result": "PR #1 CI run 38686730319: unit 40 passed in 7.73s; integration 118 passed, 1 warning in 75.07s. SonarCloud quality gate OK.",
+  "next_action": "User supplies AETHER_LIVE_MODEL_KEY, AETHER_LIVE_MODEL_BASE, and AETHER_LIVE_MODEL_ALIAS, then run the F26 live probe. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "last_executed_commands": [
+    "uv run --locked --no-build pytest -q tests/unit",
+    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
+  ],
+  "last_test_result": "PR #1 CI run 38699224527 and push run 38699216284 on 86eb0d7: unit 51 passed in 8.25s; integration 137 passed, 1 warning in 97.68s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
