@@ -55,6 +55,5 @@ P1 覆盖：
 - F17 done。PR #1 CI run `38684944139`：unit `34 passed in 8.20s`，integration `113 passed, 1 warning in 70.30s`。SonarCloud quality gate OK。进程崩溃后调用返回 unknown，后续调用不再挂起。服务器起不来是 `connect_failed`。
 - F18 done。同一 CI run。未批准不建 Temporal schedule。水位不变不写通知。重复 trigger 只有一条站内通知。停止后不再派发。默认不发外部消息。
 - F19 done。PR #1 CI run `38685299953`：unit `34 passed in 6.97s`，integration `114 passed, 1 warning in 67.18s`。SonarCloud quality gate OK。探索默认关闭。不称协同过滤。对照表 `reports/f19_criteria.md`。
-- F15 增加了单独测试：`STATUS.json` 的 `codegraph_enabled` 仍是 not_run，`f15.product_enabled` 和锁文件都是 false。
-- F20 in_progress。元数据、正文、资源分开加载。未批准脚本不执行。trace 脱敏且不能读 holdout。候选不能自动升权或改控制代码。对照表 `reports/f20_criteria.md`。还没标 done。
-- live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
+- 下一步：F21 技能评测、canary 和回滚。live 模型、Hermes 仍是 not_run。
