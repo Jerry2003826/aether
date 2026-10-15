@@ -46,6 +46,7 @@ P1 覆盖：
 - 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
 - F12 done。没有测试产物的 `observed_test` 降为 proposed。同一 CI run 通过。对照表 `reports/f12_criteria.md`。
 - F13 done。GitHub runner 上的真实容器测试通过：同一 job 只有一个容器，重启后重新挂上；容器内公网、元数据和 Docker socket 不可达，密钥不在环境里，只能打到该 job 的脚本网关。对照表 `reports/f13_criteria.md`。
-- 下一步：F14 候选导出和独立验收。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
+- F14 in_progress。候选哈希绑定、空测试/skip/伪造 JUnit 不通过、actor 不能写验收表，以及断 worker、断 runner、取消都有测试。代码任务页是 `/code`。还没把这项标 done，要等这次提交的 CI 和 Sonar。对照表 `reports/f14_criteria.md`。
+- 下一步：等 F14 的 CI 变绿后标 done，再做 F15。F15 不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

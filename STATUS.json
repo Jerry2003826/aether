@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F14 candidate export and independent verification. F15 stays after F14.",
+  "next_action": "F14 is implemented and in_progress until PR CI and SonarCloud are green. Then F15.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
