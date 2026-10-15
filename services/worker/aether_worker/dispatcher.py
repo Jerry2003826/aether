@@ -71,15 +71,18 @@ def _mark(database: Database, project_id: str, command_id: str, status: str) -> 
         )
 
 
-async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: str, task_id: str, command_id: str, project_id: str, task_queue: str) -> None:
+async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: str, task_id: str, command_id: str, project_id: str, task_queue: str, intake_pause_seconds: float = 0) -> None:
+    argument: str | dict[str, object] = task_id
+    if intake_pause_seconds > 0 and getattr(workflow, "accepts_intake_pause", False):
+        argument = {"task_id": task_id, "intake_pause_seconds": intake_pause_seconds}
     try:
-        handle = await client.start_workflow(workflow.run, task_id, id=workflow_id, task_queue=task_queue)
+        handle = await client.start_workflow(workflow.run, argument, id=workflow_id, task_queue=task_queue)
     except WorkflowAlreadyStartedError:
         handle = client.get_workflow_handle(workflow_id)
     await handle.signal(workflow.command, {"command_id": command_id, "project_id": project_id})
 
 
-async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20, workflow: type[TaskWorkflow] = TaskWorkflow) -> dict[str, list[str]]:
+async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20, workflow: type[TaskWorkflow] = TaskWorkflow, intake_pause_seconds: float = 0) -> dict[str, list[str]]:
     """Signal each pending command. Temporal rejection leaves the row DELIVERING for a later poll."""
     delivered: list[str] = []
     failed: list[str] = []
@@ -102,6 +105,7 @@ async def deliver_pending(database: Database, client: Client, *, task_queue: str
                 command_id=command_id,
                 project_id=str(row["project_id"]),
                 task_queue=task_queue,
+                intake_pause_seconds=intake_pause_seconds,
             )
         except Exception:
             failed.append(command_key)

@@ -18,7 +18,7 @@ from aether_storage.db import Database
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
-from aether_worker.goal_effect import WorkerEndpoints, configure, materialize_goal
+from aether_worker.goal_effect import WorkerEndpoints, configure, execute_task, prepare_task
 from aether_worker.memory import apply_memory_commands
 
 
@@ -51,6 +51,19 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
             apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
 
 
+def _intake_pause_seconds() -> float:
+    raw = os.environ.get("AETHER_INTAKE_PAUSE_SECONDS", "0").strip()
+    if raw == "":
+        return 0.0
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise SystemExit("AETHER_INTAKE_PAUSE_SECONDS 必须是非负秒数") from exc
+    if value < 0:
+        raise SystemExit("AETHER_INTAKE_PAUSE_SECONDS 必须是非负秒数")
+    return value
+
+
 def endpoints_from_env() -> WorkerEndpoints:
     missing = [
         name
@@ -66,6 +79,7 @@ def endpoints_from_env() -> WorkerEndpoints:
         artifact_root=Path(os.environ.get("AETHER_ARTIFACT_ROOT", "data/artifacts")),
         temporal_address=os.environ["AETHER_TEMPORAL_ADDRESS"],
         task_queue=os.environ.get("AETHER_TASK_QUEUE", "aether-tasks"),
+        intake_pause_seconds=_intake_pause_seconds(),
     )
 
 
@@ -77,7 +91,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         client,
         task_queue=resolved.task_queue,
         workflows=[DurableTaskWorkflow],
-        activities=[materialize_goal],
+        activities=[prepare_task, execute_task],
     )
     dispatcher = Database(resolved.dispatcher_url)
     database = Database(resolved.worker_url)
@@ -90,7 +104,13 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     async with worker:
         print("aether-worker-ready", flush=True)
         while not stop.is_set():
-            await deliver_pending(dispatcher, client, task_queue=resolved.task_queue, workflow=DurableTaskWorkflow)
+            await deliver_pending(
+                dispatcher,
+                client,
+                task_queue=resolved.task_queue,
+                workflow=DurableTaskWorkflow,
+                intake_pause_seconds=resolved.intake_pause_seconds,
+            )
             route_pending(dispatcher, database, verifier, store)
             try:
                 await asyncio.wait_for(stop.wait(), timeout=0.25)

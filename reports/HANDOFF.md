@@ -91,6 +91,18 @@ EXIT:0
 
 `scripts/verify_freeze.py` 在没有本地 `.hermes` 检出时 `passed`。`unittest discover -s tests -p 'test_*.py'` 76 项 OK。F26 live 没有重跑。下一步是看这条修复分支的 CI。
 
+## 审计二轮
+
+基线 `55fd636`。记录在 `reports/audits/gpt_round2/REPAIR_RESULT.md`。`STATUS.json` 没有改。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/unit tests/integration --tb=line
+254 passed, 1 warning in 198.69s
+EXIT:0
+```
+
+任务路径会离开 `QUEUED`。脚本提供者不是 live 模型，`live_ready` 不因此改变。F26 live 没有重跑。
+
 ## Hermes 对照审查修复
 
 PR #4 已合入 main `9d22bb8`。Codex 的 P1 已改在 `services/worker/aether_worker/hermes_compare.py`：子进程环境是允许名单，`HOME` 和 `HERMES_HOME` 指向隔离目录；learned 不传 `--ignore-rules`，笔记写进 `memories/MEMORY.md`；`--toolsets bot_room` 加上空的 `platform_toolsets.cli`，不加载终端和文件工具；调用失败后已计量的 `gateway.calls` 仍进入报告；`stream` 和 `stream_options` 原样转发。P2 也改了：转发前预留 token，整段回复当一个 JSON 对象打分，四组共用 45 秒墙钟，记录上游返回的 model，开跑前核对钉住的 Hermes 提交和版本。

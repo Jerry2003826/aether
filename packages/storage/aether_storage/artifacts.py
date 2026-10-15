@@ -13,7 +13,7 @@ import threading
 import uuid
 import zipfile
 from io import BytesIO
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -563,8 +563,7 @@ class ArtifactStore:
             fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
             try:
                 fcntl.flock(fd, fcntl.LOCK_EX)
-                os.write(fd, line)
-                os.fsync(fd)
+                self._write_all(fd, line)
             finally:
                 fcntl.flock(fd, fcntl.LOCK_UN)
                 os.close(fd)
@@ -574,13 +573,69 @@ class ArtifactStore:
         if not path.exists():
             return []
         with self._journal_guard:
-            with path.open(encoding="utf-8") as handle:
-                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
-                try:
-                    raw = handle.read()
-                finally:
-                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
-        return [json.loads(line) for line in raw.splitlines() if line.strip()]
+            fd = os.open(path, os.O_RDWR)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                raw = self._read_all(fd)
+                if raw and not raw.endswith(b"\n"):
+                    head, _sep, tail = raw.rpartition(b"\n")
+                    self._quarantine_journal_tail(project_id, tail)
+                    kept = head + b"\n" if head else b""
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.ftruncate(fd, 0)
+                    if kept:
+                        self._write_all(fd, kept)
+                    else:
+                        os.fsync(fd)
+                    raw = kept
+                return self._parse_journal(raw)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
+
+    def _quarantine_journal_tail(self, project_id: str, tail: bytes) -> None:
+        directory = self.root / "journal-quarantine"
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{project_id}-{uuid.uuid4().hex}.tail"
+        fd = os.open(target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            self._write_all(fd, tail)
+        finally:
+            os.close(fd)
+
+    @staticmethod
+    def _parse_journal(raw: bytes) -> list[dict[str, object]]:
+        rows: list[dict[str, object]] = []
+        if not raw:
+            return rows
+        for index, line in enumerate(raw.decode("utf-8").splitlines(), start=1):
+            if not line.strip():
+                continue
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError as exc:
+                raise ArtifactError("journal_corrupt", f"日志第 {index} 行损坏") from exc
+        return rows
+
+    @staticmethod
+    def _read_all(fd: int) -> bytes:
+        chunks: list[bytes] = []
+        while True:
+            block = os.read(fd, 1024 * 1024)
+            if not block:
+                break
+            chunks.append(block)
+        return b"".join(chunks)
+
+    @staticmethod
+    def _write_all(fd: int, payload: bytes) -> None:
+        view = memoryview(payload)
+        while view:
+            written = os.write(fd, view)
+            if written <= 0:
+                raise ArtifactError("journal_short_write", "日志写入没有前进")
+            view = view[written:]
+        os.fsync(fd)
 
     def _insert(
         self,
@@ -711,6 +766,12 @@ class ArtifactStore:
             raise ArtifactError("media_type_rejected", "快照只接受 zip 或 tar")
         if len(names) > max_files or total > max_bytes:
             raise ArtifactError("archive_limit", "解压后的文件数量或大小超过上限")
+        seen: set[str] = set()
+        for name in names:
+            canonical = self._canonical_member_name(name)
+            if canonical in seen:
+                raise ArtifactError("archive_collision", "归档成员规范化后出现重名")
+            seen.add(canonical)
         return names
 
     def _archive_payloads(self, data: bytes, media_type: str, names: list[str]) -> dict[str, bytes]:
@@ -718,18 +779,18 @@ class ArtifactStore:
         if media_type == "application/zip":
             with zipfile.ZipFile(BytesIO(data)) as archive:
                 for name in names:
-                    payloads[name] = archive.read(name)
+                    payloads[self._canonical_member_name(name)] = archive.read(name)
             return payloads
         with tarfile.open(fileobj=BytesIO(data), mode="r:") as archive:
             for name in names:
                 extracted = archive.extractfile(name)
                 if extracted is None:
                     raise ArtifactError("extract_failed", "无法读取归档成员")
-                payloads[name] = extracted.read()
+                payloads[self._canonical_member_name(name)] = extracted.read()
         return payloads
 
     def _destination_member(self, destination: Path, name: str) -> Path:
-        self._reject_member_name(name)
+        name = self._canonical_member_name(name)
         target = (destination / name).resolve()
         if destination.resolve() not in target.parents and target != destination.resolve():
             raise ArtifactError("path_rejected", "解压路径越界")
@@ -737,9 +798,18 @@ class ArtifactStore:
 
     @staticmethod
     def _reject_member_name(name: str) -> None:
-        path = Path(name)
+        path = PurePosixPath(name)
         if not name or name.startswith("/") or "\\" in name or ".." in path.parts or path.is_absolute():
             raise ArtifactError("path_rejected", "归档成员路径不合法")
+
+    @staticmethod
+    def _canonical_member_name(name: str) -> str:
+        ArtifactStore._reject_member_name(name)
+        parts = [part for part in PurePosixPath(name).parts if part not in {"", "."}]
+        canonical = "/".join(parts)
+        if not canonical or canonical == "." or ".." in parts:
+            raise ArtifactError("path_rejected", "归档文件不能指向快照根目录")
+        return canonical
 
     @staticmethod
     def _ref(artifact_id: str, project_id: str, digest: str, size: int, media_type: str, classification: str) -> dict[str, object]:

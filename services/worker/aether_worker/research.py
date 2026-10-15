@@ -34,6 +34,20 @@ def read_local_text(data: bytes) -> str:
         raise ValueError("local_text_rejected") from exc
 
 
+def scripted_answer(*, source_text: str, goal: str) -> str:
+    """Deterministic stand-in. It is not a live model and it does not return the goal unchanged."""
+    goal_text = goal.strip()
+    for line in source_text.splitlines():
+        fact = line.strip()
+        if len(fact) < 8 or fact == goal_text or fact in goal_text:
+            continue
+        answer = f"资料记载：{fact}"
+        if answer.strip() == goal_text:
+            continue
+        return answer
+    return ""
+
+
 def scripted_research(*, store: ArtifactStore, gateway: Any, token: str, owner_id: str, project_id: str, artifact_id: str) -> dict[str, Any]:
     data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
     digest = hashlib.sha256(data).hexdigest()
@@ -97,10 +111,14 @@ def record_verification(
     expires_at: datetime,
     now: datetime,
     actor_verdict: str | None = None,
+    checks_passed: bool = True,
 ) -> dict[str, str]:
     if expires_at <= now or artifact_sha256 != observed_sha256:
         verdict = "FAIL"
         reason = "候选已过期或哈希不一致"
+    elif not checks_passed:
+        verdict = "FAIL"
+        reason = "独立检查未通过"
     else:
         verdict = "PASS"
         reason = "哈希一致且候选未过期"
