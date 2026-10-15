@@ -1,6 +1,10 @@
 # F26 验收与测试
 
-没有 key 就记 blocked。脚本模型不代替这次 live 验收。`live_ready` 保持 false。F26 在 `STATUS.json` 和 `tasks/backlog.yaml` 里是 `blocked`，不是 `done`。`blocked` 不是通过。监督者在自己的机器上跑完并把 `reports/f26_live_result.json` 交回来之前，不要把 F26 标成 done，也不要编造 live 结果。
+没有 key 就记 blocked。脚本模型不代替这次 live 验收。`live_ready` 保持 false。F26 在 `STATUS.json` 和 `tasks/backlog.yaml` 里是 `blocked`，不是 `done`。`blocked` 和 `not_run` 都不是通过。
+
+监督者已在 head `5ab4fef` 用 DeepSeek 跑过一次：`AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`，`AETHER_LIVE_MODEL_ALIAS=deepseek-chat`，Python 3.13.5，退出码 0。原样结果在 `reports/f26_live_result.json`。文件里没有 key。
+
+这次通过的是 `protocol.tools`、`protocol.schema`、`protocol.usage`、`research.citation`、`coding.independent_test`。`coding.recovery` 是 not_run（第一次编码就过了）。`hybrid_retrieval` 和 `linux_isolation` 是 not_run。规格里的 F26 还要完整 hybrid 检索加引用、编码恢复，以及 Linux 隔离证据。这些没跑，所以 F26 继续 blocked，`live_ready` 保持 false。
 
 选中的供应商是 DeepSeek。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志。
 

@@ -61,8 +61,8 @@ P1 覆盖：
 - F22、F23、F27 在 PR #1 CI run `38694676859` 上是 done：unit `49 passed in 10.97s`，integration `136 passed, 1 warning in 97.37s`。SonarCloud quality gate OK。那次 head 是 `6bc678b`，随后 `5dde69a` 把 F24–F26 也标成 done。这次评审把后三项打回。
 - F24 done。head `2513539` 的 PR CI run `38698706734` 和 push run `38698700686` 都成功，SonarCloud quality gate OK。CI 安装了 Hermes v0.22.1（提交 `297552a9d646119871391d202509822cd86330df`，归档 sha256 `45ebe864dbf65ecd31693a811ddd6e2e449b1878b835b563cf0a28d6a9c4bf38`）并核对了 `hermes --version`。四组对照实验仍是 not_run，没有领先结论。
 - F25 done。同一对 CI。恢复在同一事务里写回 `tables.json`，并把 `PENDING`/`DELIVERING` 改成 `STOPPED`。产物先复制到临时目录再改名。漏洞库仍是 offline not_run。
-- F26 是 blocked，不是 done。`live_ready` 是 false。要跑真实探针必须同时提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`。缺任何一个就是 blocked，脚本模型不代替。
+- F26 仍是 blocked，不是 done。`live_ready` 是 false。监督者在 head `5ab4fef` 上用 DeepSeek（`https://api.deepseek.com/v1`，`deepseek-chat`，Python 3.13.5）跑了 `python3 scripts/run_f26_live.py --out reports/f26_live_result.json`，退出码 0。结果在 `reports/f26_live_result.json`。key 不在文件里。
+- 这次探针通过了 `protocol.tools`、`protocol.schema`、`protocol.usage`、`research.citation`、`coding.independent_test`。两次调用，719 token，费用 `unknown`。`coding.recovery` 是 not_run，因为第一次编码就过了，没有再花恢复调用。
+- 规格要求研究的完整 hybrid 加引用，以及编码的独立测试和恢复，还要求 Linux 隔离证据。`hybrid_retrieval` 和 `linux_isolation` 是 not_run。`docs/11_delivery.md` 写明 not_run 不是通过。所以 F26 不能标 done，`live_ready` 不能改成 true。
 - `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
-- 最新绿的是 head `86eb0d7`。PR CI run `38699224527`：unit `51 passed in 8.25s`，integration `137 passed, 1 warning in 97.68s`。push run `38699216284`。SonarCloud quality gate OK。F00–F25 与 F27 是 done。F26 是 blocked。
-- 仍是 not_run：F26 live 探针、Hermes 四组对照、CodeGraph 产品启用。漏洞库仍是 offline not_run。
-- 下一步：监督者在自己的机器上设置 `AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`、`AETHER_LIVE_MODEL_ALIAS=deepseek-chat` 和 `AETHER_LIVE_MODEL_KEY`，运行 `python scripts/run_f26_live.py --out reports/f26_live_result.json`。不需要额外 pip 包。key 不进仓库。F26 保持 blocked，直到结果文件交回来。混合检索、Linux 隔离、Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+- 仍是 not_run：F26 hybrid 检索、F26 Linux 隔离、F26 编码恢复、Hermes 四组对照、CodeGraph 产品启用。漏洞库仍是 offline not_run。

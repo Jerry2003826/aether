@@ -593,6 +593,7 @@ tickets:
   - scripts/run_f26_live.py
   - tests/unit/test_live_harness.py
   - reports/f26_criteria.md
+  - reports/f26_live_result.json
 - id: F27
   stage: G6
   scope: core
