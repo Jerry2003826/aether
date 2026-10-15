@@ -15,9 +15,9 @@ export AETHER_LIVE_MODEL_KEY=...
 python scripts/run_f26_live.py --out reports/f26_live_result.json
 ```
 
-`--out` 只接受相对路径 `reports/f26_live_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2。`probed` 只表示这次模型探针的必查项通过，不是 live V1 已验收。
+`--out` 只接受相对路径 `reports/f26_live_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 不是 live V1 已验收。
 
-不需要额外 pip 包。脚本和 `aether_worker.live_harness` 只用 Python 标准库，Python 3.11 及以上即可。仓库里已经 `uv sync` 时也可以：
+不需要锁文件以外的 pip 包。混合检索会导入仓库里的 `bm25s`。Python 3.11 及以上。推荐：
 
 ```sh
 uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json
