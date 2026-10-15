@@ -11,3 +11,4 @@
 | 冷索引耗时和上下文长度被记录；图谱开和关都能返回结果；不声称厂商节省比例 | `tests/integration/test_codegraph.py::test_cold_index_and_graph_on_off_do_not_claim_vendor_savings` |
 | 不改动、不减少可信测试；affected 只是建议 | `tests/integration/test_codegraph.py::test_trusted_suite_unchanged_and_affected_is_advisory` |
 | 产品默认关闭；拒绝 `codegraph install`；文件数上限和越界符号链接会失败 | `tests/integration/test_codegraph.py::test_product_gate_rejects_install_and_limits` |
+| 状态文件不把 CodeGraph 标成已启用 | `tests/unit/test_codegraph_status.py::test_status_does_not_claim_codegraph_enabled` |
