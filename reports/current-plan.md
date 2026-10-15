@@ -1,11 +1,11 @@
-# F19 推荐
+# F20 技能包
 
-目标：可解释排序、去重反馈、默认关闭探索。隐藏和删除立刻影响候选。清空画像后可重建。不称协同过滤。
+目标：按需加载 SKILL.md 的元数据、正文和资源。未批准脚本不执行。trace 只给 train/dev 并脱敏。候选不能自动升权或改控制代码。
 
-合同：`docs/05_knowledge.md`。
+合同：`docs/07_learning_evaluation.md`。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_recommendations.py`
+测试：`uv run --locked --no-build pytest -q tests/unit/test_skills.py`
 
-进度：本地 1 passed。还没标 done。
+进度：本地 4 passed。还没标 done。
 
 阻塞：无。

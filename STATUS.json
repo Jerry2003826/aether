@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F17 annotation permissions are in progress. Mark done only after this CI is green.",
+  "next_action": "F14 and F17 fixes are in progress. Mark them done only after this CI is green, then continue F20.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
@@ -84,7 +84,7 @@
     "openhands_live_model": "not_run"
   },
   "f14": {
-    "status": "done",
+    "status": "in_progress",
     "ci_run": "38683576919"
   },
   "f15": {
