@@ -69,3 +69,24 @@ P1 覆盖：
 - F26 done。监督者在 head `cb22fbc` 上重跑 `scripts/run_f26_acceptance.py`，退出码 0，`status=probed`。原样结果在 `reports/f26_acceptance_result.json`。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token，正文写完。协议、现场 BGE 混合检索、OpenHands 补丁和 Linux 隔离都通过。key 不在文件里。`semantic_support` 是 `not_judged`，`cost_status` 是 `unknown`。按 `docs/11_delivery.md`，产品工程已经通过，F26 现在通过，所以 `live_ready` 是 passed。结果 JSON 里的 `live_ready` 仍是 false，脚本不自己改交付结论。
 - CodeGraph 产品开关已由所有者打开。示例和功能矩阵仍是关闭。在 commit `2047af0` 上跑了 `uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json`，退出码 0。索引 162 个文件、2674 个节点、7081 条边，库 8892416 字节，冷索引约 2.00 秒，状态 complete，版本 1.6.2。`build_report` 调用 `_counts`，调用方和被调用方与 AST 一致，没有多余边。`f26_acceptance.py` 对 `redact_secret` 的导入也被图谱记到。改快照文件后查询返回 `stale_snapshot`。索引前的文本搜索只命中快照内文件，原因是 `graph_unavailable`。容器带 `--network none`，遥测关闭。因此 `readiness.codegraph_enabled` 改为 passed。
 - Hermes 四组对照仍是 not_run。入口是 `scripts/run_hermes_compare.py`，监督者还没跑，所以没有 `reports/hermes_compare_result.json`。硬上限 8 次调用、8000 token、单次输出 128。先运行 `scripts/install_hermes.py`。密钥只留在监督者机器上。这次不能宣布领先。`semantic_support` 仍是 not_judged，费用仍是 unknown。
+
+## 审计一轮
+
+基线 `b570f9197c650212a693f34a18d3729a04772f0d`。D01–D04 和 C01 的修复记录在 `reports/audits/gpt_round1/REPAIR_RESULT.md`。`STATUS.json` 没有改。
+
+修复前，只跑审计回归：
+
+```text
+AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_audit_artifact_regressions.py --tb=line
+6 failed in 1.99s
+```
+
+修复后全量：
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/unit tests/integration --tb=line
+231 passed, 1 warning in 162.14s
+EXIT:0
+```
+
+`scripts/verify_freeze.py` 在没有本地 `.hermes` 检出时 `passed`。`unittest discover -s tests -p 'test_*.py'` 76 项 OK。F26 live 没有重跑。下一步是看这条修复分支的 CI。

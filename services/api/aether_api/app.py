@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -190,7 +191,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         except ArtifactError as exc:
             raise ApiError(413, exc.code, exc.message) from exc
         media_type = (file.content_type or "").split(";")[0].strip()
-        payload_hash = sha256_text(f"{media_type}:{sha256_text(data.decode('utf-8', 'surrogateescape'))}")
+        payload_hash = sha256_text(f"{media_type}:{hashlib.sha256(data).hexdigest()}")
         route = f"POST /v1/projects/{project_id}/artifacts"
         try:
             with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:

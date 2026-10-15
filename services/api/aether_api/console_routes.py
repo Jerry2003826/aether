@@ -444,7 +444,7 @@ def _accept(
     _owned(app, owner, project_id)
     key = _idempotency_key(request)
     command_id = str(uuid.uuid4())
-    command = {"command_id": command_id, **command}
+    command = {"command_id": command_id, "owner_id": owner, **command}
     route = f"{request.method} {request.url.path}"
     digest = sha256_text(json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":")))
     with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:

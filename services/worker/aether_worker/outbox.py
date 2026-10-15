@@ -11,10 +11,10 @@ from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 
-def insert_start_command(conn, *, project_id: str, goal: str, command_key: str) -> dict[str, str]:
+def insert_start_command(conn, *, project_id: str, goal: str, command_key: str, owner_id: str) -> dict[str, str]:
     task_id = str(uuid.uuid4())
     workflow_id = f"task-{task_id}"
-    payload = {"task_id": task_id, "workflow_id": workflow_id, "goal": goal, "command_id": command_key}
+    payload = {"task_id": task_id, "workflow_id": workflow_id, "goal": goal, "command_id": command_key, "owner_id": owner_id}
     digest = sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     conn.execute(
         text("INSERT INTO tasks (id, project_id, original_goal, workflow_id, status) VALUES (:id, :project_id, :goal, :workflow_id, 'QUEUED')"),
@@ -51,4 +51,4 @@ def insert_followup_command(conn, *, project_id: str, task_id: str, workflow_id:
 
 def enqueue_task(database: Database, *, owner_id: str, project_id: str, goal: str, command_key: str) -> dict[str, str]:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        return insert_start_command(conn, project_id=project_id, goal=goal, command_key=command_key)
+        return insert_start_command(conn, project_id=project_id, goal=goal, command_key=command_key, owner_id=owner_id)
