@@ -4,7 +4,7 @@
 
 监督者已在 head `5ab4fef` 用 DeepSeek 跑过一次：`AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`，`AETHER_LIVE_MODEL_ALIAS=deepseek-chat`，Python 3.13.5，退出码 0。原样结果在 `reports/f26_live_result.json`。文件里没有 key。
 
-这次通过的是 `protocol.tools`、`protocol.schema`、`protocol.usage`、`research.citation`、`coding.independent_test`。`coding.recovery` 是 not_run（第一次编码就过了）。`hybrid_retrieval` 和 `linux_isolation` 是 not_run。规格里的 F26 还要完整 hybrid 检索加引用、编码恢复，以及 Linux 隔离证据。这些没跑，所以 F26 继续 blocked，`live_ready` 保持 false。
+head `fbb8260` 的结果也已原样保存，退出码 0。它报告 hybrid、隔离、引用和编码恢复都是 pass，但恢复检查和独立测试共用同一次调用的延迟和 token，文件里没有第一次提交的哈希，也没有检索排名和容器退出码。这不够当作规格里的恢复和隔离证据。F26 继续 blocked。下一次运行会把每次调用的 id、提交哈希、BM25/dense/RRF 排名，以及容器 flags、退出码和网络 errno 写进结果。新文件交回来之前不标 done。
 
 选中的供应商是 DeepSeek。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志。
 

@@ -2,8 +2,6 @@
 
 监督者在 head `5ab4fef` 上对 DeepSeek `deepseek-chat` 跑了 live 探针，退出码 0。结果是 `reports/f26_live_result.json`。
 
-通过：协议 tools/schema/usage、研究引用、编码形状检查。费用 unknown。
+head `fbb8260` 的结果已原样保存，退出码 0，但证据不够：恢复检查没有单独的第一次提交，hybrid 和隔离没有排名和容器退出码。F26 不标 done。
 
-仍是 not_run：hybrid 检索、Linux 隔离、编码恢复、Hermes 四组对照、CodeGraph 产品启用。因此 `live_ready` 保持 false，F26 不标 done。
-
-下一次在监督者机器上用 `uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json`。Docker 只用于隔离检查；没有就记 not_run。新结果交回来之前不改 F26。
+请重跑 `uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json`。新文件应包含 `calls_detail`、提交 sha256、检索排名和容器 flags/exit_code。Hermes 四组对照和 CodeGraph 仍是 not_run。

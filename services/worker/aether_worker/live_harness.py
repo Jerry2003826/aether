@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from aether_worker.retrieval import RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
+from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
 LIVE_BASE = "AETHER_LIVE_MODEL_BASE"
@@ -43,6 +43,7 @@ CORPUS = (
     {"id": "chunk-code", "text": "assert left != right && flag == true"},
 )
 ISOLATION_IMAGE = "python:3.12-alpine"
+ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
 ISOLATION_SCRIPT = (
     "import os,socket\n"
     "print('key', 'AETHER_LIVE_MODEL_KEY' in os.environ)\n"
@@ -190,6 +191,8 @@ def _hybrid_context() -> dict[str, Any]:
     return {
         "status": "pass" if ok else "fail",
         "reason": None if ok else "gold_not_first",
+        "query": QUERY,
+        "embedding_revision": EMBEDDING_REVISION,
         "gold_id": GOLD_ID,
         "passages": passages,
         "bm25": bm25_ids,
@@ -273,22 +276,17 @@ def _coding_body(model: str, *, repair: str | None) -> dict[str, Any]:
 
 
 def _isolation_command() -> list[str]:
-    return [
-        "docker",
-        "run",
-        "--rm",
-        "--network",
-        "none",
-        "--read-only",
-        "--cap-drop",
-        "ALL",
-        "--pids-limit",
-        "32",
-        ISOLATION_IMAGE,
-        "python",
-        "-c",
-        ISOLATION_SCRIPT,
-    ]
+    return ["docker", "run", "--rm", *ISOLATION_FLAGS, ISOLATION_IMAGE, "python", "-c", ISOLATION_SCRIPT]
+
+
+def _network_errno(stdout: str) -> int | None:
+    for line in stdout.splitlines():
+        if not line.startswith("net ") or line == "net open":
+            continue
+        piece = line.split(" ", 1)[1]
+        if piece.lstrip("-").isdigit():
+            return int(piece)
+    return None
 
 
 def _linux_isolation(secret: str) -> dict[str, Any]:
@@ -307,14 +305,27 @@ def _linux_isolation(secret: str) -> dict[str, Any]:
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"status": NOT_RUN, "reason": redact_secret(type(exc).__name__, secret)}
     output = redact_secret((completed.stdout or "") + (completed.stderr or ""), secret)
+    evidence = {
+        "image": ISOLATION_IMAGE,
+        "flags": list(ISOLATION_FLAGS),
+        "exit_code": completed.returncode,
+        "network_errno": _network_errno(completed.stdout or ""),
+        "secret_present": "key True" in (completed.stdout or ""),
+    }
     if completed.returncode != 0:
         reason = "image_unavailable" if "Unable to find image" in output or "pull access denied" in output else "container_failed"
-        return {"status": NOT_RUN if reason == "image_unavailable" else "fail", "reason": reason}
-    secret_absent = "key False" in completed.stdout
-    network_blocked = "net open" not in completed.stdout and "net " in completed.stdout
+        evidence["status"] = NOT_RUN if reason == "image_unavailable" else "fail"
+        evidence["reason"] = reason
+        return evidence
+    secret_absent = "key False" in (completed.stdout or "")
+    network_blocked = evidence["network_errno"] is not None and "net open" not in (completed.stdout or "")
     if secret_absent and network_blocked:
-        return {"status": "pass", "reason": None, "secret_present": False, "network": "blocked"}
-    return {"status": "fail", "reason": "isolation_incomplete"}
+        evidence["status"] = "pass"
+        evidence["reason"] = None
+        return evidence
+    evidence["status"] = "fail"
+    evidence["reason"] = "isolation_incomplete"
+    return evidence
 
 
 def _post(url: str, body: dict[str, Any], key: str, timeout: float) -> tuple[int, dict[str, Any], int]:
@@ -346,8 +357,27 @@ def _post(url: str, body: dict[str, Any], key: str, timeout: float) -> tuple[int
     return status, decoded, latency_ms
 
 
-def _check(check_id: str, status: str, latency_ms: int | None, usage: dict[str, Any] | None, reason: str | None) -> dict[str, Any]:
+def _sha(source: str | None) -> str | None:
+    if source is None:
+        return None
+    return hashlib.sha256(source.encode()).hexdigest()
+
+
+def _call_row(call_id: str, kind: str, latency_ms: int, usage: dict[str, Any], source: str | None) -> dict[str, Any]:
+    return {
+        "id": call_id,
+        "kind": kind,
+        "latency_ms": latency_ms,
+        "prompt_tokens": usage["prompt_tokens"],
+        "completion_tokens": usage["completion_tokens"],
+        "submission_sha256": _sha(source),
+    }
+
+
+def _check(check_id: str, status: str, latency_ms: int | None, usage: dict[str, Any] | None, reason: str | None, *, call_id: str | None = None) -> dict[str, Any]:
     row = {"id": check_id, "status": status, "latency_ms": latency_ms, "reason": reason}
+    if call_id is not None:
+        row["call_id"] = call_id
     if usage is None:
         row.update({"prompt_tokens": None, "completion_tokens": None, "cost_micro_usd": None, "cost_status": "unknown"})
     else:
@@ -362,7 +392,19 @@ def _check(check_id: str, status: str, latency_ms: int | None, usage: dict[str, 
     return row
 
 
+def _apply_binop(op: ast.operator, left: str, right: str, a: int, b: int) -> int | None:
+    values = {"a": a, "b": b}
+    if left not in values or right not in values:
+        return None
+    if isinstance(op, ast.Add):
+        return values[left] + values[right]
+    if isinstance(op, ast.Sub):
+        return values[left] - values[right]
+    return None
+
+
 def _add_source_ok(source: str) -> tuple[bool, str]:
+    """Independent test: add(1, 2) == 3 and add(-4, 4) == 0. The reason is the observed result."""
     if len(source) > 200:
         return False, "source_too_long"
     try:
@@ -377,11 +419,14 @@ def _add_source_ok(source: str) -> tuple[bool, str]:
     if len(function.body) != 1 or not isinstance(function.body[0], ast.Return):
         return False, "body"
     value = function.body[0].value
-    if not isinstance(value, ast.BinOp) or not isinstance(value.op, ast.Add):
+    if not isinstance(value, ast.BinOp) or not isinstance(value.left, ast.Name) or not isinstance(value.right, ast.Name):
         return False, "body"
-    names = [side.id for side in (value.left, value.right) if isinstance(side, ast.Name)]
-    if names not in (["a", "b"], ["b", "a"]):
+    got = _apply_binop(value.op, value.left.id, value.right.id, 1, 2)
+    other = _apply_binop(value.op, value.left.id, value.right.id, -4, 4)
+    if got is None or other is None:
         return False, "body"
+    if got != 3 or other != 0:
+        return False, f"add(1, 2)={got} expected 3"
     return True, "ok"
 
 
@@ -470,6 +515,7 @@ def run_live_probe(
         _check("linux_isolation", isolation["status"], None, None, isolation.get("reason")),
     ]
     call_usage: list[dict[str, Any]] = []
+    calls_detail: list[dict[str, Any]] = []
     calls = 0
     spent_tokens = 0
 
@@ -523,10 +569,12 @@ def run_live_probe(
             research_status = NOT_RUN
             citation_reason = "hybrid_not_run"
         usage_ok = usage["prompt_tokens"] is not None and usage["completion_tokens"] is not None
-        checks.append(_check("protocol.tools", "pass" if tools_ok else "fail", latency, usage, None if tools_ok else "tool_call_missing"))
-        checks.append(_check("protocol.schema", "pass" if schema_ok else "fail", latency, usage, None if schema_ok else "schema_mismatch"))
-        checks.append(_check("protocol.usage", "pass" if usage_ok else "fail", latency, usage, None if usage_ok else "usage_missing"))
-        checks.append(_check("research.citation", "pass" if citation_ok else research_status, latency, usage, citation_reason))
+        research_id = f"call-{calls}"
+        calls_detail.append(_call_row(research_id, "research", latency, usage, None))
+        checks.append(_check("protocol.tools", "pass" if tools_ok else "fail", latency, usage, None if tools_ok else "tool_call_missing", call_id=research_id))
+        checks.append(_check("protocol.schema", "pass" if schema_ok else "fail", latency, usage, None if schema_ok else "schema_mismatch", call_id=research_id))
+        checks.append(_check("protocol.usage", "pass" if usage_ok else "fail", latency, usage, None if usage_ok else "usage_missing", call_id=research_id))
+        checks.append(_check("research.citation", "pass" if citation_ok else research_status, latency, usage, citation_reason, call_id=research_id))
         if allow():
             calls += 1
             _status, payload, latency = _post(url, _coding_body(alias, repair=None), key, timeout)
@@ -535,7 +583,10 @@ def run_live_probe(
             name, arguments = _tool_call(payload)
             source = _source_of(name, arguments)
             _first_ok, first_reason = _add_source_ok(source) if isinstance(source, str) else (False, "tool_call_missing")
-            rejected = hashlib.sha256(source.encode()).hexdigest() if isinstance(source, str) else None
+            rejected = _sha(source)
+            first_id = f"call-{calls}"
+            calls_detail.append(_call_row(first_id, "coding_first", latency, usage, source))
+            checks.append(_check("coding.first_attempt", "pass" if _first_ok else "fail", latency, usage, None if _first_ok else first_reason, call_id=first_id))
             repair_reason = first_reason if first_reason != "ok" else "probe_requires_repair"
             if not allow():
                 checks.append(_check("coding.independent_test", NOT_RUN, None, None, "cap"))
@@ -548,10 +599,13 @@ def run_live_probe(
                 name, arguments = _tool_call(payload)
                 repaired_source = _source_of(name, arguments)
                 repaired, repair_grade = _add_source_ok(repaired_source) if isinstance(repaired_source, str) else (False, "tool_call_missing")
-                accepted = hashlib.sha256(repaired_source.encode()).hexdigest() if isinstance(repaired_source, str) else None
+                accepted = _sha(repaired_source)
+                repair_id = f"call-{calls}"
+                calls_detail.append(_call_row(repair_id, "coding_repair", latency, usage, repaired_source))
                 recovery_ok = repaired and accepted is not None and accepted != rejected
-                checks.append(_check("coding.independent_test", "pass" if repaired else "fail", latency, usage, None if repaired else repair_grade))
-                checks.append(_check("coding.recovery", "pass" if recovery_ok else "fail", latency, usage, None if recovery_ok else "reused_or_failed"))
+                recovery_reason = None if recovery_ok else "reused_or_failed"
+                checks.append(_check("coding.independent_test", "pass" if repaired else "fail", latency, usage, None if repaired else repair_grade, call_id=repair_id))
+                checks.append(_check("coding.recovery", "pass" if recovery_ok else "fail", latency, usage, recovery_reason, call_id=repair_id))
                 coding_status = "pass" if recovery_ok else "fail"
         else:
             checks.append(_check("coding.independent_test", NOT_RUN, None, None, "cap"))
@@ -571,8 +625,26 @@ def run_live_probe(
         "linux_isolation": isolation["status"],
         "scripted_substitute": False,
         "calls": calls,
+        "calls_detail": calls_detail,
         "caps": _caps(),
         "usage": _sum_usage(call_usage),
+        "hybrid": {
+            "query": hybrid.get("query"),
+            "embedding_revision": hybrid.get("embedding_revision"),
+            "gold_id": hybrid.get("gold_id"),
+            "bm25": hybrid.get("bm25"),
+            "dense": hybrid.get("dense"),
+            "rrf": hybrid.get("rrf"),
+            "reason": hybrid.get("reason"),
+        },
+        "linux": {
+            "image": isolation.get("image"),
+            "flags": isolation.get("flags"),
+            "exit_code": isolation.get("exit_code"),
+            "network_errno": isolation.get("network_errno"),
+            "secret_present": isolation.get("secret_present"),
+            "reason": isolation.get("reason"),
+        },
         "checks": checks,
         "error": error,
     }

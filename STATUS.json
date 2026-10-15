@@ -12,13 +12,10 @@
     "comparative_evidence": "not_run"
   },
   "not_run": [
-    "F26 hybrid retrieval",
-    "F26 linux isolation",
-    "F26 coding recovery",
     "Hermes four-way comparison",
     "CodeGraph product enablement"
   ],
-  "next_action": "F26 stays blocked. Re-run on the supervisor machine: uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json with AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1, AETHER_LIVE_MODEL_ALIAS=deepseek-chat, and AETHER_LIVE_MODEL_KEY. Docker is required only for the Linux isolation check; without it that check stays not_run. Do not mark F26 done until the new result file is reviewed. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "next_action": "F26 stays blocked. The fbb8260 result is recorded but too weak: coding.recovery repeats the repair call's latency and tokens, and hybrid/linux have no ranks, hashes, or container exit code. Rerun uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json with the DeepSeek env vars and Docker. Do not mark F26 done until that new file is reviewed. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -153,9 +150,9 @@
     "live_ready": false,
     "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"],
     "probe": "reports/f26_live_result.json",
-    "probe_head": "5ab4fef",
-    "probe_status": "probed",
-    "reason": "协议、引用和编码形状检查已通过。hybrid 检索、Linux 隔离和编码恢复仍是 not_run。not_run 不是通过，所以 F26 继续 blocked，live_ready 保持 false。"
+    "probe_head": "fbb8260",
+    "probe_status": "probed_weak",
+    "reason": "fbb8260 的探针退出码 0，但结果没有第一次提交哈希、检索排名和容器退出码。恢复检查只重复了修复那一次调用的延迟和 token。证据不够，F26 继续 blocked，live_ready 保持 false。需要用加强后的探针重跑。"
   },
   "f27": {
     "status": "done",

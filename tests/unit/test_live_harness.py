@@ -96,12 +96,24 @@ def _ok(handler: BaseHTTPRequestHandler, body: bytes) -> None:
         payload = _completion(
             "cite_finding",
             {"claim": "苹果派的烘烤温度是一百八十度", "citation_id": "chunk-apple", "start_offset": 0, "end_offset": 14},
+            prompt=11,
+            completion=7,
         )
     elif "return a - b" in content:
-        payload = _completion("submit_function", {"source": "def add(a, b):\n    return a - b\n"})
+        payload = _completion(
+            "submit_function",
+            {"source": "def add(a, b):\n    return a - b\n"},
+            prompt=20,
+            completion=8,
+        )
     else:
-        assert "独立测试没有通过" in content
-        payload = _completion("submit_function", {"source": "def add(a, b):\n    return a + b\n"})
+        assert "add(1, 2)=-1 expected 3" in content
+        payload = _completion(
+            "submit_function",
+            {"source": "def add(a, b):\n    return a + b\n"},
+            prompt=30,
+            completion=9,
+        )
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(payload)))
@@ -143,17 +155,27 @@ def test_fake_server_success_records_checks_without_the_key(monkeypatch) -> None
     assert report["coding"] == "pass"
     assert report["hybrid_retrieval"] == "pass"
     assert report["linux_isolation"] == "pass"
-    assert report["usage"]["prompt_tokens"] == 33
-    assert report["usage"]["completion_tokens"] == 21
+    assert report["usage"]["prompt_tokens"] == 61
+    assert report["usage"]["completion_tokens"] == 24
     assert report["usage"]["cost_status"] == "unknown"
     by_id = {row["id"]: row for row in report["checks"]}
     assert by_id["protocol.tools"]["status"] == "pass"
     assert by_id["protocol.schema"]["status"] == "pass"
     assert by_id["protocol.usage"]["status"] == "pass"
     assert by_id["research.citation"]["status"] == "pass"
+    assert by_id["coding.first_attempt"]["status"] == "fail"
+    assert by_id["coding.first_attempt"]["prompt_tokens"] == 20
+    assert "expected 3" in by_id["coding.first_attempt"]["reason"]
     assert by_id["coding.independent_test"]["status"] == "pass"
+    assert by_id["coding.independent_test"]["prompt_tokens"] == 30
     assert by_id["coding.recovery"]["status"] == "pass"
+    assert by_id["coding.recovery"]["call_id"] == "call-3"
+    assert by_id["coding.first_attempt"]["call_id"] == "call-2"
     assert by_id["hybrid_retrieval"]["status"] == "pass"
+    assert report["hybrid"]["rrf"][0] == GOLD_ID
+    assert report["hybrid"]["bm25"]
+    assert report["hybrid"]["dense"]
+    assert report["calls_detail"][1]["submission_sha256"] != report["calls_detail"][2]["submission_sha256"]
     assert by_id["protocol.tools"]["latency_ms"] is not None
     assert len(server.calls) == 3
 
