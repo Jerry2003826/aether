@@ -4,7 +4,7 @@ from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.ingest import store_text_version
 from aether_worker.memory import apply_memory_commands, remember
-from aether_worker.retention import LIMITS, commit_claim_text, commit_embedding, current_epoch, invalidate_derived
+from aether_worker.retention import LIMITS, cache_result, commit_claim_text, commit_embedding, current_epoch, invalidate_derived, read_cached_result
 from aether_worker.retrieval import generation_is_fresh
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
@@ -128,3 +128,40 @@ def test_forgetting_blocks_late_writes_and_does_not_claim_physical_delete(client
     assert claim["gone"] is True
     listed = client.get(f"/v1/projects/{project_id}/memories")
     assert all(item["id"] != memory_id for item in listed.json()["items"])
+
+
+def test_cached_search_does_not_return_deleted_content(client, role_urls, tmp_path) -> None:
+    owner_id, project_id, _headers = _session(client, "forget-cache")
+    database = Database(role_urls["aether_worker"])
+    store = ArtifactStore(tmp_path / "artifacts", database)
+    store_text_version(
+        database,
+        store,
+        owner_id=owner_id,
+        project_id=project_id,
+        kind="local_document",
+        locator="file://notes/cached.txt",
+        raw=BODY.encode(),
+        text_value=BODY,
+        width=512,
+    )
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        chunk_id = conn.execute(
+            text("SELECT id::text FROM chunks WHERE project_id = :project_id AND text_content = :body"),
+            {"project_id": project_id, "body": BODY},
+        ).scalar_one()
+        epoch = current_epoch(conn, project_id)
+        cache_result(project_id, epoch, "烘烤", {"context": BODY, "query": "烘烤", "chunk_id": chunk_id})
+        cached = read_cached_result(conn, project_id, "烘烤")
+    assert cached is not None
+    assert BODY in str(cached["context"])
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text("UPDATE chunks SET deleted_at = now() WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": chunk_id},
+        )
+        invalidate_derived(conn, project_id=project_id)
+        cache_result(project_id, epoch, "烘烤", {"context": BODY, "query": "烘烤", "chunk_id": chunk_id})
+        cached_after = read_cached_result(conn, project_id, "烘烤")
+    assert cached_after is None
+    assert BODY not in str(cached_after)

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import os
 import shutil
 import subprocess
 import tempfile
@@ -18,6 +17,15 @@ from aether_worker.runner import JOB_IMAGE, _docker
 
 GRADER_IMAGE = "aether-grader:local"
 _SKIP_NAMES = {"conftest.py", "pytest.ini", "conftest.pyc"}
+_SHADOW_ROOTS = frozenset({"pytest.py", "pytest", "_pytest", "pluggy.py", "pluggy", "sitecustomize.py", "usercustomize.py"})
+_PYTEST_CHILD = (
+    "import sys\n"
+    "import pytest\n"
+    "sys.path.append('/work/src')\n"
+    "raise SystemExit(pytest.main(["
+    "'-q', '--tb=no', '--noconftest', '-p', 'no:cacheprovider', "
+    "'--rootdir', '/work/suite', '/work/suite']))\n"
+)
 
 
 class VerificationError(Exception):
@@ -56,6 +64,13 @@ def _is_candidate_test(path: Path) -> bool:
     return name in _SKIP_NAMES or name.startswith("test_") or name.endswith("_test.py")
 
 
+def _shadowed_import(candidate: Path) -> str | None:
+    for name in sorted(_SHADOW_ROOTS):
+        if (candidate / name).exists():
+            return name
+    return None
+
+
 def _stage(candidate: Path, suite: Path, destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
@@ -66,7 +81,10 @@ def _stage(candidate: Path, suite: Path, destination: Path) -> None:
     for path in candidate.rglob("*"):
         if not path.is_file() or _is_candidate_test(path):
             continue
-        target = source_root / path.relative_to(candidate)
+        relative = path.relative_to(candidate)
+        if relative.parts[0] in _SHADOW_ROOTS:
+            continue
+        target = source_root / relative
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, target)
     for path in suite.rglob("*"):
@@ -136,6 +154,8 @@ def grade(
         return _result("FAIL", "合同哈希不一致", observed_suite, observed_contract, observed_candidate)
     if observed_candidate != candidate_sha256:
         return _result("FAIL", "候选哈希与绑定时不一致", observed_suite, observed_contract, observed_candidate)
+    if _shadowed_import(candidate) is not None:
+        return _result("FAIL", "候选包含会遮蔽评分器的模块", observed_suite, observed_contract, observed_candidate)
     if not _ensure_grader_image():
         return _result("FAIL", "评分容器不可用", suite_sha256, contract_sha256, observed_candidate)
     with tempfile.TemporaryDirectory(prefix="aether-grade-") as temporary:
@@ -164,18 +184,17 @@ def grade(
                 "-e",
                 "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
                 "-e",
-                "PYTHONPATH=/work/src",
-                "-e",
                 f"AETHER_HOST_SENTINEL={sentinel}",
                 "-v",
                 f"{workspace}:/work:ro",
                 GRADER_IMAGE,
                 "python",
+                "-I",
                 "-c",
                 _GRADER_PROGRAM,
             ]
         )
-    if completed.returncode != 0 and "ISOLATION " not in completed.stdout:
+    if completed.returncode != 0 or not completed.stdout.startswith("ISOLATION "):
         return _result("FAIL", "评分容器没有完成", suite_sha256, contract_sha256, observed_candidate)
     parsed = _parse_grader(completed.stdout)
     if parsed["sentinel_visible"] or parsed["credential_present"]:
@@ -201,48 +220,50 @@ def grade(
     return _result("PASS", "绑定套件通过且哈希一致", suite_sha256, contract_sha256, observed_candidate)
 
 
-_GRADER_PROGRAM = """
-import json, os, subprocess, sys
-from pathlib import Path
-sentinel = Path(os.environ.get("AETHER_HOST_SENTINEL", "/aether-host-sentinel"))
-keys = ("AETHER_PROVIDER_KEY", "AETHER_ADMIN_DATABASE_URL")
-print("ISOLATION " + json.dumps({
-    "sentinel_visible": sentinel.exists(),
-    "credential_present": any(key in os.environ for key in keys),
-}))
-completed = subprocess.run(
-    [sys.executable, "-m", "pytest", "-q", "--tb=no", "--noconftest", "-p", "no:cacheprovider", "--rootdir", "/work/suite", "/work/suite"],
-    cwd="/work/suite",
-    env={
-        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
-        "HOME": "/run/aether",
-        "TMPDIR": "/run/aether",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-        "PYTHONPATH": "/work/src",
-    },
-    capture_output=True,
-    text=True,
-)
-sys.stdout.write(completed.stdout)
-sys.stderr.write(completed.stderr)
-print("GRADE_EXIT:" + str(completed.returncode))
-"""
+_GRADER_PROGRAM = "".join((
+    "import json, os, re, subprocess, sys\n"
+    "from pathlib import Path\n"
+    "sentinel = Path(os.environ.get('AETHER_HOST_SENTINEL', '/aether-host-sentinel'))\n"
+    "keys = ('AETHER_PROVIDER_KEY', 'AETHER_ADMIN_DATABASE_URL')\n"
+    "isolation = {'sentinel_visible': sentinel.exists(), 'credential_present': any(key in os.environ for key in keys)}\n"
+    "sys.stdout.write('ISOLATION ' + json.dumps(isolation) + '\\n')\n"
+    "sys.stdout.flush()\n"
+    f"child = { _PYTEST_CHILD!r }\n"
+    "completed = subprocess.run(\n"
+    "    [sys.executable, '-I', '-c', child],\n"
+    "    cwd='/work/suite',\n"
+    "    env={\n"
+    "        'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'),\n"
+    "        'HOME': '/run/aether',\n"
+    "        'TMPDIR': '/run/aether',\n"
+    "        'LANG': 'C.UTF-8',\n"
+    "        'PYTHONDONTWRITEBYTECODE': '1',\n"
+    "        'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',\n"
+    "    },\n"
+    "    capture_output=True,\n"
+    "    text=True,\n"
+    ")\n"
+    "summary = [line.strip() for line in completed.stdout.splitlines() if line.strip()]\n"
+    "last = summary[-1] if summary else ''\n"
+    "matched = re.fullmatch(r'\\d+ passed(?:, \\d+ warnings?)? in \\d+(?:\\.\\d+)?s', last)\n"
+    "ok = completed.returncode == 0 and matched is not None and not last.startswith('0 passed')\n"
+    "sys.stdout.write('GRADE_OK:' + ('1' if ok else '0') + '\\n')\n"
+    "sys.stdout.write('GRADE_EXIT:' + str(completed.returncode) + '\\n')\n"
+))
 
 
 def _parse_grader(stdout: str) -> dict[str, Any]:
+    lines = stdout.splitlines()
     isolation = {"sentinel_visible": True, "credential_present": True}
+    if lines and lines[0].startswith("ISOLATION "):
+        isolation = json.loads(lines[0].removeprefix("ISOLATION "))
     exit_code = 1
     passed = False
-    for line in stdout.splitlines():
-        if line.startswith("ISOLATION "):
-            isolation = json.loads(line.removeprefix("ISOLATION "))
-        elif line.startswith("GRADE_EXIT:"):
+    for line in lines:
+        if line.startswith("GRADE_EXIT:"):
             exit_code = int(line.split(":", 1)[1])
-        elif " passed" in f" {line}" or line.strip().endswith(" passed"):
-            passed = True
-    if exit_code == 0 and "passed" in stdout:
-        passed = True
+        elif line.startswith("GRADE_OK:"):
+            passed = line.split(":", 1)[1].strip() == "1"
     return {
         "sentinel_visible": bool(isolation.get("sentinel_visible")),
         "credential_present": bool(isolation.get("credential_present")),

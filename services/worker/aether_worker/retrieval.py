@@ -20,7 +20,7 @@ from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
-from aether_worker.retention import commit_embedding, current_epoch
+from aether_worker.retention import cache_result, commit_embedding, current_epoch, read_cached_result
 from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -493,6 +493,11 @@ def search(
     index_root: Path,
     generation_id: str | None = None,
 ) -> dict[str, Any]:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        cached = read_cached_result(conn, project_id, query)
+        if cached is not None:
+            return cached
+        epoch = current_epoch(conn, project_id)
     query_vector = encode_texts([query])[0]
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         generation = _load_generation(conn, project_id, generation_id)
@@ -551,7 +556,7 @@ def search(
             reranked = list(fused)
             degraded = True
         chosen = _select_context(reranked, allowed)
-        return {
+        result = {
             "stale": False,
             "state": "ACTIVE",
             "degraded": degraded,
@@ -575,6 +580,8 @@ def search(
             "index_lag": index_lag,
             "embedding_revision": EMBEDDING_REVISION,
         }
+        cache_result(project_id, epoch, query, result)
+        return result
 
 
 def release_retired(database: Database, *, owner_id: str, project_id: str, index_root: Path) -> list[str]:

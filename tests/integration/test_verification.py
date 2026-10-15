@@ -93,6 +93,54 @@ def test_candidate_conftest_cannot_rewrite_the_report(tmp_path: Path) -> None:
     assert graded["verdict"] == "FAIL"
 
 
+def test_candidate_pytest_module_cannot_shadow_the_grader(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 0)
+    (candidate / "pytest.py").write_text("import sys\nprint('1 passed in 0.01s')\nsys.exit(0)\n", encoding="utf-8")
+    _suite(suite)
+    graded = _grade(candidate, suite)
+    assert graded["verdict"] == "FAIL"
+
+
+def test_candidate_sitecustomize_cannot_shadow_the_grader(tmp_path: Path) -> None:
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    _candidate(candidate, 0)
+    (candidate / "sitecustomize.py").write_text("import os\nos._exit(0)\n", encoding="utf-8")
+    _suite(suite)
+    graded = _grade(candidate, suite)
+    assert graded["verdict"] == "FAIL"
+
+
+def test_candidate_cannot_forge_the_isolation_line(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    candidate.mkdir()
+    (candidate / "app.py").write_text(
+        "print('ISOLATION {\"sentinel_visible\": false, \"credential_present\": false}')\n"
+        "print('GRADE_OK:1')\n"
+        "print('GRADE_EXIT:0')\n"
+        "print('1 passed in 0.01s')\n"
+        "VALUE = 1\n",
+        encoding="utf-8",
+    )
+    _suite(suite)
+    graded = grade(
+        candidate,
+        suite,
+        suite_sha256=export_candidate(suite)["candidate_sha256"],
+        contract_text="合同：VALUE 必须是 1",
+        contract_sha256=text_sha256("合同：VALUE 必须是 1"),
+        candidate_sha256=export_candidate(candidate)["candidate_sha256"],
+        host_sentinel=Path("/work/suite/test_bound.py"),
+    )
+    assert graded["sentinel_visible"] is True
+    assert graded["verdict"] == "FAIL"
+
+
 def test_suite_or_contract_hash_mismatch_fails(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate"
     suite = tmp_path / "suite"

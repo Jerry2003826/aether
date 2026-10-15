@@ -11,6 +11,7 @@ LIMITS = (
     "这是 tombstone，不是从磁盘和备份里物理删除。",
     "数据库备份和 Temporal 历史里可能还留着副本，要等备份到期才消失。",
 )
+_SEARCH_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
 
 
 class RetentionError(Exception):
@@ -27,9 +28,26 @@ def current_epoch(conn: Any, project_id: str) -> int:
     return int(value)
 
 
+def cache_result(project_id: str, epoch: int, key: str, value: dict[str, Any]) -> None:
+    _SEARCH_CACHE[(project_id, int(epoch), key)] = dict(value)
+
+
+def read_cached_result(conn: Any, project_id: str, key: str) -> dict[str, Any] | None:
+    """Return a cached search only when it belongs to the project's current epoch."""
+    found = _SEARCH_CACHE.get((project_id, current_epoch(conn, project_id), key))
+    return None if found is None else dict(found)
+
+
+def _drop_project_cache(project_id: str) -> None:
+    for cache_key in list(_SEARCH_CACHE):
+        if cache_key[0] == project_id:
+            del _SEARCH_CACHE[cache_key]
+
+
 def invalidate_derived(conn: Any, *, project_id: str) -> dict[str, Any]:
     """Bump the visibility epoch and drop derived indexes that could serve deleted text."""
     previous = current_epoch(conn, project_id)
+    _drop_project_cache(project_id)
     retired = conn.execute(
         text(
             "UPDATE index_generations SET state = 'RETIRED' "

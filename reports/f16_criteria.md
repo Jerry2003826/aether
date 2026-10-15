@@ -6,4 +6,5 @@
 |---|---|
 | 旧的 embedding 任务不能在删除后写回向量；旧摘要不能改写已删记忆 | `tests/integration/test_retention.py::test_forgetting_blocks_late_writes_and_does_not_claim_physical_delete` |
 | 记忆删除、向量清空、BM25 generation 退休、推荐特征快照失效一起发生 | `tests/integration/test_retention.py::test_forgetting_blocks_late_writes_and_does_not_claim_physical_delete` |
+| 删除后缓存不再返回已删内容 | `tests/integration/test_retention.py::test_cached_search_does_not_return_deleted_content` |
 | 备份和 Temporal 历史的保留限制写在结果里，不能声称已经物理删除 | `tests/integration/test_retention.py::test_forgetting_blocks_late_writes_and_does_not_claim_physical_delete` |
