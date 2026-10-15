@@ -10,3 +10,4 @@
 | start 幂等，重启后 attach 同一个 job，不第二次启动 | `tests/integration/test_runner.py::test_start_is_idempotent_and_restart_attaches_without_the_provider_key` |
 | 取消不把外部效果说成已经停止 | `tests/integration/test_runner.py::test_start_is_idempotent_and_restart_attaches_without_the_provider_key` |
 | Linux 网络、挂载和 pid namespace 实测；测不到不标支持 | `tests/integration/test_runner.py::test_linux_namespace_probe_is_measured_or_not_claimed` |
+| 同一个 job 只创建一个容器，重启后重新挂上；容器内不能访问公网、元数据或 Docker socket，也拿不到 provider/admin 密钥，只能访问该 job 的脚本网关 | `tests/integration/test_runner.py::test_container_is_single_isolated_and_reattaches` |
