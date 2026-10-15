@@ -127,8 +127,10 @@ tickets:
   - 并发reservation原子限额，重复结算不重复扣款
   - 超时可能计费保持held；unknown价格或usage不算0
   - planner/修复/judge/编码内部调用均覆盖，verification额度受保护
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/budget.py
+  - tests/integration/test_budget.py
 - id: F06
   stage: G1
   scope: core
