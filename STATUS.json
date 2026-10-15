@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F21",
+  "current_task": "F22",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F21 skill evaluation is implemented locally. Mark done only after PR CI and SonarCloud are green.",
+  "next_action": "Implement F22 console and the remaining API operations.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
-  "last_test_result": "PR #1 CI run 38686196972: unit 40 passed in 10.06s; integration 115 passed, 1 warning in 69.16s. SonarCloud quality gate OK.",
+  "last_test_result": "PR #1 CI run 38686730319: unit 40 passed in 7.73s; integration 118 passed, 1 warning in 75.07s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -118,6 +118,7 @@
     "ci_run": "38686196972"
   },
   "f21": {
-    "status": "in_progress"
+    "status": "done",
+    "ci_run": "38686730319"
   }
 }
