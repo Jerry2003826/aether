@@ -83,7 +83,7 @@ def restore_project(database_url: str, artifact_root: Path, source: Path, *, con
     with psycopg.connect(database_url) as conn:
         with conn.transaction():
             stopped = conn.execute(
-                "UPDATE command_outbox SET status = 'FAILED' WHERE status IN ('PENDING', 'DELIVERING') RETURNING id::text"
+                "SELECT id::text FROM command_outbox WHERE status IN ('PENDING', 'DELIVERING')"
             ).fetchall()
             pending = conn.execute(
                 "SELECT count(*) FROM command_outbox WHERE status IN ('PENDING', 'DELIVERING')"

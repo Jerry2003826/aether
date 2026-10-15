@@ -29,10 +29,11 @@ def test_restore_stops_dispatch_and_puts_artifact_bytes_back(client, api_db, aet
     restored = restore_project(aether_admin, artifacts, destination, confirm="restore-aether")
     assert (artifacts / "note.txt").read_text(encoding="utf-8") == "原始字节"
     assert restored["volume_deleted"] is False
-    assert restored["pending_after_restore"] == 0
+    assert restored["pending_after_restore"] == 1
+    assert restored["stopped_commands"]
     assert restored["dispatch"] == "stopped"
     with api_db.transaction(owner_id=session["owner_id"], project_id=project_id) as conn:
         status = conn.execute(text("SELECT status FROM command_outbox WHERE command_key = 'backup-pending'")).scalar_one()
         task = conn.execute(text("SELECT status FROM tasks WHERE original_goal = '待对账'")).scalar_one()
-    assert status == "FAILED"
+    assert status == "PENDING"
     assert task == "QUEUED"
