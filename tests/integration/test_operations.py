@@ -1,6 +1,10 @@
 import json
+import threading
+import time
 import uuid
 
+import httpx
+import psycopg
 import pytest
 from sqlalchemy import text
 
@@ -171,4 +175,160 @@ def test_dispatch_rejects_stale_live_resource_version(client, api_db, role_urls)
     with pytest.raises(OperationError) as stale:
         ledger.dispatch(owner_id=owner_id, project_id=project_id, task_id=task_id, approval_id=approval_id, intent=intent, capability_id=capability_id, idempotency="idempotent_write", sender=lambda payload: calls.append(payload))
     assert stale.value.code == "stale_resource"
+    assert calls == []
+
+
+def test_httpx_transport_errors_stay_unknown(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, capability_id, ledger = _ledger(client, api_db, role_urls, "httpx")
+    errors = (
+        httpx.ConnectError("simulated connect"),
+        httpx.ReadTimeout("simulated read"),
+        httpx.RemoteProtocolError("simulated protocol"),
+    )
+    for index, error in enumerate(errors):
+        intent = _intent(f"httpx-{index}")
+        approval_id = ledger.request_approval(owner_id=owner_id, project_id=project_id, task_id=task_id, intent=intent, risk="R2")
+        ledger.decide(owner_id=owner_id, project_id=project_id, task_id=task_id, approval_id=approval_id, decision="approved", expected_intent_hash=_digest(intent))
+        ledger.note_resource_version(owner_id=owner_id, project_id=project_id, resource_id=intent["resource_id"], version="v1")
+
+        def sender(_payload, raised=error):
+            raise raised
+
+        outcome = ledger.dispatch(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            approval_id=approval_id,
+            intent=intent,
+            capability_id=capability_id,
+            idempotency="idempotent_write",
+            sender=sender,
+        )
+        assert outcome["state"] == "UNKNOWN"
+
+
+def test_wrapped_httpx_error_stays_unknown(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, capability_id, ledger = _ledger(client, api_db, role_urls, "wrapped")
+    intent = _intent("wrapped-1")
+    approval_id = ledger.request_approval(owner_id=owner_id, project_id=project_id, task_id=task_id, intent=intent, risk="R2")
+    ledger.decide(owner_id=owner_id, project_id=project_id, task_id=task_id, approval_id=approval_id, decision="approved", expected_intent_hash=_digest(intent))
+    ledger.note_resource_version(owner_id=owner_id, project_id=project_id, resource_id=intent["resource_id"], version="v1")
+
+    def sender(_payload):
+        try:
+            raise httpx.ConnectError("simulated connect")
+        except httpx.ConnectError as exc:
+            raise RuntimeError("gateway transport") from exc
+
+    outcome = ledger.dispatch(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        approval_id=approval_id,
+        intent=intent,
+        capability_id=capability_id,
+        idempotency="idempotent_write",
+        sender=sender,
+    )
+    assert outcome["state"] == "UNKNOWN"
+
+
+def test_confirmed_resource_write_uses_note_resource_version(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, capability_id, ledger = _ledger(client, api_db, role_urls, "noted")
+    intent = _intent("noted-1", "v1")
+    approval_id = ledger.request_approval(owner_id=owner_id, project_id=project_id, task_id=task_id, intent=intent, risk="R2")
+    ledger.decide(owner_id=owner_id, project_id=project_id, task_id=task_id, approval_id=approval_id, decision="approved", expected_intent_hash=_digest(intent))
+    ledger.note_resource_version(owner_id=owner_id, project_id=project_id, resource_id=intent["resource_id"], version="v1")
+    recorded: list[str] = []
+    original = ledger.note_resource_version
+
+    def spy(**kwargs):
+        recorded.append(kwargs["version"])
+        return original(**kwargs)
+
+    ledger.note_resource_version = spy  # type: ignore[method-assign]
+    outcome = ledger.dispatch(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        approval_id=approval_id,
+        intent=intent,
+        capability_id=capability_id,
+        idempotency="idempotent_write",
+        sender=lambda _payload: {"resource_version": "v2"},
+    )
+    assert outcome["state"] == "CONFIRMED"
+    assert recorded == ["v2"]
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        version = conn.execute(
+            text("SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id"),
+            {"project_id": project_id, "resource_id": intent["resource_id"]},
+        ).scalar_one()
+    assert version == "v2"
+
+
+def test_dispatch_locks_resource_head_before_send(client, api_db, role_urls, aether_admin: str) -> None:
+    owner_id, project_id, task_id, capability_id, ledger = _ledger(client, api_db, role_urls, "rowlock")
+    intent = _intent("rowlock-1", "v1")
+    approval_id = ledger.request_approval(owner_id=owner_id, project_id=project_id, task_id=task_id, intent=intent, risk="R2")
+    ledger.decide(owner_id=owner_id, project_id=project_id, task_id=task_id, approval_id=approval_id, decision="approved", expected_intent_hash=_digest(intent))
+    ledger.note_resource_version(owner_id=owner_id, project_id=project_id, resource_id=intent["resource_id"], version="v1")
+    held = threading.Event()
+    release = threading.Event()
+    calls: list[object] = []
+    outcome: dict[str, str] = {}
+    holder_db = Database(role_urls["aether_worker"])
+
+    def hold() -> None:
+        with holder_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            conn.execute(
+                text("SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id FOR UPDATE"),
+                {"project_id": project_id, "resource_id": intent["resource_id"]},
+            )
+            held.set()
+            assert release.wait(timeout=5)
+            conn.execute(
+                text("UPDATE resource_heads SET version = 'v2' WHERE project_id = :project_id AND resource_id = :resource_id"),
+                {"project_id": project_id, "resource_id": intent["resource_id"]},
+            )
+
+    def send() -> None:
+        try:
+            ledger.dispatch(
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                approval_id=approval_id,
+                intent=intent,
+                capability_id=capability_id,
+                idempotency="idempotent_write",
+                sender=lambda payload: calls.append(payload),
+            )
+        except OperationError as exc:
+            outcome["code"] = exc.code
+
+    holder = threading.Thread(target=hold)
+    dispatcher = threading.Thread(target=send)
+    holder.start()
+    assert held.wait(timeout=5)
+    dispatcher.start()
+    waiting = False
+    deadline = time.time() + 3
+    try:
+        while time.time() < deadline:
+            with psycopg.connect(aether_admin) as conn:
+                count = conn.execute(
+                    "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND wait_event_type IS NOT NULL AND query ILIKE '%resource_heads%'"
+                ).fetchone()
+            if count is not None and count[0] >= 1:
+                waiting = True
+                break
+            time.sleep(0.05)
+        assert waiting
+        assert calls == []
+    finally:
+        release.set()
+        dispatcher.join(timeout=5)
+        holder.join(timeout=5)
+    assert outcome["code"] == "stale_resource"
     assert calls == []

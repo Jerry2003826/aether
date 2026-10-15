@@ -5,14 +5,29 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 
+import httpx
 from sqlalchemy import text
 
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
+_TRANSPORT = (TimeoutError, ConnectionError, BrokenPipeError, ConnectionAbortedError, ConnectionResetError, httpx.TransportError)
+
 
 def _outcome_unknown(exc: BaseException) -> bool:
-    return isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError, ConnectionAbortedError, ConnectionResetError))
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _TRANSPORT):
+            return True
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif current.__suppress_context__:
+            current = None
+        else:
+            current = current.__context__
+    return False
 
 
 class OperationError(Exception):
@@ -74,7 +89,9 @@ class OperationLedger:
                 raise OperationError("approval_rejected")
             if approval["consumed_by_operation_id"] is None:
                 current_version = conn.execute(
-                    text("SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id"),
+                    text(
+                        "SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id FOR UPDATE"
+                    ),
                     {"project_id": project_id, "resource_id": intent["resource_id"]},
                 ).scalar()
                 if current_version != intent["resource_version"]:
@@ -128,12 +145,13 @@ class OperationLedger:
                 self._mark_task(owner_id, project_id, task_id, "NEEDS_REVIEW")
             return {"operation_id": str(operation_id), "state": "UNKNOWN", "replayed": False, "result": None}
         self._set_state(owner_id, project_id, operation_id, "CONFIRMED", remote)
+        self._record_reported_version(owner_id=owner_id, project_id=project_id, resource_id=intent["resource_id"], remote=remote)
         return {"operation_id": str(operation_id), "state": "CONFIRMED", "replayed": False, "result": remote}
 
     def reconcile(self, *, owner_id: str, project_id: str, operation_id: str, reader) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             operation = conn.execute(
-                text("SELECT state, normalized_arguments, idempotency_class, resource_version FROM operations WHERE id = :id FOR UPDATE"),
+                text("SELECT state, normalized_arguments, idempotency_class, resource_id, resource_version FROM operations WHERE id = :id FOR UPDATE"),
                 {"id": operation_id},
             ).mappings().one()
         if operation["state"] == "CONFIRMED":
@@ -145,17 +163,36 @@ class OperationLedger:
         if remote_version is not None and remote_version != operation["resource_version"]:
             return {"state": operation["state"], "repeated": False, "mismatch": True}
         self._set_state(owner_id, project_id, operation_id, "CONFIRMED", remote)
+        self._record_reported_version(owner_id=owner_id, project_id=project_id, resource_id=operation["resource_id"], remote=remote)
         return {"state": "CONFIRMED", "repeated": False, "mismatch": False}
 
     def note_resource_version(self, *, owner_id: str, project_id: str, resource_id: str, version: str) -> None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            current = conn.execute(
+                text("SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id FOR UPDATE"),
+                {"project_id": project_id, "resource_id": resource_id},
+            ).scalar()
+            if current is None:
+                conn.execute(
+                    text(
+                        "INSERT INTO resource_heads (project_id, resource_id, version) VALUES (:project_id, :resource_id, :version) "
+                        "ON CONFLICT (project_id, resource_id) DO UPDATE SET version = EXCLUDED.version"
+                    ),
+                    {"project_id": project_id, "resource_id": resource_id, "version": version},
+                )
+                return
             conn.execute(
-                text(
-                    "INSERT INTO resource_heads (project_id, resource_id, version) VALUES (:project_id, :resource_id, :version) "
-                    "ON CONFLICT (project_id, resource_id) DO UPDATE SET version = EXCLUDED.version"
-                ),
+                text("UPDATE resource_heads SET version = :version WHERE project_id = :project_id AND resource_id = :resource_id"),
                 {"project_id": project_id, "resource_id": resource_id, "version": version},
             )
+
+    def _record_reported_version(self, *, owner_id: str, project_id: str, resource_id: str, remote: object) -> None:
+        if not isinstance(remote, dict):
+            return
+        version = remote.get("resource_version")
+        if not isinstance(version, str) or not version:
+            return
+        self.note_resource_version(owner_id=owner_id, project_id=project_id, resource_id=resource_id, version=version)
 
     def request_cancel(self, *, owner_id: str, project_id: str, task_id: str) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

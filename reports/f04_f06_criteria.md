@@ -41,6 +41,10 @@
 | 响应丢失后重试不重复副作用 | `tests/integration/test_operations.py::test_lost_success_response_does_not_repeat_side_effect` |
 | 对账版本不一致时不确认 | `tests/integration/test_operations.py::test_reconcile_mismatch_does_not_confirm` |
 | 连接重置视为 unknown，非幂等操作进入 NEEDS_REVIEW | `tests/integration/test_operations.py::test_connection_reset_is_unknown_and_needs_review` |
+| httpx 连接、读超时和协议错误视为 unknown | `tests/integration/test_operations.py::test_httpx_transport_errors_stay_unknown` |
+| 包装后的 httpx 传输错误仍视为 unknown | `tests/integration/test_operations.py::test_wrapped_httpx_error_stays_unknown` |
+| 确认后的资源版本只经 note_resource_version 写入 | `tests/integration/test_operations.py::test_confirmed_resource_write_uses_note_resource_version` |
+| 派发前对 resource_heads 行 FOR UPDATE | `tests/integration/test_operations.py::test_dispatch_locks_resource_head_before_send` |
 | 非幂等 unknown 进入 NEEDS_REVIEW，且执行角色不被 API 触发器拒绝 | `tests/integration/test_operations.py::test_non_idempotent_unknown_needs_review_and_cancel_is_not_stopped` |
 | 取消请求不表示已经停止 | `tests/integration/test_operations.py::test_non_idempotent_unknown_needs_review_and_cancel_is_not_stopped` |
 
