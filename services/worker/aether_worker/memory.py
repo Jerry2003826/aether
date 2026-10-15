@@ -23,7 +23,13 @@ class MemoryError(Exception):
         self.code = code
 
 
-def classify_memory(*, claim: str, source_artifact_ids: list[str], requested: str | None = None) -> str:
+def classify_memory(
+    *,
+    claim: str,
+    source_artifact_ids: list[str],
+    requested: str | None = None,
+    test_run_artifact_id: str | None = None,
+) -> str:
     """User input cannot declare itself confirmed. Sources become source claims."""
     if _blocked_claim(claim):
         raise MemoryError("secret_claim_rejected")
@@ -32,11 +38,11 @@ def classify_memory(*, claim: str, source_artifact_ids: list[str], requested: st
     if requested == "inference":
         return "inference"
     if requested == "observed_test":
-        return "observed_test"
+        if test_run_artifact_id:
+            return "observed_test"
+        return "proposed"
     if source_artifact_ids:
         return "source_claim"
-    if requested in {"proposed", "source_claim"}:
-        return "proposed" if not source_artifact_ids else "source_claim"
     return "proposed"
 
 
@@ -240,7 +246,20 @@ def _create(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, 
         ).first()
         if found is None:
             raise MemoryError("source_rejected")
-    status = classify_memory(claim=claim, source_artifact_ids=sources, requested=payload.get("requested_status"))
+    test_run = payload.get("test_run_artifact_id")
+    if test_run:
+        found = conn.execute(
+            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": str(test_run)},
+        ).first()
+        if found is None:
+            test_run = None
+    status = classify_memory(
+        claim=claim,
+        source_artifact_ids=sources,
+        requested=payload.get("requested_status"),
+        test_run_artifact_id=None if test_run is None else str(test_run),
+    )
     existing = conn.execute(
         text(
             "SELECT id::text AS id, claim, conflict_group::text AS conflict_group FROM memories "
