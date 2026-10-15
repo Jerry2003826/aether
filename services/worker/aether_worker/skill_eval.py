@@ -153,10 +153,12 @@ def rollback_active(
         ).rowcount
         if updated != 1:
             raise SkillEvalError("rollback_rejected")
-        conn.execute(
+        rolled = conn.execute(
             text("UPDATE skill_versions SET status = 'ROLLED_BACK' WHERE project_id = :project_id AND skill_id = :skill_id AND status = 'CANARY'"),
             {"project_id": project_id, "skill_id": skill_id},
-        )
+        ).rowcount
+        if rolled < 1:
+            raise SkillEvalError("rollback_rejected")
         pinned = conn.execute(
             text(
                 "SELECT content->>'skill_version_id' FROM goal_contracts "

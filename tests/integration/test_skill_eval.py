@@ -3,6 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from psycopg.errors import InsufficientPrivilege
 from sqlalchemy import text
+from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DBAPIError
 
 from aether_storage.artifacts import ArtifactStore
@@ -164,3 +165,89 @@ def test_only_owner_can_canary_and_rollback_keeps_the_pin(client, role_urls, tmp
     assert rolled["atomic"] is True
     assert rolled["deployment_version_id"] == previous_id
     assert rolled["pinned_version_id"] == current_id
+
+
+def test_rollback_is_atomic_when_the_second_write_fails(client, role_urls, tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    owner_id, project_id = _session(client, "skill-eval-atomic")
+    worker = Database(role_urls["aether_worker"])
+    store = ArtifactStore(tmp_path / "artifacts", worker)
+    skill_id, current_id = _version(worker, store, owner_id, project_id, "ELIGIBLE")
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=b"{}", media_type="application/json")
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        previous_id = str(
+            conn.execute(
+                text(
+                    "INSERT INTO skill_versions (project_id, skill_id, version, bundle_artifact_id, bundle_sha256, manifest, status) "
+                    "VALUES (:project_id, :skill_id, 2, :artifact_id, :sha, '{}'::jsonb, 'ACTIVE') RETURNING id::text"
+                ),
+                {"project_id": project_id, "skill_id": skill_id, "artifact_id": stored["artifact_id"], "sha": stored["sha256"]},
+            ).scalar_one()
+        )
+    task_id = insert_task(worker, owner_id, project_id, "原子回滚")
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "INSERT INTO goal_contracts (project_id, task_id, contract_version, content, contract_sha256, approved_by, approved_at) "
+                "VALUES (:project_id, :task_id, 1, '{}'::jsonb, :sha, :owner, now())"
+            ),
+            {"project_id": project_id, "task_id": task_id, "sha": SHA, "owner": owner_id},
+        )
+        approval_id = conn.execute(
+            text(
+                "INSERT INTO approvals (project_id, task_id, intent_digest, requested_payload, decision, owner_id, expires_at, decided_at) "
+                "VALUES (:project_id, :task_id, :digest, '{}'::jsonb, 'approved', :owner, :expires, now()) RETURNING id::text"
+            ),
+            {"project_id": project_id, "task_id": task_id, "digest": SHA, "owner": owner_id, "expires": datetime.now(UTC) + timedelta(hours=1)},
+        ).scalar_one()
+    verifier = Database(role_urls["aether_verifier"])
+    evaluation_id = record_evaluation(
+        verifier,
+        owner_id=owner_id,
+        project_id=project_id,
+        candidate_version_id=current_id,
+        dataset_sha256=SHA,
+        purpose="development",
+        split="train",
+        metrics={"families": 4, "ci_lower": 0.2, "success_delta": 0.2, "cost_ratio": 1},
+        synthetic=True,
+    )
+    approve_canary(
+        worker,
+        owner_id=owner_id,
+        actor_id=owner_id,
+        project_id=project_id,
+        skill_id=skill_id,
+        version_id=current_id,
+        evaluation_id=evaluation_id,
+        approval_id=str(approval_id),
+        task_id=task_id,
+    )
+    original = Connection.execute
+
+    def execute(self: Connection, statement: object, *args: object, **kwargs: object) -> object:
+        if "SET status = 'ROLLED_BACK'" in str(statement):
+            raise RuntimeError("injected")
+        return original(self, statement, *args, **kwargs)
+
+    monkeypatch.setattr(Connection, "execute", execute)
+    try:
+        with pytest.raises(RuntimeError, match="injected"):
+            rollback_active(worker, owner_id=owner_id, project_id=project_id, skill_id=skill_id, previous_version_id=previous_id, task_id=task_id)
+    finally:
+        monkeypatch.undo()
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        pointer = conn.execute(
+            text("SELECT version_id::text FROM skill_deployments WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary'"),
+            {"project_id": project_id, "skill_id": skill_id},
+        ).scalar_one()
+        status = conn.execute(
+            text("SELECT status FROM skill_versions WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": current_id},
+        ).scalar_one()
+        deployment_version = conn.execute(
+            text("SELECT deployment_version FROM skill_deployments WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary'"),
+            {"project_id": project_id, "skill_id": skill_id},
+        ).scalar_one()
+    assert pointer == current_id
+    assert status == "CANARY"
+    assert int(deployment_version) == 1
