@@ -395,15 +395,22 @@ class BudgetLedger:
                 text("SELECT limit_micro_usd, spent_micro_usd, held_micro_usd, tokens_used, tokens_held, requests_admitted FROM budget_accounts WHERE task_id = :task_id"),
                 {"task_id": task_id},
             ).mappings().one()
-            unknown = conn.execute(
-                text("SELECT count(*) FROM model_requests WHERE task_id = :task_id AND usage_status = 'unknown'"),
+            usage = conn.execute(
+                text(
+                    "SELECT COUNT(*) FILTER (WHERE usage_status = 'unknown') AS unknown_request_count, "
+                    "COUNT(*) FILTER (WHERE usage_status = 'observed') AS observed_request_count, "
+                    "COALESCE(SUM(actual_micro_usd) FILTER (WHERE usage_status = 'observed'), 0) AS observed_micro_usd "
+                    "FROM model_requests WHERE task_id = :task_id"
+                ),
                 {"task_id": task_id},
-            ).scalar_one()
+            ).mappings().one()
         return {
             "limit_micro_usd": account["limit_micro_usd"],
             "actual_known_micro_usd": account["spent_micro_usd"],
             "held_micro_usd": account["held_micro_usd"],
-            "unknown_request_count": unknown,
+            "unknown_request_count": int(usage["unknown_request_count"]),
+            "observed_request_count": int(usage["observed_request_count"]),
+            "observed_micro_usd": int(usage["observed_micro_usd"]),
             "tokens_used": account["tokens_used"],
             "tokens_held": account["tokens_held"],
             "request_count": account["requests_admitted"],

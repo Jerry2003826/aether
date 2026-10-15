@@ -3079,6 +3079,8 @@ components:
         actual_known_micro_usd: *id011
         held_micro_usd: *id011
         unknown_request_count: *id011
+        observed_request_count: *id011
+        observed_micro_usd: *id011
         tokens_used: *id011
         request_count: *id011
       required:
@@ -3086,6 +3088,8 @@ components:
       - actual_known_micro_usd
       - held_micro_usd
       - unknown_request_count
+      - observed_request_count
+      - observed_micro_usd
       - tokens_used
       - request_count
     TaskSnapshot:

@@ -130,6 +130,20 @@ def estimate_tokens(text: str) -> int:
     return max(counted, cjk)
 
 
+_CHAT_OVERHEAD_TOKENS = 8
+
+
+def estimate_provider_request_tokens(prompt: str) -> int:
+    """Count the chat request the gateway actually sends, not the bare prompt.
+
+    ModelGateway.complete wraps the prompt as a user message. cl100k on the raw
+    string undercounts that framing. The chat-shaped string plus a small slack
+    is a local upper bound, not the provider's tokenizer invoice.
+    """
+    framed = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant"
+    return estimate_tokens(framed) + _CHAT_OVERHEAD_TOKENS
+
+
 def required_facts(*, source_text: str, goal: str) -> list[str]:
     """Every source line that overlaps the goal. One overlap is not the whole question."""
     goal_text = goal.strip()
@@ -158,11 +172,72 @@ def _substantive_numbers(answer: str) -> list[str]:
     return _numbers(_CITATION_LABEL.sub(" ", answer))
 
 
+_UNITS = (
+    "摄氏度",
+    "华氏度",
+    "开尔文",
+    "毫升",
+    "千克",
+    "公里",
+    "小时",
+    "分钟",
+    "秒钟",
+    "毫米",
+    "厘米",
+    "次",
+    "天",
+    "升",
+    "米",
+    "克",
+    "秒",
+    "度",
+)
+
+
+def _cjk_bigrams(text: str) -> set[str]:
+    chars = [char for char in text if "\u4e00" <= char <= "\u9fff"]
+    return {chars[index] + chars[index + 1] for index in range(len(chars) - 1)}
+
+
+def _unit_span(text: str, end: int) -> tuple[str, int]:
+    rest = text[end:]
+    trimmed = rest.lstrip(" \t")
+    offset = end + (len(rest) - len(trimmed))
+    for unit in _UNITS:
+        if trimmed.startswith(unit):
+            return unit, offset + len(unit)
+    return "", end
+
+
+def _bindings(text: str) -> list[tuple[str, str, frozenset[str]]]:
+    """Each number keeps the unit that follows it and the nearby subject."""
+    found: list[tuple[str, str, frozenset[str]]] = []
+    for match in _NUMBER.finditer(text):
+        unit, unit_end = _unit_span(text, match.end())
+        before = text[max(0, match.start() - 16) : match.start()]
+        after = text[unit_end : unit_end + 16]
+        found.append((match.group(), unit, frozenset(_cjk_bigrams(before) | _cjk_bigrams(after))))
+    return found
+
+
+def _binding_covered(binding: tuple[str, str, frozenset[str]], answers: list[tuple[str, str, frozenset[str]]]) -> bool:
+    number, unit, subjects = binding
+    for other_number, other_unit, other_subjects in answers:
+        if other_number != number or other_unit != unit:
+            continue
+        if not subjects or subjects & other_subjects:
+            return True
+    return False
+
+
 def _covers(answer: str, fact: str) -> bool:
     if fact in answer:
         return True
-    numbers = _numbers(fact)
-    return bool(numbers) and all(number in _substantive_numbers(answer) for number in numbers)
+    bindings = _bindings(fact)
+    if not bindings:
+        return False
+    answers = _bindings(_CITATION_LABEL.sub(" ", answer))
+    return all(_binding_covered(binding, answers) for binding in bindings)
 
 
 def fact_satisfied(answer: str, fact: str, goal: str) -> bool:

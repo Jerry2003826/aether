@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import concurrent.futures
+import functools
 import json
 import os
 import signal
@@ -21,6 +22,18 @@ from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task
 from aether_worker.memory import apply_memory_commands
+
+
+def make_executors() -> tuple[concurrent.futures.ThreadPoolExecutor, concurrent.futures.ThreadPoolExecutor]:
+    """Activity work and control delivery do not share one saturated pool."""
+    activity = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="aether-activity")
+    control = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="aether-control")
+    return activity, control
+
+
+async def run_control(executor: concurrent.futures.Executor, func, /, *args):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(executor, functools.partial(func, *args))
 
 
 def route_pending(dispatcher: Database, worker: Database, verifier: Database, store: ArtifactStore) -> None:
@@ -100,10 +113,15 @@ def endpoints_from_env() -> WorkerEndpoints:
 async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     resolved = endpoints or endpoints_from_env()
     configure(resolved)
-    client = await Client.connect(resolved.temporal_address)
-    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="aether-blocking")
+    activity_executor, control_executor = make_executors()
+    try:
+        client = await Client.connect(resolved.temporal_address)
+    except Exception:
+        activity_executor.shutdown(wait=False, cancel_futures=False)
+        control_executor.shutdown(wait=False, cancel_futures=False)
+        raise
     loop = asyncio.get_running_loop()
-    loop.set_default_executor(executor)
+    loop.set_default_executor(activity_executor)
     worker = Worker(
         client,
         task_queue=resolved.task_queue,
@@ -128,10 +146,11 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
                     workflow=DurableTaskWorkflow,
                     intake_pause_seconds=resolved.intake_pause_seconds,
                 )
-                await asyncio.to_thread(route_pending, dispatcher, database, verifier, store)
+                await run_control(control_executor, route_pending, dispatcher, database, verifier, store)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.25)
                 except TimeoutError:
                     continue
     finally:
-        executor.shutdown(wait=False, cancel_futures=False)
+        activity_executor.shutdown(wait=False, cancel_futures=False)
+        control_executor.shutdown(wait=False, cancel_futures=False)

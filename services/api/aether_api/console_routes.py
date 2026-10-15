@@ -351,7 +351,9 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
                 text(
                     "SELECT COUNT(*) AS request_count, "
                     "COUNT(*) FILTER (WHERE usage_status = 'unknown') AS unknown_request_count, "
-                    "COALESCE(SUM(actual_micro_usd) FILTER (WHERE usage_status = 'known'), 0) AS known "
+                    "COUNT(*) FILTER (WHERE usage_status = 'observed') AS observed_request_count, "
+                    "COALESCE(SUM(actual_micro_usd) FILTER (WHERE usage_status = 'known'), 0) AS known, "
+                    "COALESCE(SUM(actual_micro_usd) FILTER (WHERE usage_status = 'observed'), 0) AS observed "
                     "FROM model_requests WHERE project_id = :project_id "
                     "AND (CAST(:start AS timestamptz) IS NULL OR created_at >= CAST(:start AS timestamptz)) "
                     "AND (CAST(:end AS timestamptz) IS NULL OR created_at < CAST(:end AS timestamptz))"
@@ -363,6 +365,8 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
             "actual_known_micro_usd": int(requests["known"]),
             "held_micro_usd": int(account["held"]),
             "unknown_request_count": int(requests["unknown_request_count"]),
+            "observed_request_count": int(requests["observed_request_count"]),
+            "observed_micro_usd": int(requests["observed"]),
             "tokens_used": int(account["tokens_used"]),
             "request_count": int(requests["request_count"]),
         }
@@ -815,6 +819,8 @@ def _zero_cost() -> dict[str, int]:
         "actual_known_micro_usd": 0,
         "held_micro_usd": 0,
         "unknown_request_count": 0,
+        "observed_request_count": 0,
+        "observed_micro_usd": 0,
         "tokens_used": 0,
         "request_count": 0,
     }

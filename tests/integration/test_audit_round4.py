@@ -3,8 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
+import json
 import time
 import uuid
+from pathlib import Path
+
+import psycopg
 from types import SimpleNamespace
 
 import litellm
@@ -14,10 +19,12 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 from aether_storage.artifacts import ArtifactStore
+from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import (
     WorkerEndpoints,
+    apply_task_control,
     apply_task_control_effect,
     configure,
     execute_task,
@@ -26,6 +33,7 @@ from aether_worker.goal_effect import (
     prepare_task,
     prepare_task_effect,
 )
+from aether_worker.research import estimate_tokens, research_prompt
 from aether_worker.outbox import enqueue_task, insert_followup_command
 from tests.integration.test_artifacts import _project
 from tests.integration.test_worker_process import _temporal_address
@@ -61,7 +69,7 @@ def _completion(state):
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=state["output"]))],
             model="audit-model",
-            usage=SimpleNamespace(prompt_tokens=state["tokens"], completion_tokens=20),
+            usage=SimpleNamespace(prompt_tokens=state["tokens"], completion_tokens=state["completion_tokens"]),
             _hidden_params=hidden,
         )
 
@@ -84,7 +92,7 @@ def setup_case(client, role_urls, monkeypatch, *, sources=(FACT,), goal=GOAL, bu
     )
     endpoints = _endpoints(role_urls, store.root)
     payload = {"project_id": project, "task_id": created["task_id"], "command_id": created["command_key"]}
-    state = {"calls": 0, "output": f"资料记载：{FACT}", "tokens": 100, "cost": 0.001, "delay": 0, "callback": None}
+    state = {"calls": 0, "output": f"资料记载：{FACT}", "tokens": 100, "completion_tokens": 20, "cost": 0.001, "delay": 0, "callback": None}
     monkeypatch.setattr(litellm, "completion", _completion(state))
     return owner, project, database, store, refs, endpoints, payload, state
 
@@ -114,22 +122,34 @@ def test_round4_known_tokens_survive_unknown_price(client, role_urls, monkeypatc
     assert used == 120
 
 
-def test_round4_reported_cost_above_reservation_is_kept(client, role_urls, monkeypatch) -> None:
+def test_round4_reported_cost_above_reservation_is_kept(client, role_urls, monkeypatch, aether_admin) -> None:
     owner, project, database, _store, _refs, endpoints, payload, state = setup_case(
         client,
         role_urls,
         monkeypatch,
-        budget={"max_cost_micro_usd": 100_000, "max_tokens": 100_000, "max_model_requests": 4, "active_seconds": 1800, "verification_reserve_fraction": 0.2},
+        budget={"max_cost_micro_usd": 2_000_000, "max_tokens": 100_000, "max_model_requests": 4, "active_seconds": 1800, "verification_reserve_fraction": 0.2},
     )
     state["cost"] = 0.15
     result = materialize_goal_effect(endpoints, payload)
     with database.transaction(owner_id=owner, project_id=project) as conn:
         actual = conn.execute(
-            text("SELECT actual_micro_usd FROM model_requests WHERE project_id = :project AND task_id = :task"),
+            text("SELECT actual_micro_usd, usage_status FROM model_requests WHERE project_id = :project AND task_id = :task"),
             {"project": project, "task": payload["task_id"]},
-        ).scalar_one()
-    assert actual == 150_000
+        ).one()
+    assert actual == (150_000, "observed")
     assert result["status"] != "SUCCEEDED"
+    snapshot = BudgetLedger(database).snapshot(owner_id=owner, project_id=project, task_id=payload["task_id"])
+    assert snapshot["observed_micro_usd"] == 150_000
+    assert snapshot["observed_request_count"] == 1
+    assert snapshot["actual_known_micro_usd"] == 0
+    task_body = client.get(f"/v1/projects/{project}/tasks/{payload['task_id']}").json()
+    assert task_body["budget"]["observed_micro_usd"] == 150_000
+    assert task_body["budget"]["actual_known_micro_usd"] == 0
+    assert task_body["budget"]["unknown_request_count"] == 0
+    costs = client.get(f"/v1/projects/{project}/costs").json()
+    assert costs["observed_micro_usd"] == 150_000
+    assert costs["actual_known_micro_usd"] == 0
+    _downgrade_maps_the_observed_row(aether_admin, project, payload["task_id"])
 
 
 def test_round4_deadline_is_checked_after_the_provider_returns(client, role_urls, monkeypatch) -> None:
@@ -339,3 +359,187 @@ def test_round4_slow_call_does_not_block_another_temporal_task(client, role_urls
     elapsed = asyncio.run(run())
     assert elapsed < 1.0
     assert state["calls"] >= 2
+
+
+def _migration_0011():
+    path = Path("migrations/versions/0011_model_call_lifecycle.py")
+    spec = importlib.util.spec_from_file_location("model_call_lifecycle_0011", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _downgrade_maps_the_observed_row(admin_url: str, project_id: str, task_id: str) -> None:
+    module = _migration_0011()
+    with psycopg.connect(admin_url) as conn:
+        conn.execute(module.MAP_OBSERVED_BEFORE_DOWNGRADE)
+        for statement in module.RESTORE_LEGACY_USAGE_CHECKS:
+            conn.execute(statement)
+        row = conn.execute(
+            "SELECT usage_status, actual_micro_usd, usage_detail FROM model_requests WHERE project_id = %s AND task_id = %s",
+            (project_id, task_id),
+        ).fetchone()
+        assert row is not None
+        status, actual, detail = row
+        if isinstance(detail, str):
+            detail = json.loads(detail)
+        assert status == "unknown"
+        assert actual is None
+        assert detail["downgraded_from"] == "observed"
+        assert int(detail["reported_cost_micro_usd"]) == 150_000
+        conn.rollback()
+
+
+def test_codex_money_below_the_request_ceiling_is_not_sent(client, role_urls, monkeypatch) -> None:
+    owner, project, database, _store, _refs, endpoints, payload, state = setup_case(
+        client,
+        role_urls,
+        monkeypatch,
+        budget={"max_cost_micro_usd": 80, "max_tokens": 100_000, "max_model_requests": 4, "active_seconds": 1800, "verification_reserve_fraction": 0},
+    )
+    result = materialize_goal_effect(endpoints, payload)
+    assert state["calls"] == 0, result
+    assert result["stop_reason"] == "budget_exhausted"
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        count = conn.execute(text("SELECT count(*) FROM model_requests WHERE task_id = :task"), {"task": payload["task_id"]}).scalar_one()
+    assert count == 0
+
+
+def test_codex_raw_token_budget_does_not_cover_chat_framing(client, role_urls, monkeypatch) -> None:
+    prompt = research_prompt(goal=GOAL, sources=[FACT])
+    raw = estimate_tokens(prompt)
+    _owner, _project_id, _database, _store, _refs, endpoints, payload, state = setup_case(
+        client,
+        role_urls,
+        monkeypatch,
+        budget={"max_cost_micro_usd": 2_000_000, "max_tokens": raw + 1, "max_model_requests": 4, "active_seconds": 1800, "verification_reserve_fraction": 0},
+    )
+    result = materialize_goal_effect(endpoints, payload)
+    assert state["calls"] == 0, result
+    assert result["stop_reason"] == "budget_exhausted"
+
+
+def test_codex_empty_content_still_books_known_usage(client, role_urls, monkeypatch) -> None:
+    owner, project, database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+    state["output"] = ""
+    state["tokens"] = 40
+    state["completion_tokens"] = 0
+    state["cost"] = 0.001
+    result = materialize_goal_effect(endpoints, payload)
+    assert state["calls"] == 1
+    assert result["status"] == "NEEDS_REVIEW"
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        account = conn.execute(
+            text("SELECT tokens_used, spent_micro_usd FROM budget_accounts WHERE project_id = :project AND task_id = :task"),
+            {"project": project, "task": payload["task_id"]},
+        ).one()
+        usage = conn.execute(
+            text("SELECT usage_status, input_tokens FROM model_requests WHERE project_id = :project AND task_id = :task"),
+            {"project": project, "task": payload["task_id"]},
+        ).one()
+    assert account == (40, 1000)
+    assert usage == ("known", 40)
+
+
+def test_codex_paraphrase_without_a_quotation_is_not_success(client, role_urls, monkeypatch) -> None:
+    owner, project, _database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+    state["output"] = "每分钟六十次。"
+    result = materialize_goal_effect(endpoints, payload)
+    assert result["status"] != "SUCCEEDED"
+    verifier = Database(role_urls["aether_verifier"])
+    with verifier.transaction(owner_id=owner, project_id=project) as conn:
+        reason = conn.execute(
+            text("SELECT reason FROM verification_results WHERE task_id = :task ORDER BY created_at DESC LIMIT 1"),
+            {"task": payload["task_id"]},
+        ).scalar_one()
+    assert reason == "citation_fail"
+
+
+def test_codex_zero_remaining_time_does_not_dispatch(client, role_urls, monkeypatch) -> None:
+    owner, project, database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+    original = BudgetLedger.prepare_model_call
+
+    def backdate(self, **kwargs):
+        prepared = original(self, **kwargs)
+        with database.transaction(owner_id=owner, project_id=project) as conn:
+            conn.execute(text("UPDATE tasks SET created_at = now() - interval '3 hours' WHERE id = :id"), {"id": payload["task_id"]})
+        return prepared
+
+    monkeypatch.setattr(BudgetLedger, "prepare_model_call", backdate)
+    result = materialize_goal_effect(endpoints, payload)
+    assert state["calls"] == 0, result
+    assert result["stop_reason"] == "budget_exhausted"
+
+
+def test_codex_missing_explicit_file_is_not_dispatched(client, role_urls, monkeypatch) -> None:
+    _owner, project, _database, store, refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+    stored = refs[0]
+    path = store.root / project / str(stored["sha256"])[:2] / str(stored["sha256"])
+    assert path.is_file()
+    path.unlink()
+    result = materialize_goal_effect(endpoints, payload)
+    assert state["calls"] == 0, result
+    assert result["status"] == "NEEDS_REVIEW"
+
+
+@pytest.mark.parametrize("kind", ["pause", "cancel"])
+def test_codex_workflow_signal_during_the_call_blocks_success(client, role_urls, monkeypatch, kind: str) -> None:
+    address = _temporal_address()
+    owner, project, database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+    state["delay"] = 3.0
+    state["output"] = f"资料记载：{FACT}"
+    command_key = f"round4-during-{kind}"
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        workflow_id = conn.execute(text("SELECT workflow_id FROM tasks WHERE id = :id"), {"id": payload["task_id"]}).scalar_one()
+        insert_followup_command(
+            conn,
+            project_id=project,
+            task_id=payload["task_id"],
+            workflow_id=str(workflow_id),
+            command_key=command_key,
+            kind=kind,
+        )
+    configure(endpoints)
+    queue = f"round4-signal-{uuid.uuid4()}"
+
+    async def run() -> None:
+        temporal = await Client.connect(address)
+        async with Worker(
+            temporal,
+            task_queue=queue,
+            workflows=[DurableTaskWorkflow],
+            activities=[prepare_task, execute_task, apply_task_control],
+        ):
+            handle = await temporal.start_workflow(
+                DurableTaskWorkflow.run,
+                {"task_id": payload["task_id"], "intake_pause_seconds": 0},
+                id=str(workflow_id),
+                task_queue=queue,
+            )
+            await handle.signal(
+                DurableTaskWorkflow.command,
+                {"command_id": payload["command_id"], "project_id": project, "kind": "start"},
+            )
+            for _ in range(80):
+                if state["calls"] >= 1:
+                    break
+                await asyncio.sleep(0.05)
+            assert state["calls"] >= 1
+            await handle.signal(
+                DurableTaskWorkflow.command,
+                {"command_id": command_key, "project_id": project, "kind": kind},
+            )
+            await handle.signal(DurableTaskWorkflow.close)
+            await asyncio.wait_for(handle.result(), timeout=30)
+
+    asyncio.run(run())
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": payload["task_id"]}).scalar_one()
+        recorded = conn.execute(
+            text("SELECT usage_detail->>'dispatch_state' FROM model_requests WHERE task_id = :id"),
+            {"id": payload["task_id"]},
+        ).scalar_one()
+    assert state["calls"] == 1
+    assert recorded == "response_recorded"
+    assert status == ("PAUSED" if kind == "pause" else "CANCELLED")

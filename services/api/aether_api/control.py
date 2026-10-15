@@ -399,10 +399,15 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         ),
         {"project_id": project_id, "task_id": task_id},
     ).mappings().first()
-    unknown = conn.execute(
-        text("SELECT count(*) FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND usage_status = 'unknown'"),
+    usage = conn.execute(
+        text(
+            "SELECT COUNT(*) FILTER (WHERE usage_status = 'unknown') AS unknown_request_count, "
+            "COUNT(*) FILTER (WHERE usage_status = 'observed') AS observed_request_count, "
+            "COALESCE(SUM(actual_micro_usd) FILTER (WHERE usage_status = 'observed'), 0) AS observed_micro_usd "
+            "FROM model_requests WHERE project_id = :project_id AND task_id = :task_id"
+        ),
         {"project_id": project_id, "task_id": task_id},
-    ).scalar_one()
+    ).mappings().one()
     artifacts = conn.execute(
         text(
             "SELECT id::text FROM ("
@@ -436,7 +441,9 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         "projection_updated_at": task["projection_updated_at"],
         "created_at": task["created_at"],
         "budget": budget,
-        "unknown_request_count": int(unknown),
+        "unknown_request_count": int(usage["unknown_request_count"]),
+        "observed_request_count": int(usage["observed_request_count"]),
+        "observed_micro_usd": int(usage["observed_micro_usd"]),
         "artifact_ids": [str(item) for item in artifacts],
         "verification_results": [dict(row) for row in verifications],
     }
@@ -459,6 +466,8 @@ def _public_task(item: dict[str, Any] | None) -> dict[str, Any]:
             "actual_known_micro_usd": int(budget["spent_micro_usd"]) if budget else 0,
             "held_micro_usd": int(budget["held_micro_usd"]) if budget else 0,
             "unknown_request_count": item["unknown_request_count"],
+            "observed_request_count": item["observed_request_count"],
+            "observed_micro_usd": item["observed_micro_usd"],
             "tokens_used": int(budget["tokens_used"]) if budget else 0,
             "request_count": int(budget["requests_admitted"]) if budget else 0,
         },
