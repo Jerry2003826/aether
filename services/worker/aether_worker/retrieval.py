@@ -493,13 +493,9 @@ def search(
     index_root: Path,
     generation_id: str | None = None,
 ) -> dict[str, Any]:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        cached = read_cached_result(conn, project_id, query)
-        if cached is not None:
-            return cached
-        epoch = current_epoch(conn, project_id)
     query_vector = encode_texts([query])[0]
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        epoch = current_epoch(conn, project_id)
         generation = _load_generation(conn, project_id, generation_id)
         if generation is None:
             raise RetrievalError("generation_missing")
@@ -507,6 +503,9 @@ def search(
             result = _empty(True, state=generation["state"])
             result["query"] = query
             return result
+        cached = read_cached_result(conn, project_id, query, generation_id=str(generation["id"]))
+        if cached is not None:
+            return cached
         index_dir = (index_root / generation["generation_key"]).resolve()
         manifest_path = index_dir / "manifest.json"
         if not manifest_path.is_file():
@@ -580,7 +579,7 @@ def search(
             "index_lag": index_lag,
             "embedding_revision": EMBEDDING_REVISION,
         }
-        cache_result(project_id, epoch, query, result)
+        cache_result(project_id, epoch, query, result, generation_id=str(generation["id"]))
         return result
 
 

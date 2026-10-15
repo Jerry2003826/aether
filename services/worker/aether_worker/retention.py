@@ -11,7 +11,7 @@ LIMITS = (
     "这是 tombstone，不是从磁盘和备份里物理删除。",
     "数据库备份和 Temporal 历史里可能还留着副本，要等备份到期才消失。",
 )
-_SEARCH_CACHE: dict[tuple[str, int, str], dict[str, Any]] = {}
+_SEARCH_CACHE: dict[tuple[str, int, str, str], dict[str, Any]] = {}
 
 
 class RetentionError(Exception):
@@ -28,13 +28,13 @@ def current_epoch(conn: Any, project_id: str) -> int:
     return int(value)
 
 
-def cache_result(project_id: str, epoch: int, key: str, value: dict[str, Any]) -> None:
-    _SEARCH_CACHE[(project_id, int(epoch), key)] = dict(value)
+def cache_result(project_id: str, epoch: int, key: str, value: dict[str, Any], *, generation_id: str = "") -> None:
+    _SEARCH_CACHE[(project_id, int(epoch), generation_id, key)] = dict(value)
 
 
-def read_cached_result(conn: Any, project_id: str, key: str) -> dict[str, Any] | None:
-    """Return a cached search only when it belongs to the project's current epoch."""
-    found = _SEARCH_CACHE.get((project_id, current_epoch(conn, project_id), key))
+def read_cached_result(conn: Any, project_id: str, key: str, *, generation_id: str = "") -> dict[str, Any] | None:
+    """Return a cached search only for the current epoch and the requested generation."""
+    found = _SEARCH_CACHE.get((project_id, current_epoch(conn, project_id), generation_id, key))
     return None if found is None else dict(found)
 
 
