@@ -136,7 +136,9 @@ export AETHER_TASK_QUEUE=aether-tasks
 uv run --locked --no-build python -m aether_worker
 ```
 
-`AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。
+`AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。控制信号可以提前结束这次等待。`4ba3b2f` 之前的历史没有这条补丁标记，回放时仍走原来的 sleep。
+
+研究路径默认调用 live 模型。三个变量和短探针相同：`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`、`AETHER_LIVE_MODEL_KEY`。缺任何一个，任务进入 `NEEDS_REVIEW`，原因是没有配置供应商，不会改用脚本回答。离线测试要显式设置 `AETHER_RESEARCH_PROVIDER=scripted`。调用前按任务预算预留 token、次数、费用和墙钟；超限则任务失败，`resume_state` 为 `budget_exhausted`，并且不会发出这次请求。`allowed_source_ids` 省略时读取项目里未绑定的文本；空列表表示没有来源；列表里有不存在或不可读的 id 时整次任务进入 `NEEDS_REVIEW`，不会改读其他资料。
 
 进程打出 `aether-worker-ready` 后开始轮询。`SIGTERM` 或 `SIGINT` 让当前这一轮结束后退出。队列默认 `aether-tasks`，测试可以改 `AETHER_TASK_QUEUE`。
 
@@ -191,6 +193,24 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 ```
 
 `--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 为 0，`failed` 为 1，`blocked` 为 2，`incomplete` 为 3。硬上限是 8 次补全、累计 20000 token、单次输出最多 512 token。供应商没有返回费用时 `cost_status` 为 `unknown`。验收步骤、引用规则和已记录结果见 [`reports/f26_criteria.md`](reports/f26_criteria.md)。
+
+### `scripts/run_live_task_check.py`
+
+同一组模型变量还可以跑一条真实研究任务。它走公开 HTTP 和 `python -m aether_worker`，提供者是 live。缺变量时退出码是 2，结果是 `blocked`，不会假装成功。key 不进命令行，不进结果文件。
+
+```sh
+export AETHER_DATABASE_URL='postgresql://aether_api:…@127.0.0.1:5432/aether'
+export AETHER_WORKER_DATABASE_URL='postgresql://aether_worker:…@127.0.0.1:5432/aether'
+export AETHER_VERIFIER_DATABASE_URL='postgresql://aether_verifier:…@127.0.0.1:5432/aether'
+export AETHER_DISPATCHER_DATABASE_URL='postgresql://aether_dispatcher:…@127.0.0.1:5432/aether'
+export AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+```
+
+`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。
 
 ## 当前状态
 

@@ -85,6 +85,37 @@ def test_create_task_reaches_database_and_temporal_without_fake_success(client, 
     assert again.json()["status"] == "QUEUED"
 
 
+def test_create_task_stores_budget_and_rejects_invalid_limits(client, api_db) -> None:
+    owner, project_id, headers = _session(client)
+    rejected = client.post(
+        f"/v1/projects/{project_id}/tasks",
+        headers={**headers, "Idempotency-Key": "task-budget-bad"},
+        json={"goal": "检查预算", "budget": {"max_tokens": 0}},
+    )
+    assert rejected.status_code == 422
+    assert rejected.json()["code"] == "invalid_budget"
+    rejected_sources = client.post(
+        f"/v1/projects/{project_id}/tasks",
+        headers={**headers, "Idempotency-Key": "task-sources-bad"},
+        json={"goal": "检查来源", "allowed_source_ids": ["not-a-uuid"]},
+    )
+    assert rejected_sources.status_code == 422
+    assert rejected_sources.json()["code"] == "invalid_sources"
+    created = client.post(
+        f"/v1/projects/{project_id}/tasks",
+        headers={**headers, "Idempotency-Key": "task-budget-ok"},
+        json={"goal": "带预算的任务", "budget": {"max_tokens": 9, "max_model_requests": 2, "active_seconds": 30, "max_cost_micro_usd": 10}, "allowed_source_ids": []},
+    )
+    assert created.status_code == 202, created.text
+    with api_db.transaction(owner_id=owner, project_id=project_id) as conn:
+        payload = conn.execute(text("SELECT payload FROM command_outbox WHERE command_key = :key"), {"key": created.json()["command_id"]}).scalar_one()
+    if isinstance(payload, str):
+        payload = json.loads(payload)
+    assert payload["budget"]["max_tokens"] == 9
+    assert payload["budget"]["active_seconds"] == 30
+    assert payload["allowed_source_ids"] == []
+
+
 def test_event_replay_shows_pending_command_and_watermark(client, api_db) -> None:
     _owner, project_id, headers = _session(client)
     accepted = _task(client, headers, project_id, key="task-events-1")

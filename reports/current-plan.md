@@ -1,3 +1,7 @@
+# 研究任务改用 live 模型
+
+基线 `e1cc9e5`。默认提供者是 live。`AETHER_RESEARCH_PROVIDER=scripted` 才走离线摘录。预算在调用前预留。`allowed_source_ids` 按字面限制资料。
+
 # 审计三轮
 
 基线 `4ba3b2f04df4bcd28a8d6f6cba0b0fd5d9d353cc`。

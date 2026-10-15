@@ -15,15 +15,28 @@ from pathlib import Path
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from temporalio import activity
 
 from aether_domain.security import sha256_text
+from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
+from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
-from aether_worker.research import offline_fact, record_verification, scripted_answer
+from aether_worker.research import cites_fact, offline_fact, record_verification, research_prompt, scripted_answer
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-3"
+VERIFIER_VERSION = "goal-artifact-4"
+MIN_CALL_TOKENS = 8
+CALL_TOKEN_RESERVE = 512
+CALL_COST_RESERVE = 50_000
+DEFAULT_BUDGET = {
+    "max_cost_micro_usd": 2_000_000,
+    "max_tokens": 100_000,
+    "max_model_requests": 48,
+    "active_seconds": 1800,
+    "verification_reserve_fraction": 0.2,
+}
 TERMINAL_STATUSES = ("SUCCEEDED", "FAILED", "CANCELLED")
 PAUSEABLE_STATUSES = ("QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL")
 NON_TERMINAL_STATUSES = ("DRAFT", "QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "NEEDS_REVIEW")
@@ -39,6 +52,11 @@ class WorkerEndpoints:
     temporal_address: str
     task_queue: str
     intake_pause_seconds: float = 0
+    research_provider: str = "live"
+    live_model_base: str = ""
+    live_model_alias: str = ""
+    live_model_key: str = ""
+    live_timeout_seconds: float = 30
 
 
 ENDPOINTS: WorkerEndpoints | None = None
@@ -126,14 +144,30 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
     store = ArtifactStore(endpoints.artifact_root, worker)
-    sources = _source_texts(worker, store, owner_id, project_id)
+    if endpoints.research_provider != "scripted":
+        missing = _missing_live_settings(endpoints)
+        if missing:
+            return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="没有配置可用的模型供应商", code="live_provider_unconfigured", missing=missing)
+    start_payload = _task_start_payload(worker, project_id, task_id)
+    allowed_ids = start_payload.get("allowed_source_ids")
+    allowed = allowed_ids if isinstance(allowed_ids, list) else None
+    sources, _snapshot, source_state = _source_snapshot(worker, store, owner_id, project_id, allowed_ids=allowed)
+    if source_state == "empty":
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
+    if source_state == "invalid":
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法", code="allowed_sources_invalid")
     if not sources:
         actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
         return {"status": actual, "task_id": task_id}
     blocked = _block_execution(worker, owner_id, project_id, task_id)
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
-    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+    if endpoints.research_provider == "scripted":
+        answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+    else:
+        answer = _ensure_live_answer(endpoints, worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources, budget=start_payload.get("budget"))
+        if isinstance(answer, dict):
+            return answer
     if answer is None:
         return {"status": _task_status(worker, owner_id, project_id, task_id), "task_id": task_id}
     if not answer:
@@ -153,6 +187,7 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
         contract_sha=contract_sha,
         artifact_id=answer,
         goal=goal,
+        allowed_ids=allowed,
     )
     verdict = _verdict(endpoints, owner_id, project_id, verification_id)
     if verdict == "PASS":
@@ -463,12 +498,13 @@ def _ensure_verification(
     contract_sha: str,
     artifact_id: str,
     goal: str,
+    allowed_ids: list[str] | None = None,
 ) -> str:
     verifier = Database(endpoints.verifier_url)
     store = ArtifactStore(endpoints.artifact_root, verifier)
     ledger, deleted = _artifact_ledger(verifier, owner_id, project_id, artifact_id)
     observed, readable = _observe_bytes(store, owner_id, project_id, artifact_id)
-    sources, snapshot = _source_snapshot(verifier, store, owner_id, project_id)
+    sources, snapshot, _source_state = _source_snapshot(verifier, store, owner_id, project_id, allowed_ids=allowed_ids)
     authoritative = _load_authoritative_contract(verifier, owner_id, project_id, task_id)
     contract_ok = (
         authoritative is not None
@@ -487,7 +523,10 @@ def _ensure_verification(
         detail = "字节完整性未通过"
     elif goal_state == "unverifiable":
         outcome = "unverifiable"
-        detail = "字节与合同可以通过，离线脚本不能确认目标完成"
+        detail = "字节与合同可以通过，离线摘录不能确认目标完成"
+    elif goal_state == "uncited":
+        outcome = "fail"
+        detail = "回答没有引用所依据的资料原句"
     elif goal_state != "pass":
         outcome = "fail"
         detail = "回答没有覆盖目标"
@@ -528,6 +567,7 @@ def _ensure_verification(
         "pipeline": "pass",
         "byte_integrity": "pass" if byte_ok else "fail",
         "goal_completion": goal_state,
+        "citation": "pass" if goal_state == "pass" else "fail",
         "contract_binding": "pass" if contract_ok else "fail",
     }
     stored = store.put(
@@ -648,22 +688,40 @@ def _cached_verification_on(
     return None if found is None else str(found)
 
 
-def _source_texts(database: Database, store: ArtifactStore, owner_id: str, project_id: str) -> list[str]:
-    texts, _snapshot = _source_snapshot(database, store, owner_id, project_id)
-    return texts
-
-
-def _source_snapshot(database: Database, store: ArtifactStore, owner_id: str, project_id: str) -> tuple[list[str], str]:
+def _source_snapshot(
+    database: Database,
+    store: ArtifactStore,
+    owner_id: str,
+    project_id: str,
+    *,
+    allowed_ids: list[str] | None = None,
+) -> tuple[list[str], str, str]:
+    if allowed_ids is not None and len(allowed_ids) == 0:
+        return [], sha256_text(""), "empty"
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        rows = conn.execute(
-            text(
-                "SELECT id::text AS id, sha256 FROM artifacts "
-                "WHERE project_id = :project_id AND deleted_at IS NULL AND task_id IS NULL "
-                "AND media_type = 'text/plain' AND classification = 'project_private' "
-                "ORDER BY created_at, id"
-            ),
-            {"project_id": project_id},
-        ).mappings().all()
+        if allowed_ids is None:
+            rows = conn.execute(
+                text(
+                    "SELECT id::text AS id, sha256 FROM artifacts "
+                    "WHERE project_id = :project_id AND deleted_at IS NULL AND task_id IS NULL "
+                    "AND media_type = 'text/plain' AND classification = 'project_private' "
+                    "ORDER BY created_at, id"
+                ),
+                {"project_id": project_id},
+            ).mappings().all()
+        else:
+            rows = []
+            for item in allowed_ids:
+                row = conn.execute(
+                    text(
+                        "SELECT id::text AS id, sha256, media_type, classification, task_id::text AS task_id, deleted_at "
+                        "FROM artifacts WHERE project_id = :project_id AND id = :id"
+                    ),
+                    {"project_id": project_id, "id": item},
+                ).mappings().first()
+                if row is None or row["deleted_at"] is not None or row["task_id"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
+                    return [], sha256_text("invalid"), "invalid"
+                rows.append(row)
     texts: list[str] = []
     parts: list[str] = []
     for row in rows:
@@ -678,7 +736,257 @@ def _source_snapshot(database: Database, store: ArtifactStore, owner_id: str, pr
             texts.append(data.decode("utf-8"))
         except UnicodeError:
             continue
-    return texts, sha256_text("\n".join(parts))
+    return texts, sha256_text("\n".join(parts)), "ok"
+
+
+def _missing_live_settings(endpoints: WorkerEndpoints) -> list[str]:
+    missing = []
+    if not endpoints.live_model_base:
+        missing.append("AETHER_LIVE_MODEL_BASE")
+    if not endpoints.live_model_alias:
+        missing.append("AETHER_LIVE_MODEL_ALIAS")
+    if not endpoints.live_model_key:
+        missing.append("AETHER_LIVE_MODEL_KEY")
+    return missing
+
+
+def _needs_review(database: Database, *, owner_id: str, project_id: str, task_id: str, reason: str, code: str, missing: list[str] | None = None) -> dict[str, str]:
+    actual = _set_status(database, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
+    _event(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        event_key=f"needs-review-{code}-{task_id}",
+        event_type="task.needs_review",
+        payload={"reason": reason, "code": code, "missing": missing or []},
+    )
+    return {"status": actual, "task_id": task_id, "stop_reason": code}
+
+
+def _task_start_payload(database: Database, project_id: str, task_id: str) -> dict[str, Any]:
+    with database.transaction(project_id=project_id) as conn:
+        payload = conn.execute(
+            text(
+                "SELECT payload FROM command_outbox WHERE project_id = :project_id AND task_id = :id AND kind = 'start' "
+                "ORDER BY created_at LIMIT 1"
+            ),
+            {"project_id": project_id, "id": task_id},
+        ).scalar()
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        loaded = json.loads(payload)
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _budget_from_payload(value: Any) -> dict[str, Any]:
+    spec = dict(DEFAULT_BUDGET)
+    if isinstance(value, dict):
+        for key in spec:
+            if key in value:
+                spec[key] = value[key]
+    spec["verification_reserve_fraction"] = float(spec["verification_reserve_fraction"])
+    return spec
+
+
+def _mark_budget_exhausted(database: Database, *, owner_id: str, project_id: str, task_id: str, limit: str) -> dict[str, str]:
+    actual = _set_status(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        status="FAILED",
+        allowed=("QUEUED", "RUNNING", "VERIFYING"),
+        resume_state="budget_exhausted",
+    )
+    _event(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        event_key=f"budget-{task_id}",
+        event_type="task.budget_exhausted",
+        payload={"reason": "预算已用尽", "code": "budget_exhausted", "limit": limit},
+    )
+    return {"status": actual, "task_id": task_id, "stop_reason": "budget_exhausted"}
+
+
+def _task_age_seconds(database: Database, owner_id: str, project_id: str, task_id: str) -> float:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        created = conn.execute(
+            text("SELECT created_at FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).scalar_one()
+    return (datetime.now(UTC) - created).total_seconds()
+
+
+def _ensure_live_answer(
+    endpoints: WorkerEndpoints,
+    database: Database,
+    store: ArtifactStore,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    goal: str,
+    sources: list[str],
+    budget: Any,
+) -> str | dict[str, str] | None:
+    existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
+    if existing is not None:
+        return existing["id"]
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
+    spec = _budget_from_payload(budget)
+    ledger = BudgetLedger(database)
+    try:
+        ledger.open_account(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            limit_micro_usd=int(spec["max_cost_micro_usd"]),
+            token_limit=int(spec["max_tokens"]),
+            max_requests=int(spec["max_model_requests"]),
+            verification_reserve_fraction=float(spec["verification_reserve_fraction"]),
+            active_seconds=int(spec["active_seconds"]),
+        )
+    except IntegrityError:
+        pass
+    if _task_age_seconds(database, owner_id, project_id, task_id) > int(spec["active_seconds"]):
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
+    snapshot = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
+    fraction = float(spec["verification_reserve_fraction"])
+    token_ceiling = int(int(spec["max_tokens"]) * (1 - fraction))
+    cost_ceiling = int(int(spec["max_cost_micro_usd"]) * (1 - fraction))
+    request_ceiling = int(spec["max_model_requests"])
+    tokens_left = token_ceiling - int(snapshot["tokens_used"]) - int(snapshot["tokens_held"])
+    cost_left = cost_ceiling - int(snapshot["actual_known_micro_usd"]) - int(snapshot["held_micro_usd"])
+    requests_left = request_ceiling - int(snapshot["request_count"])
+    if tokens_left < MIN_CALL_TOKENS:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="tokens")
+    if cost_left < 1:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="cost")
+    if requests_left < 1:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="calls")
+    reserve_tokens = min(CALL_TOKEN_RESERVE, tokens_left)
+    reserve_cost = min(CALL_COST_RESERVE, cost_left)
+    if reserve_tokens < MIN_CALL_TOKENS:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="tokens")
+    request_key = f"research-{task_id}"
+    reserved = ledger.reserve(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        amount=reserve_cost,
+        role="research",
+        tokens=reserve_tokens,
+        model_alias=endpoints.live_model_alias,
+        request={"alias": endpoints.live_model_alias},
+    )
+    if not reserved:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="reservation")
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
+    gateway = ModelGateway(
+        database,
+        upstream_base=endpoints.live_model_base,
+        provider_key=endpoints.live_model_key,
+        timeout=endpoints.live_timeout_seconds,
+    )
+    token = gateway.issue_token(
+        owner_id=owner_id,
+        project_id=project_id,
+        capabilities=["knowledge:read"],
+        aliases=[endpoints.live_model_alias],
+    )
+    prompt = research_prompt(goal=goal, sources=sources)
+    try:
+        result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": min(256, reserve_tokens)})
+    except GatewayDenied:
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")
+    _remember_model_call(database, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, result=result)
+    if result.get("usage_status") == "unknown" and not result.get("output"):
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游超时", code="upstream_timeout")
+    output = str(result.get("output") or "").strip()
+    if not output:
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        return ""
+    reported_tokens = int(result.get("input_tokens") or 0) + int(result.get("output_tokens") or 0)
+    cost = result.get("actual_cost_micro_usd")
+    if result.get("usage_status") != "known" or cost is None or reported_tokens > reserve_tokens or int(cost) > reserve_cost:
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+    else:
+        ledger.settle(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+            actual=int(cost),
+            input_tokens=int(result.get("input_tokens") or 0),
+            output_tokens=int(result.get("output_tokens") or 0),
+        )
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+    _bind_task_artifact(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        artifact_id=str(stored["artifact_id"]),
+        classification="task_answer",
+    )
+    _event(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        event_key=f"research-{task_id}",
+        event_type="research.call",
+        payload={
+            "calls": 1,
+            "model_mode": "live",
+            "offline": False,
+            "requested_alias": result.get("requested_alias"),
+            "upstream_model": result.get("upstream_model"),
+            "input_tokens": result.get("input_tokens"),
+            "output_tokens": result.get("output_tokens"),
+            "cost_micro_usd": result.get("actual_cost_micro_usd"),
+            "cost_status": result.get("cost_status") or "unknown",
+            "usage_status": result.get("usage_status"),
+        },
+    )
+    return str(stored["artifact_id"])
+
+
+def _remember_model_call(database: Database, *, owner_id: str, project_id: str, task_id: str, request_key: str, result: dict[str, Any]) -> None:
+    detail = {
+        "requested_alias": result.get("requested_alias"),
+        "upstream_model": result.get("upstream_model"),
+        "input_tokens": result.get("input_tokens"),
+        "output_tokens": result.get("output_tokens"),
+        "cost_status": result.get("cost_status") or "unknown",
+    }
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE model_requests SET model_alias = :alias, model_revision = :upstream, usage_detail = COALESCE(usage_detail, '{}'::jsonb) || CAST(:detail AS jsonb) "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+            ),
+            {
+                "alias": str(result.get("requested_alias") or ""),
+                "upstream": result.get("upstream_model"),
+                "detail": json.dumps(detail),
+                "project_id": project_id,
+                "task_id": task_id,
+                "request_key": request_key,
+            },
+        )
 
 
 def _ensure_answer(
@@ -734,9 +1042,13 @@ def _goal_state(data: bytes | None, goal: str, sources: list[str]) -> str:
     fact = offline_fact(source_text="\n".join(sources), goal=goal)
     if not fact:
         return "unverifiable"
-    if not answer or answer == goal.strip() or fact not in answer:
+    if not answer or answer == goal.strip():
         return "fail"
-    return "pass"
+    if fact in answer:
+        return "pass"
+    if cites_fact(answer, fact):
+        return "pass"
+    return "uncited"
 
 
 def _artifact_ledger(database: Database, owner_id: str, project_id: str, artifact_id: str) -> tuple[str | None, bool]:

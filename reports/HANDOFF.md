@@ -1,5 +1,24 @@
 # 交接
 
+研究任务默认走 live 模型，分支 `cursor/live-research-provider-7618`，基线 `e1cc9e5`。本机没有 key，没有请求 key，也没有写入 GitHub secrets。
+
+监督者在自己的机器上跑：
+
+```sh
+export AETHER_DATABASE_URL='postgresql://aether_api:…@127.0.0.1:5432/aether'
+export AETHER_WORKER_DATABASE_URL='postgresql://aether_worker:…@127.0.0.1:5432/aether'
+export AETHER_VERIFIER_DATABASE_URL='postgresql://aether_verifier:…@127.0.0.1:5432/aether'
+export AETHER_DISPATCHER_DATABASE_URL='postgresql://aether_dispatcher:…@127.0.0.1:5432/aether'
+export AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+本地全量：`288 passed`。CI 用本地假的 OpenAI 兼容上游，不代表 live 成功。
+
 第三轮审计修复在 `cursor/audit-round3-repairs-7618`。基线 `4ba3b2f`。全量命令：
 
 ```text
