@@ -203,7 +203,7 @@ CREATE TABLE model_requests (
 role text NOT NULL, model_alias text NOT NULL, model_revision text, pricing_version text,
 reserved_micro_usd bigint NOT NULL CHECK(reserved_micro_usd>=0), actual_micro_usd bigint CHECK(actual_micro_usd>=0),
 input_tokens bigint CHECK(input_tokens>=0), output_tokens bigint CHECK(output_tokens>=0), usage_detail jsonb,
-usage_status text NOT NULL CHECK(usage_status IN ('reserved','known','unknown','scripted','cancelled_before_dispatch')),
+usage_status text NOT NULL CHECK(usage_status IN ('reserved','known','unknown','scripted','cancelled_before_dispatch','observed')),
 provider_request_id text, completed_at timestamptz,
 CHECK(usage_status<>'known' OR (actual_micro_usd IS NOT NULL AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL)),
 CHECK(usage_status<>'unknown' OR actual_micro_usd IS NULL),

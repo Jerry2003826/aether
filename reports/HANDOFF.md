@@ -1,6 +1,17 @@
 # 交接
 
-研究任务默认走 live 模型，分支 `cursor/live-research-provider-7618`，基线 `e1cc9e5`。本机没有 key，没有请求 key，也没有写入 GitHub secrets。PR #8 待审，不要合并。现场检查修复的 CI 绿头是 `185c527`。
+第四轮审计修复在 `cursor/audit-round4-repairs-7618`，基线 `07cc2ae`。本机没有 key。`live_ready` 没有因为这次改动而变化。细节在 `reports/audits/gpt_round4/REPAIR_RESULT.md`。
+
+`c32e4d3` 上的真实研究任务被误判失败：回答里的「资料1」被当成资料中没有的数字。引用标签不再参与这个检查。回答若把沸点写成九十度或别的数字，仍然失败，原因会写成 `unsupported_number:'…'`。请再跑一次 live task check。F26 在那次已经通过。
+
+研究调用行为变了：短引用不再单独判成功，显式来源损坏会停，预算按将发出的文本估算。监督者若要重跑，用原来的命令：
+
+```sh
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+研究任务默认走 live 模型。PR #8 已合并为 `07cc2ae`。现场检查修复的 CI 绿头是 `185c527`。
 
 `77551b4` 的 pull_request CI `38789787068` 里，`test_live_task_check_script_calls_the_fake_upstream` 退出码 3，`reason=api_or_worker_did_not_start`。API 其实已经在听。worker 立刻退出：产物目录是仓库里的 `data/live-task-check`，CI 检出在 `/home/runner` 下，`assert_storage_root` 拒绝宿主 home。当时结果里没有退出码和日志。脚本现在把产物目录放到 `mkdtemp`，启动失败会写下进程退出码和日志尾部。测试把 `HOME` 设成检出目录，所以再退回仓库 `data/` 会失败。假上游这条路径在 head `185c527` 的 CI 上通过：push `38793383253`（integration `116623417400`，pack-and-unit `116623417026`），pull_request `38793387951`（integration `116623434421`，pack-and-unit `116623433993`），SonarCloud 通过。没有把失败改成 `blocked`，也没有放宽断言。
 

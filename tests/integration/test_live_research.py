@@ -89,7 +89,7 @@ def _endpoints(role_urls, root, base: str, *, key: str = KEY, timeout: float = 5
     )
 
 
-def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeout: float = 5, backdate: bool = False, mode: str = "ok", body: str | None = None, delay: float = 0.0):
+def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeout: float = 5, backdate: bool = False, mode: str = "ok", body: str | None = None, delay: float = 0.0, goal: str | None = None):
     owner, project, _headers = _project(client)
     worker = Database(role_urls["aether_worker"])
     root = client.app.state.settings.artifact_root
@@ -103,7 +103,7 @@ def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeou
             worker,
             owner_id=owner,
             project_id=project,
-            goal=GOAL,
+            goal=goal or GOAL,
             command_key=str(uuid.uuid4()),
             budget=budget,
             allowed_source_ids=allowed if allowed is not None else [str(visible["artifact_id"])],
@@ -124,6 +124,14 @@ def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeou
                 text("SELECT event_type, payload FROM task_events WHERE project_id = :project AND task_id = :id ORDER BY sequence"),
                 {"project": project, "id": created["task_id"]},
             ).mappings().all()
+        if result.get("verification_id"):
+            verifier = Database(role_urls["aether_verifier"])
+            with verifier.transaction(owner_id=owner, project_id=project) as conn:
+                detail = conn.execute(
+                    text("SELECT reason FROM verification_results WHERE id = :id"),
+                    {"id": result["verification_id"]},
+                ).scalar_one()
+            result = {**result, "detail": detail}
         return result, dict(status), [dict(row) for row in events], str(visible["artifact_id"])
     finally:
         server.shutdown()
@@ -147,6 +155,24 @@ def test_live_answer_quotes_the_source_and_records_the_upstream_model(client, ro
     assert Upstream.seen[0]["path"].endswith("/chat/completions")
     assert Upstream.seen[0]["authorization"] == f"Bearer {KEY}"
     assert Upstream.seen[0]["body"]["model"] == "research-alias"
+
+
+def test_citation_index_does_not_reject_a_quoted_boiling_point(client, role_urls) -> None:
+    goal = "请根据已上传资料回答沸点。回答时请引用资料原句。"
+    answer = "根据资料1原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为一百摄氏度。"
+    result, status, _events, _artifact = _run(client, role_urls, goal=goal, body=answer)
+    assert result["status"] == "SUCCEEDED"
+    assert status["status"] == "SUCCEEDED"
+    assert Upstream.seen
+
+
+def test_invented_boiling_point_fails_with_the_unsupported_number(client, role_urls) -> None:
+    goal = "请根据已上传资料回答沸点。回答时请引用资料原句。"
+    answer = "根据资料1原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为九十摄氏度。"
+    result, status, _events, _artifact = _run(client, role_urls, goal=goal, body=answer)
+    assert result["status"] != "SUCCEEDED"
+    assert status["status"] != "SUCCEEDED"
+    assert result["detail"] == "unsupported_number:'九十'"
 
 
 def test_wrong_live_answer_is_not_succeeded(client, role_urls) -> None:
