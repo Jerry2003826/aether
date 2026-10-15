@@ -22,8 +22,10 @@ class CiWorkflowTests(unittest.TestCase):
         self.assertIn("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", text)
         self.assertIn("actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020", text)
         self.assertIn("astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86", text)
-        self.assertIn("uv sync --locked", text)
+        self.assertIn("uv sync --locked --no-build", text)
         self.assertNotIn("uv sync --frozen", text)
+        self.assertNotIn("uv run python", text)
+        self.assertNotIn("uv run pytest", text)
 
 
 if __name__ == "__main__":
