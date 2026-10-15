@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -297,15 +298,25 @@ def _research_prompt(sources: list[dict[str, Any]], ranked: list[str]) -> str:
     )
 
 
+_VERSION_FIELD = re.compile(r"(?<![A-Za-z])version\s*[=:：]?\s*(\d+)", re.IGNORECASE)
+_OFFSET_FIELD = re.compile(r"(?<![A-Za-z])offset\s*[=:：]?\s*(\d+)\s*[-–—]\s*(\d+)", re.IGNORECASE)
+
+
 def _report_cites(report: str, sources: list[dict[str, Any]]) -> bool:
+    """Both lab notes must show their id, version, full sha256, and offset.
+
+    `version=1` and `offset=0-92` are the same fields as `version 1` and
+    `offset 0-92`. A different number still fails.
+    """
     boiling = [item for item in sources if item["source_id"] in GOLD]
     if len(boiling) != 2 or "100" not in report:
         return False
+    versions = {int(match.group(1)) for match in _VERSION_FIELD.finditer(report)}
+    offsets = {(int(match.group(1)), int(match.group(2))) for match in _OFFSET_FIELD.finditer(report)}
     for item in boiling:
-        span = f"offset {item['start_offset']}-{item['end_offset']}"
-        if item["content_sha256"] not in report or item["source_id"] not in report or span not in report:
+        if item["content_sha256"] not in report or item["source_id"] not in report:
             return False
-        if f"version {item['version']}" not in report:
+        if item["version"] not in versions or (item["start_offset"], item["end_offset"]) not in offsets:
             return False
     return True
 

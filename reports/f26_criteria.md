@@ -42,8 +42,10 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 
 - 协议：一次 `tools` / `schema` / `usage` 探针，模型别名必须是 `deepseek-chat`。
 - 编码：`evals/f26_snapshot` 里的 `add` 本来就是 `return a - b`。可信检查在 `evals/f26_checker/check.py`，每次复制进一个新目录，不放在模型可以改的快照里。独立测试先观察到 `add(1, 2)=-1`。每次尝试都从快照重新复制，失败目录的哈希不能当成通过。OpenHands SDK 进程自己把补丁写进 `billing.py`，父进程不替它写。通过必须来自另一次只读容器：`python:3.12-alpine`，`--network none --read-only --cap-drop ALL --pids-limit 32`。没有 Docker 或镜像拉不下来，这项是 not_run。
-- 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
+- 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`version=1` 和 `offset=0-92` 与空格写法是同一字段，数字不同仍然失败。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
 - Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
+
+head `dac5c49` 的完整验收退出码是 1，原样结果在 `reports/f26_acceptance_result.json`。协议、OpenHands 补丁（基线 `add(1, 2)=-1`，新容器 `PASS`）和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，等于单次输出上限，报告最后停在 `src-en`。两条引用在截断之前已经写全：`source_id`、`version=1`、完整 sha256、`offset=0-92` 和 `offset=0-283` 都在。失败原因是检查器当时只认 `version 1` 和 `offset 0-92` 这种空格，不认等号。这不是引用写错，也不是截断把引用切掉了。检查器现在两种分隔都认，缺哈希、错 offset 或错 version 仍然失败。F26 继续 blocked，需要用同一条命令重跑。
 
 ## 已经跑过的短探针
 
@@ -98,5 +100,6 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 | fixture 向量不能当成现场编码器 | `tests/unit/test_f26_acceptance.py::test_fixture_vectors_are_not_a_live_encoder` |
 | 网关丢掉多余字段，并拒绝别的模型名 | `tests/unit/test_f26_acceptance.py::test_gateway_drops_extra_fields_and_rejects_other_models` |
 | 执行器错误里的 key 被换成 `[REDACTED]` | `tests/unit/test_f26_acceptance.py::test_secret_in_an_executor_error_is_redacted` |
+| dac5c49 的报告用等号写出两条引用；缺哈希、错 offset 或错 version 仍失败 | `tests/unit/test_f26_acceptance.py::test_dac5c49_report_cites_both_sources_with_equals_signs` |
 | 缺 key 时完整验收是 blocked | `tests/unit/test_f26_acceptance.py::test_missing_key_is_blocked` |
 | 入口拒绝别的输出路径，并把 blocked 写进指定文件 | `tests/unit/test_f26_acceptance.py::test_script_writes_blocked_result_without_calling_out` |

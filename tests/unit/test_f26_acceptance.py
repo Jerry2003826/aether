@@ -20,8 +20,12 @@ from aether_worker.f26_acceptance import (
     _hybrid,
     _local_check,
     _read_sources,
+    _report_cites,
     run_f26_acceptance,
 )
+
+_RECORDED = Path(__file__).resolve().parents[2] / "reports" / "f26_acceptance_result.json"
+_RECORDED_REPORT_SHA = "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf"
 
 
 def _encode(texts: list[str]) -> list[list[float]]:
@@ -253,6 +257,35 @@ def test_secret_in_an_executor_error_is_redacted(monkeypatch) -> None:
     assert report["live_ready"] is False
 
 
+def test_dac5c49_report_cites_both_sources_with_equals_signs() -> None:
+    payload = json.loads(_RECORDED.read_text(encoding="utf-8"))
+    report = payload["research"]["report"]
+    sources = payload["research"]["sources"]
+    assert hashlib.sha256(report.encode()).hexdigest() == _RECORDED_REPORT_SHA
+    assert payload["status"] == "failed"
+    assert payload["protocol"]["status"] == "pass"
+    assert payload["coding"]["status"] == "pass"
+    assert payload["coding"]["baseline"]["stdout"].startswith("add(1, 2)=-1")
+    assert payload["coding"]["attempts"][0]["stdout"].endswith("PASS\n")
+    assert payload["linux_isolation"]["status"] == "pass"
+    assert payload["research"]["reason"] == "citation_mismatch"
+    assert payload["research"]["citations_cover_sources"] is False
+    assert payload["calls_detail"][2]["completion_tokens"] == 512
+    assert payload["caps"]["max_output_tokens"] == 512
+    assert report.endswith("src-en")
+    assert "version 1" not in report
+    assert "offset 0-92" not in report
+    assert "version=1" in report
+    assert "offset=0-92" in report
+    assert "offset=0-283" in report
+    assert _report_cites(report, sources) is True
+    english = sources[1]["content_sha256"]
+    assert _report_cites(report.replace(english, "0" * 64), sources) is False
+    assert _report_cites(report.replace("offset=0-283", "offset=0-999"), sources) is False
+    assert _report_cites(report.replace("version=1", "version=9"), sources) is False
+    assert _report_cites(report.replace("100", "九十"), sources) is False
+
+
 def test_missing_key_is_blocked(monkeypatch) -> None:
     monkeypatch.delenv(LIVE_KEY, raising=False)
     monkeypatch.delenv(LIVE_BASE, raising=False)
@@ -280,9 +313,10 @@ def test_script_writes_blocked_result_without_calling_out(tmp_path: Path, monkey
         assert str(exc) == "out must be reports/f26_acceptance_result.json"
     else:
         raise AssertionError("other output paths must be rejected")
+    before = _RECORDED.read_bytes()
     code = module.main(["--out", "reports/f26_acceptance_result.json"])
     written = json.loads(destination.read_text(encoding="utf-8"))
     assert code == 2
     assert written["status"] == "blocked"
     assert written["live_ready"] is False
-    assert not Path("reports/f26_acceptance_result.json").exists()
+    assert _RECORDED.read_bytes() == before
