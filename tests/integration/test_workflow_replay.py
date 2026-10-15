@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
-import subprocess
 import sys
 import uuid
 from pathlib import Path
@@ -21,8 +20,9 @@ from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.outbox import enqueue_task
 from tests.integration.test_artifacts import _project
 
-BASELINE = "e1cc9e5"
+BASELINE = "4ba3b2f"
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾\n"
+OLD_WORKFLOW = Path(__file__).resolve().parents[1] / "fixtures" / "durable_workflow_4ba3b2f.py"
 
 
 def _temporal_address() -> str:
@@ -35,7 +35,8 @@ def _temporal_address() -> str:
 
 
 def _old_workflow(tmp_path: Path):
-    source = subprocess.check_output(["git", "show", f"{BASELINE}:services/worker/aether_worker/durable_workflow.py"], text=True)
+    """Load the task workflow from 4ba3b2f, the commit before intake-pause-interruptible."""
+    source = OLD_WORKFLOW.read_text(encoding="utf-8")
     path = tmp_path / "durable_workflow_before_patch.py"
     path.write_text(source, encoding="utf-8")
     spec = importlib.util.spec_from_file_location("durable_workflow_before_patch", path)
@@ -49,6 +50,9 @@ def _old_workflow(tmp_path: Path):
 
 def test_current_workflow_replays_history_from_before_the_patch(client, role_urls, tmp_path: Path) -> None:
     address = _temporal_address()
+    old_source = OLD_WORKFLOW.read_text(encoding="utf-8")
+    assert "intake-pause-interruptible" not in old_source
+    assert BASELINE == "4ba3b2f"
     owner, project, _headers = _project(client)
     worker_db = Database(role_urls["aether_worker"])
     root = client.app.state.settings.artifact_root
