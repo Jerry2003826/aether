@@ -42,10 +42,9 @@ P1 覆盖：
 - F08 done。任务创建返回 202，状态保持 QUEUED，并经 dispatcher 进入真实 Temporal。SSE 用 Last-Event-ID 按 sequence 补齐，响应里有 pending command 和 projection_updated_at。审批决定由服务端核对 owner、哈希和版本。事件和产物不跨项目。全量：`83 passed, 2 warnings in 16.57s`，`EXIT:0`。对照表 `reports/f08_criteria.md`。
 - F09 done。本地产物经真实存储和文本工具进入脚本网关，HTTP 调用 1 次，哈希与 `aether_verifier` 的 PASS/FAIL 写入验收表。过期候选在 actor 自报 PASS 时仍为 FAIL。worker 重启后重投同一命令，`research.call` 仍是 1 条。全量：`87 passed, 2 warnings in 17.84s`，`EXIT:0`。对照表 `reports/f09_criteria.md`。
 - F10 done。HTTPS 把连接钉在解析出的地址上，证书和 SNI 仍核对原主机名。响应按流计数，超限即断开。RSS 在带资源限制的子进程里用 defusedxml 解析。Playwright 受控 profile 实际执行了页面脚本。`allow_hosts` 没有测试开关时拒绝。测试开关打开时，不在 `allow_hosts` 里的 `127.0.0.1` 仍拒绝，不会连上。`resource_heads` 的 `FOR UPDATE` 只是派发前预检。全量：`100 passed, 2 warnings in 24.21s`，`EXIT:0`。对照表 `reports/f10_criteria.md`。
-- F11 done。BM25S generation、pgvector 和实测 BGE-M3 向量做 RRF，重排用实测的 bge-reranker-v2-m3 分数。删除、撤权和跨项目在进入上下文前过滤。旧 generation 标记 stale。中文、英文、emoji 和 `!=` 可检索。全量：`114 passed, 2 warnings in 25.54s`，`EXIT:0`。对照表 `reports/f11_criteria.md`。
+- F11 改回 in_progress。PR #1 上 dde95e5 的 integration 是失败的（1 failed, 88 passed），SonarCloud 新代码可靠性是 C。本地那次 121 passed 不能当成 CI 结果。对照表 `reports/f11_criteria.md`。
 - 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
-- F12 done。记忆按来源声称、提议、推断和用户确认分开保存。冲突只打上同一组标记，不改原来的说法。确认会新增 revision。上下文按预算组装，不把全量历史拼回去。高敏文本和跨项目 CodeGraph 在未批准出口时不会进入上下文。全量：`117 passed, 2 warnings in 26.69s`，`EXIT:0`。对照表 `reports/f12_criteria.md`。
-- F13 done。Linux user/mount/pid/net namespace 实测：pid 1，连 `1.1.1.1:443` 得到 errno 101，宿主标记文件被 tmpfs 盖住。Docker 未安装，标 `not_supported`。job 只带网关 token。OpenHands SDK 能把 LLM 指到 `http://127.0.0.1:9/v1`，没有 live 模型调用，也没有创建容器。取消后的外部效果仍是 unknown。全量：`121 passed, 2 warnings in 31.43s`，`EXIT:0`。对照表 `reports/f13_criteria.md`。平台记录 `reports/f13-platform.json`。
-- 下一步：F14 候选导出和独立验收。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
+- F12、F13 改回 in_progress，等 CI 和 SonarCloud 变绿再标 done。对照表 `reports/f12_criteria.md`、`reports/f13_criteria.md`。
+- 下一步：先让 F11–F13 的 CI 和 Sonar 变绿，再做 F14。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

@@ -205,8 +205,8 @@ def group_metrics(groups: dict[str, list[str]], relevant: set[str], *, k: int = 
 
 
 def _bind(conn: Any, owner_id: str, project_id: str) -> None:
-    conn.execute(text("SELECT set_config('aether.owner_id', :owner_id, false)"), {"owner_id": owner_id})
-    conn.execute(text("SELECT set_config('aether.project_id', :project_id, false)"), {"project_id": project_id})
+    conn.execute(text("SELECT set_config('aether.owner_id', :owner_id, true)"), {"owner_id": owner_id})
+    conn.execute(text("SELECT set_config('aether.project_id', :project_id, true)"), {"project_id": project_id})
 
 
 def _visible(conn: Any, project_id: str) -> list[dict[str, Any]]:
@@ -283,6 +283,7 @@ def build_generation(
         if not locked:
             raise RetrievalError("build_busy")
         try:
+            _bind(conn, owner_id, project_id)
             if not force:
                 recent = conn.execute(
                     text(
@@ -317,6 +318,7 @@ def build_generation(
                     },
                 )
             conn.commit()
+            _bind(conn, owner_id, project_id)
             if partial.exists():
                 shutil.rmtree(partial)
             _index_bm25([row["text_content"] for row in rows], partial)

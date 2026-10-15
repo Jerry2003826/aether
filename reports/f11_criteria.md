@@ -10,6 +10,7 @@
 | 缺失文本的进程失败时不发明向量 | `tests/unit/test_retrieval.py::test_cache_miss_does_not_invent_a_vector` |
 | 授权过滤在检索、重排和上下文之前；删除与撤权立即不可见 | `tests/integration/test_hybrid_retrieval.py::test_deleted_and_revoked_chunks_are_invisible_before_context` |
 | 跨项目不能读取另一项目的 generation | `tests/integration/test_hybrid_retrieval.py::test_other_project_cannot_read_the_index` |
+| 同一连接提交项目 A 后，以项目 B 查询看不到 A | `tests/integration/test_hybrid_retrieval.py::test_project_binding_is_transaction_local` |
 | 索引先写临时目录再切换；未激活的 generation 标记为 stale | `tests/integration/test_hybrid_retrieval.py::test_generation_swap_marks_retired_search_stale` |
 | 中文、英文、emoji、代码符号可检索；未知词不抛异常 | `tests/integration/test_hybrid_retrieval.py::test_cjk_emoji_and_code_symbols_are_retrievable` |
 | 否定词和代码符号不被停用词删掉 | `tests/unit/test_retrieval.py::test_tokenizer_keeps_negation_and_code_symbols` |

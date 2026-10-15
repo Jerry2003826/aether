@@ -9,7 +9,7 @@ from sqlalchemy import text
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.ingest import store_text_version
-from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, activate_generation, build_generation, encode_texts, group_metrics, release_retired, search
+from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _bind, activate_generation, build_generation, encode_texts, group_metrics, release_retired, search
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 APPLE = "苹果派的烘烤温度是一百八十度"
@@ -207,6 +207,27 @@ def test_generation_swap_marks_retired_search_stale(client, api_db, role_urls, t
     assert retired["context"] == ""
     assert retired["bm25"] == []
     assert retired["rerank"] == []
+
+
+def test_project_binding_is_transaction_local(client, api_db, role_urls, tmp_path: Path) -> None:
+    owner_id, project_id = _owner_and_project(client, "retrieval-bind-a", "绑定甲")
+    _owner_b, other_project = _owner_and_project(client, "retrieval-bind-b", "绑定乙")
+    database = Database(role_urls["aether_worker"])
+    store = ArtifactStore(tmp_path / "artifacts", database)
+    _store(database, store, owner_id, project_id, "apple", APPLE)
+    _ready(database, store, owner_id, project_id, tmp_path / "indexes", "gen-bind")
+    with database.engine.connect() as conn:
+        _bind(conn, owner_id, project_id)
+        indexed = conn.execute(text("SELECT text_content FROM chunks")).scalars().all()
+        assert APPLE in list(indexed)
+        conn.commit()
+        conn.execute(text("SELECT set_config('aether.owner_id', :owner_id, true)"), {"owner_id": owner_id})
+        conn.execute(text("SELECT set_config('aether.project_id', :project_id, true)"), {"project_id": other_project})
+        visible = conn.execute(text("SELECT text_content FROM chunks")).scalars().all()
+        assert APPLE not in list(visible)
+        conn.commit()
+        leaked = conn.execute(text("SELECT text_content FROM chunks")).scalars().all()
+        assert APPLE not in list(leaked)
 
 
 def test_build_debounce_and_lock(client, api_db, role_urls, tmp_path: Path) -> None:
