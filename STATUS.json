@@ -8,14 +8,13 @@
     "kernel_engineering": "passed",
     "product_engineering": "passed",
     "live_ready": "passed",
-    "codegraph_enabled": "not_run",
+    "codegraph_enabled": "passed",
     "comparative_evidence": "not_run"
   },
   "not_run": [
-    "Hermes four-way comparison",
-    "CodeGraph product enablement"
+    "Hermes four-way comparison"
   ],
-  "next_action": "F26 is done from the cb22fbc acceptance file. live_ready is passed because product engineering was already passed and F26 now passes. semantic_support stays not_judged and cost_status stays unknown. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "next_action": "CodeGraph product enablement has real evidence in reports/f15_product_result.json. Hermes four-way comparison stays not_run. semantic_support stays not_judged and cost_status stays unknown.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -95,8 +94,14 @@
   "f15": {
     "status": "done",
     "release": "1.6.2",
-    "product_enabled": false,
-    "ci_run": "38681057899"
+    "product_enabled": true,
+    "ci_run": "38681057899",
+    "evidence": "reports/f15_product_result.json",
+    "evidence_commit": "2047af0dbfc1412bfd755def1e800d1caf6aae99",
+    "index_seconds": 2.004376201002742,
+    "index_db_bytes": 8892416,
+    "index_files": 162,
+    "index_state": "complete"
   },
   "f16": {
     "status": "done",

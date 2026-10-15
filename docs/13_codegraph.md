@@ -16,5 +16,5 @@ AETHER自己的接口：`explore(snapshot_ref, query, limits)`、`impact(snapsho
 
 ## 开发顺序与失败方式
 F15实现探针、适配器、失效和取消测试，再做同任务graph on/off对照，包含冷索引成本和上下文占用。不承诺vendor自测节省比例。
-增强默认off；启用须owner确认、固定release、许可/隐私/真实集成检查通过。CodeGraph不可用时fallback为项目内有界文本/文件搜索，事件明确记degraded；不得fallback为宿主机全盘搜索。
+增强默认off；启用须owner确认、固定release、许可/隐私/真实集成检查通过。2026-10-15 所有者确认启用已安装锁：`config/codegraph.example.yaml` 和功能矩阵仍保持关闭，避免新检出自动打开。`config/codegraph.lock.json` 的 `product_enabled` 为 true。遥测、断网、快照副本、可信套件不缩减这些安全默认值不变。CodeGraph不可用时fallback为项目内有界文本/文件搜索，事件明确记degraded；不得fallback为宿主机全盘搜索。
 CodeGraph只建议影响范围与测试，不能减少trusted suite或批准代码。增强未完成时产品可单独声明“CodeGraph未启用”，不能把这个任务标done。

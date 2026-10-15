@@ -19,8 +19,8 @@ LOCK = json.loads((ROOT / "config" / "codegraph.lock.json").read_text(encoding="
 RELEASE = str(LOCK["version"])
 PACKAGE = str(LOCK["package"])
 PLATFORM_PACKAGE = str(LOCK["platform_package"])
-ALLOWED_COMMANDS = frozenset({"--version", "--help", "telemetry", "init", "explore", "impact", "affected", "query", "status"})
-SKIP_DIRECTORIES = frozenset({".git", ".codegraph", "secrets", ".secrets", "credentials", "node_modules", "__pycache__"})
+ALLOWED_COMMANDS = frozenset({"--version", "--help", "telemetry", "init", "explore", "impact", "affected", "query", "status", "callers", "callees"})
+SKIP_DIRECTORIES = frozenset({".git", ".codegraph", "secrets", ".secrets", "credentials", "node_modules", "__pycache__", ".venv", ".next", ".cache"})
 SYMBOL_KINDS = frozenset({"function", "method", "class", "module", "interface", "type", "other"})
 
 
@@ -176,9 +176,18 @@ class CodeGraphAdapter:
         return bool(LOCK.get("product_enabled"))
 
     def product_query(self) -> dict[str, Any]:
-        if self.product_enabled:
-            raise CodeGraphError("owner_confirmation_required")
-        raise CodeGraphError("product_disabled")
+        """Owner switch. The example template stays off; this lock is the installed switch."""
+        if not self.product_enabled:
+            raise CodeGraphError("product_disabled")
+        return {
+            "product_enabled": True,
+            "telemetry": "off",
+            "allow_network": False,
+            "mount_docker_socket": False,
+            "model_tools": ["codegraph_explore"],
+            "trust_graph_test_recommendations": False,
+            "fallback": "authorized_source_read",
+        }
 
     def _client_env(self) -> dict[str, str]:
         return {"PATH": os.environ.get("PATH", ""), "HOME": str(self.home)}
@@ -393,6 +402,80 @@ class CodeGraphAdapter:
         payload = self._base(record, "ready")
         payload.update({"symbol_ref": symbol[:512], "possible_impacted_symbols": impacted[:100], "completeness": "partial"})
         return payload
+
+    def _symbol_arg(self, value: str) -> str:
+        if not value or value.startswith("-") or any(char in value for char in "\n\r") or len(value) > 200:
+            raise CodeGraphError("bad_id")
+        return value
+
+    def _relation(self, command: str, project_id: str, snapshot_id: str, symbol: str, *, relative_file: str | None) -> dict[str, Any]:
+        record = self._record(project_id, snapshot_id)
+        if not record["indexed"]:
+            raise CodeGraphError("not_indexed")
+        if relative_file is not None and _relative(record["path"], relative_file) is None:
+            raise CodeGraphError("bad_id")
+        args = [command, "--path", str(record["path"]), "--json", "--limit", "50"]
+        if relative_file is not None:
+            args.extend(["--file", relative_file])
+        args.append(self._symbol_arg(symbol))
+        completed = self._run(args)
+        if completed.returncode != 0:
+            raise CodeGraphError(f"{command}_failed", (completed.stderr or completed.stdout)[-300:])
+        try:
+            body = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise CodeGraphError("bad_cli_output") from exc
+        if not isinstance(body, dict):
+            raise CodeGraphError("bad_cli_output")
+        rows = []
+        for row in body.get(command) or []:
+            if not isinstance(row, dict):
+                continue
+            relative = str(row.get("filePath") or "")
+            if _relative(record["path"], relative) is None:
+                continue
+            rows.append(
+                {
+                    "name": str(row.get("name") or "")[:200],
+                    "kind": str(row.get("kind") or ""),
+                    "relative_path": relative,
+                    "start_line": int(row.get("startLine") or 0),
+                    "relationships": [str(item) for item in row.get("relationships") or []],
+                }
+            )
+        return {
+            "symbol": symbol,
+            "ambiguous": bool(body.get("ambiguous")),
+            "truncated": bool(body.get("truncated")),
+            "rows": rows,
+        }
+
+    def callers(self, project_id: str, snapshot_id: str, symbol: str, *, relative_file: str | None = None) -> dict[str, Any]:
+        return self._relation("callers", project_id, snapshot_id, symbol, relative_file=relative_file)
+
+    def callees(self, project_id: str, snapshot_id: str, symbol: str, *, relative_file: str | None = None) -> dict[str, Any]:
+        return self._relation("callees", project_id, snapshot_id, symbol, relative_file=relative_file)
+
+    def index_status(self, project_id: str, snapshot_id: str) -> dict[str, Any]:
+        record = self._record(project_id, snapshot_id)
+        completed = self._run(["status", "--json", str(record["path"])])
+        if completed.returncode != 0:
+            raise CodeGraphError("status_failed", (completed.stderr or completed.stdout)[-300:])
+        try:
+            body = json.loads(completed.stdout)
+        except json.JSONDecodeError as exc:
+            raise CodeGraphError("bad_cli_output") from exc
+        if not isinstance(body, dict):
+            raise CodeGraphError("bad_cli_output")
+        return {
+            "file_count": body.get("fileCount"),
+            "node_count": body.get("nodeCount"),
+            "edge_count": body.get("edgeCount"),
+            "db_size_bytes": body.get("dbSizeBytes"),
+            "state": (body.get("index") or {}).get("state") if isinstance(body.get("index"), dict) else None,
+            "version": body.get("version"),
+            "cold_index_seconds": record["cold_index_seconds"],
+        }
 
     def affected_tests(self, project_id: str, snapshot_id: str, filename: str) -> dict[str, Any]:
         record = self._record(project_id, snapshot_id)

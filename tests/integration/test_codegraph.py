@@ -27,11 +27,13 @@ def _source(root: Path) -> None:
 
 def test_product_gate_rejects_install_and_limits(binary: Path, tmp_path: Path) -> None:
     adapter = CodeGraphAdapter(binary, tmp_path / "home", max_files=1)
-    assert adapter.product_enabled is False
+    assert adapter.product_enabled is True
+    posture = adapter.product_query()
+    assert posture["telemetry"] == "off"
+    assert posture["allow_network"] is False
+    assert posture["mount_docker_socket"] is False
+    assert posture["trust_graph_test_recommendations"] is False
     assert RELEASE == "1.6.2"
-    with pytest.raises(CodeGraphError) as disabled:
-        adapter.product_query()
-    assert disabled.value.code == "product_disabled"
     with pytest.raises(CodeGraphError) as rejected:
         adapter._run(["install"])
     assert rejected.value.code == "command_rejected"
@@ -136,3 +138,14 @@ def test_trusted_suite_unchanged_and_affected_is_advisory(binary: Path, tmp_path
     assert "math.test.js" in affected["suggested_relative_test_paths"]
     assert trusted_hash == hashlib.sha256(trusted.read_bytes()).hexdigest()
     assert trusted.read_text(encoding="utf-8").count("def test_keep") == 1
+
+
+def test_callers_and_callees_match_the_fixture_source(binary: Path, tmp_path: Path) -> None:
+    adapter, _bound, snapshot, _trusted, _indexed_result = _indexed(binary, tmp_path)
+    source = (snapshot / "math.test.js").read_text(encoding="utf-8")
+    assert "return add(1, 2)" in source
+    callers = adapter.callers(PROJECT, "snap-1", "add", relative_file="math.js")
+    callees = adapter.callees(PROJECT, "snap-1", "testAdd", relative_file="math.test.js")
+    assert callers["ambiguous"] is False
+    assert any(row["name"] == "testAdd" and row["relative_path"] == "math.test.js" and "calls" in row["relationships"] for row in callers["rows"])
+    assert any(row["name"] == "add" and row["relative_path"] == "math.js" and "calls" in row["relationships"] for row in callees["rows"])
