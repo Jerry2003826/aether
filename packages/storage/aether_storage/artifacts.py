@@ -17,6 +17,23 @@ from sqlalchemy import text
 from aether_storage.db import Database
 
 MAX_UPLOAD_BYTES = 25 * 1024 * 1024
+
+
+async def read_bounded_upload(upload, limit: int, chunk_size: int = 65536) -> bytes:
+    """Stop reading once the upload exceeds the limit. The caller does not receive a truncated object."""
+    total = 0
+    parts: list[bytes] = []
+    while True:
+        block = await upload.read(chunk_size)
+        if not block:
+            break
+        total += len(block)
+        if total > limit:
+            raise ArtifactError("size_rejected", "产物长度超出限制")
+        parts.append(block)
+    if total == 0:
+        raise ArtifactError("size_rejected", "产物长度超出限制或为空")
+    return b"".join(parts)
 MAX_SNAPSHOT_FILES = 1000
 MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 100
@@ -54,7 +71,7 @@ class ArtifactStore:
         self.database = database
         self.root.mkdir(parents=True, exist_ok=True)
 
-    def put(self, *, owner_id: str, project_id: str, data: bytes, media_type: str, classification: str = "project_private") -> dict[str, object]:
+    def put(self, *, owner_id: str, project_id: str, data: bytes, media_type: str, classification: str = "project_private", conn=None) -> dict[str, object]:
         self._validate_bytes(data, media_type)
         digest = hashlib.sha256(data).hexdigest()
         storage_key = f"{project_id}/{digest[:2]}/{digest}"
@@ -62,9 +79,9 @@ class ArtifactStore:
         self._write_durable(final, data, digest)
         artifact_id = str(uuid.uuid4())
         self._journal(project_id, {"state": "prepared", "artifact_id": artifact_id, "storage_key": storage_key, "sha256": digest, "byte_size": len(data), "media_type": media_type, "classification": classification})
-        self._insert(owner_id, project_id, artifact_id, digest, len(data), media_type, storage_key, classification)
-        self._journal(project_id, {"state": "committed", "artifact_id": artifact_id, "sha256": digest})
-        return self._ref(artifact_id, project_id, digest, len(data), media_type, classification)
+        stored_id = self._insert(owner_id, project_id, artifact_id, digest, len(data), media_type, storage_key, classification, conn=conn)
+        self._journal(project_id, {"state": "committed", "artifact_id": stored_id, "sha256": digest})
+        return self._ref(stored_id, project_id, digest, len(data), media_type, classification)
 
     def stage_without_commit(self, *, project_id: str, data: bytes, media_type: str) -> dict[str, object]:
         """Stop after a durable write. Recovery inserts the missing ledger row."""
@@ -195,18 +212,24 @@ class ArtifactStore:
             return []
         return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
 
-    def _insert(self, owner_id: str, project_id: str, artifact_id: str, digest: str, size: int, media_type: str, storage_key: str, classification: str) -> None:
-        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-            existing = conn.execute(text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL"), {"project_id": project_id, "storage_key": storage_key}).first()
-            if existing is not None:
-                return
-            conn.execute(
-                text(
-                    "INSERT INTO artifacts (id, project_id, sha256, byte_size, media_type, storage_key, classification) "
-                    "VALUES (:id, :project_id, :sha256, :byte_size, :media_type, :storage_key, :classification)"
-                ),
-                {"id": artifact_id, "project_id": project_id, "sha256": digest, "byte_size": size, "media_type": media_type, "storage_key": storage_key, "classification": classification},
-            )
+    def _insert(self, owner_id: str, project_id: str, artifact_id: str, digest: str, size: int, media_type: str, storage_key: str, classification: str, conn=None) -> str:
+        if conn is None:
+            with self.database.transaction(owner_id=owner_id, project_id=project_id) as owned:
+                return self._insert_on(owned, project_id, artifact_id, digest, size, media_type, storage_key, classification)
+        return self._insert_on(conn, project_id, artifact_id, digest, size, media_type, storage_key, classification)
+
+    def _insert_on(self, conn, project_id: str, artifact_id: str, digest: str, size: int, media_type: str, storage_key: str, classification: str) -> str:
+        existing = conn.execute(text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL"), {"project_id": project_id, "storage_key": storage_key}).scalar()
+        if existing is not None:
+            return str(existing)
+        conn.execute(
+            text(
+                "INSERT INTO artifacts (id, project_id, sha256, byte_size, media_type, storage_key, classification) "
+                "VALUES (:id, :project_id, :sha256, :byte_size, :media_type, :storage_key, :classification)"
+            ),
+            {"id": artifact_id, "project_id": project_id, "sha256": digest, "byte_size": size, "media_type": media_type, "storage_key": storage_key, "classification": classification},
+        )
+        return artifact_id
 
     def _row(self, owner_id: str, project_id: str, artifact_id: str) -> dict | None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

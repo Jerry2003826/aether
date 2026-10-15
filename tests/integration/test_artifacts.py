@@ -1,13 +1,16 @@
+import asyncio
 import io
 import stat
 import tarfile
+import threading
 import zipfile
 from pathlib import Path
+from sqlalchemy import text
 
 import pytest
 from fastapi.testclient import TestClient
 
-from aether_storage.artifacts import MAX_UPLOAD_BYTES, ArtifactError, ArtifactStore, assert_storage_root
+from aether_storage.artifacts import MAX_UPLOAD_BYTES, ArtifactError, ArtifactStore, assert_storage_root, read_bounded_upload
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 PASSPHRASE_HEADERS = ORIGIN
@@ -128,6 +131,66 @@ def test_archive_rejects_escape_links_and_limits(client: TestClient, api_db) -> 
     extracted = store.root / "snapshots" / project_id / str(stored["artifact_id"]) / "notes" / "readme.txt"
     assert extracted.read_bytes() == b"snapshot"
     assert Path.home().resolve() not in extracted.resolve().parents
+
+
+class _Chunked:
+    def __init__(self, parts: list[bytes]) -> None:
+        self._parts = list(parts)
+
+    async def read(self, size: int) -> bytes:
+        if not self._parts:
+            return b""
+        return self._parts.pop(0)
+
+
+def test_upload_stops_when_stream_exceeds_limit() -> None:
+    upload = _Chunked([b"12345", b"67890"])
+    with pytest.raises(ArtifactError) as rejected:
+        asyncio.run(read_bounded_upload(upload, limit=8, chunk_size=5))
+    assert rejected.value.code == "size_rejected"
+    assert upload._parts == []
+
+
+def test_api_rejects_streamed_oversize_upload(client: TestClient) -> None:
+    _owner, project_id, headers = _project(client)
+    payload = b"x" * (MAX_UPLOAD_BYTES + 1)
+    response = client.post(
+        f"/v1/projects/{project_id}/artifacts",
+        headers={**headers, "Idempotency-Key": "too-big-upload"},
+        files={"file": ("big.txt", payload, "text/plain")},
+    )
+    assert response.status_code == 413
+    assert response.json()["code"] == "size_rejected"
+
+
+def test_concurrent_artifact_upload_returns_one_row(client: TestClient, api_db) -> None:
+    owner_id, project_id, headers = _project(client)
+    payload = b"same-bytes"
+    statuses: list[int] = []
+    bodies: list[dict] = []
+    barrier = threading.Barrier(2)
+
+    def upload() -> None:
+        barrier.wait()
+        response = client.post(
+            f"/v1/projects/{project_id}/artifacts",
+            headers={**headers, "Idempotency-Key": "concurrent-upload"},
+            files={"file": ("a.txt", payload, "text/plain")},
+        )
+        statuses.append(response.status_code)
+        if response.status_code == 201:
+            bodies.append(response.json())
+
+    threads = [threading.Thread(target=upload), threading.Thread(target=upload)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert statuses == [201, 201]
+    assert bodies[0]["artifact_id"] == bodies[1]["artifact_id"]
+    with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        count = conn.execute(text("SELECT count(*) FROM artifacts WHERE project_id = :project_id"), {"project_id": project_id}).scalar_one()
+    assert count == 1
 
 
 def test_storage_root_cannot_be_host_home() -> None:

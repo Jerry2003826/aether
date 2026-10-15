@@ -15,7 +15,7 @@
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "gateway 1 passed; full suite not re-run after F04",
+  "last_test_result": "60 passed",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

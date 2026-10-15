@@ -19,7 +19,7 @@ from aether_api.health import ready_payload
 from aether_api.settings import Settings
 from aether_api.throttle import LoginThrottle, client_address
 from aether_domain.security import sha256_text
-from aether_storage.artifacts import ArtifactError, ArtifactStore
+from aether_storage.artifacts import MAX_UPLOAD_BYTES, ArtifactError, ArtifactStore, read_bounded_upload
 from aether_storage.db import Database
 
 COOKIE = "aether_session"
@@ -174,29 +174,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if key is None or not 8 <= len(key) <= 128:
             raise ApiError(422, "invalid_idempotency_key", "Idempotency-Key 长度必须在 8 到 128 之间")
         _require_owned_project(app.state.database, owner["owner_id"], project_id)
-        data = await file.read()
+        try:
+            data = await read_bounded_upload(file, MAX_UPLOAD_BYTES)
+        except ArtifactError as exc:
+            raise ApiError(413, exc.code, exc.message) from exc
         media_type = (file.content_type or "").split(";")[0].strip()
         payload_hash = sha256_text(f"{media_type}:{sha256_text(data.decode('utf-8', 'surrogateescape'))}")
         route = f"POST /v1/projects/{project_id}/artifacts"
-        with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:
-            existing = conn.execute(
-                text("SELECT payload_sha256, response_status, response_body FROM idempotency_keys WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key"),
-                {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key},
-            ).mappings().first()
-        if existing is not None:
-            if existing["payload_sha256"] != payload_hash:
-                raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容")
-            return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
         try:
-            stored = _artifacts(app, resolved).put(owner_id=owner["owner_id"], project_id=project_id, data=data, media_type=media_type)
+            with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:
+                inserted = conn.execute(
+                    text(
+                        "INSERT INTO idempotency_keys (owner_id, project_id, route, idempotency_key, payload_sha256, response_status, response_body) "
+                        "VALUES (:owner, :project_id, :route, :key, :payload_hash, 0, '{}'::jsonb) "
+                        "ON CONFLICT (owner_id, project_id, route, idempotency_key) WHERE project_id IS NOT NULL DO NOTHING RETURNING id"
+                    ),
+                    {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key, "payload_hash": payload_hash},
+                ).first()
+                if inserted is None:
+                    existing = conn.execute(
+                        text("SELECT payload_sha256, response_status, response_body FROM idempotency_keys WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key"),
+                        {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key},
+                    ).mappings().one()
+                    if existing["payload_sha256"] != payload_hash or existing["response_status"] != 201:
+                        raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容或尚未完成")
+                    return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
+                stored = _artifacts(app, resolved).put(owner_id=owner["owner_id"], project_id=project_id, data=data, media_type=media_type, conn=conn)
+                conn.execute(
+                    text("UPDATE idempotency_keys SET response_status = 201, response_body = CAST(:body AS jsonb) WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key"),
+                    {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key, "body": json.dumps(stored)},
+                )
         except ArtifactError as exc:
             status = 413 if exc.code == "size_rejected" else 422
             raise ApiError(status, exc.code, exc.message) from exc
-        with app.state.database.transaction(owner_id=owner["owner_id"], project_id=project_id) as conn:
-            conn.execute(
-                text("INSERT INTO idempotency_keys (owner_id, project_id, route, idempotency_key, payload_sha256, response_status, response_body) VALUES (:owner, :project_id, :route, :key, :payload_hash, 201, CAST(:body AS jsonb))"),
-                {"owner": owner["owner_id"], "project_id": project_id, "route": route, "key": key, "payload_hash": payload_hash, "body": json.dumps(stored)},
-            )
         return JSONResponse(status_code=201, content=stored)
 
     @app.get("/v1/projects/{project_id}/artifacts/{artifact_id}")

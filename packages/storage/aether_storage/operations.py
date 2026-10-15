@@ -11,6 +11,10 @@ from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 
+def _outcome_unknown(exc: BaseException) -> bool:
+    return isinstance(exc, (TimeoutError, ConnectionError, BrokenPipeError, ConnectionAbortedError, ConnectionResetError))
+
+
 class OperationError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -68,6 +72,13 @@ class OperationLedger:
             ).mappings().first()
             if approval is None or approval["decision"] != "approved" or approval["intent_digest"] != digest or approval["expires_at"] <= datetime.now(UTC):
                 raise OperationError("approval_rejected")
+            if approval["consumed_by_operation_id"] is None:
+                current_version = conn.execute(
+                    text("SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id"),
+                    {"project_id": project_id, "resource_id": intent["resource_id"]},
+                ).scalar()
+                if current_version != intent["resource_version"]:
+                    raise OperationError("stale_resource")
             if approval["consumed_by_operation_id"] is not None:
                 existing = conn.execute(
                     text("SELECT id::text, state, result FROM operations WHERE id = :id"),
@@ -109,7 +120,9 @@ class OperationLedger:
                 raise OperationError("approval_consumed")
         try:
             remote = sender(intent)
-        except TimeoutError:
+        except Exception as exc:
+            if not _outcome_unknown(exc):
+                raise
             self._set_state(owner_id, project_id, operation_id, "UNKNOWN", None)
             if idempotency == "non_idempotent":
                 self._mark_task(owner_id, project_id, task_id, "NEEDS_REVIEW")
@@ -120,16 +133,29 @@ class OperationLedger:
     def reconcile(self, *, owner_id: str, project_id: str, operation_id: str, reader) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             operation = conn.execute(
-                text("SELECT state, normalized_arguments, idempotency_class FROM operations WHERE id = :id FOR UPDATE"),
+                text("SELECT state, normalized_arguments, idempotency_class, resource_version FROM operations WHERE id = :id FOR UPDATE"),
                 {"id": operation_id},
             ).mappings().one()
         if operation["state"] == "CONFIRMED":
-            return {"state": "CONFIRMED", "repeated": False}
+            return {"state": "CONFIRMED", "repeated": False, "mismatch": False}
         remote = reader(operation["normalized_arguments"])
         if remote is None:
-            return {"state": operation["state"], "repeated": False}
+            return {"state": operation["state"], "repeated": False, "mismatch": False}
+        remote_version = remote.get("resource_version")
+        if remote_version is not None and remote_version != operation["resource_version"]:
+            return {"state": operation["state"], "repeated": False, "mismatch": True}
         self._set_state(owner_id, project_id, operation_id, "CONFIRMED", remote)
-        return {"state": "CONFIRMED", "repeated": False}
+        return {"state": "CONFIRMED", "repeated": False, "mismatch": False}
+
+    def note_resource_version(self, *, owner_id: str, project_id: str, resource_id: str, version: str) -> None:
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO resource_heads (project_id, resource_id, version) VALUES (:project_id, :resource_id, :version) "
+                    "ON CONFLICT (project_id, resource_id) DO UPDATE SET version = EXCLUDED.version"
+                ),
+                {"project_id": project_id, "resource_id": resource_id, "version": version},
+            )
 
     def request_cancel(self, *, owner_id: str, project_id: str, task_id: str) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

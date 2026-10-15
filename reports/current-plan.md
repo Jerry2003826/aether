@@ -10,4 +10,4 @@
 
 进度：未开始。
 
-阻塞：无。Temporal dev server 已在本机 127.0.0.1:7233。
+阻塞：无。本机 Temporal dev server 地址是 `127.0.0.1:7233`。

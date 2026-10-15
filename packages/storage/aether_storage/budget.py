@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 
@@ -35,25 +38,34 @@ class BudgetLedger:
                 },
             )
 
-    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False) -> bool:
+    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None) -> bool:
         if amount < 0 or tokens < 0:
             raise BudgetError("invalid_amount")
-        digest = "a" * 64
+        digest = sha256_text(json.dumps({
+            "project_id": project_id,
+            "task_id": task_id,
+            "request_key": request_key,
+            "amount": amount,
+            "role": role,
+            "tokens": tokens,
+            "verification": verification,
+            "request": request or {},
+        }, sort_keys=True, separators=(",", ":")))
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             account = conn.execute(
                 text(
-                    "SELECT id, limit_micro_usd, spent_micro_usd, held_micro_usd, token_limit, tokens_used, "
+                    "SELECT id, limit_micro_usd, spent_micro_usd, held_micro_usd, token_limit, tokens_used, tokens_held, "
                     "max_requests, requests_admitted, verification_reserve_fraction "
                     "FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"
                 ),
                 {"project_id": project_id, "task_id": task_id},
             ).mappings().one()
             existing = conn.execute(
-                text("SELECT reserved_micro_usd, usage_status FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"),
+                text("SELECT reserved_micro_usd, request_sha256, usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"),
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
             ).mappings().first()
             if existing is not None:
-                if existing["reserved_micro_usd"] != amount:
+                if existing["reserved_micro_usd"] != amount or existing["request_sha256"] != digest:
                     raise BudgetError("idempotency_mismatch")
                 return True
             fraction = float(account["verification_reserve_fraction"])
@@ -61,24 +73,32 @@ class BudgetLedger:
             token_ceiling = account["token_limit"] if verification else int(account["token_limit"] * (1 - fraction))
             if account["spent_micro_usd"] + account["held_micro_usd"] + amount > ceiling:
                 return False
-            if account["tokens_used"] + tokens > token_ceiling or account["requests_admitted"] + 1 > account["max_requests"]:
+            if account["tokens_used"] + account["tokens_held"] + tokens > token_ceiling or account["requests_admitted"] + 1 > account["max_requests"]:
                 return False
             try:
                 conn.execute(
                     text(
-                        "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status) "
-                        "VALUES (:project_id, :task_id, :request_key, :digest, :role, :role, :amount, 'reserved')"
+                        "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
+                        "VALUES (:project_id, :task_id, :request_key, :digest, :role, :role, :amount, 'reserved', CAST(:detail AS jsonb))"
                     ),
-                    {"project_id": project_id, "task_id": task_id, "request_key": request_key, "digest": digest, "role": role, "amount": amount},
+                    {
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "request_key": request_key,
+                        "digest": digest,
+                        "role": role,
+                        "amount": amount,
+                        "detail": json.dumps({"reserved_tokens": tokens}),
+                    },
                 )
             except IntegrityError as exc:
                 raise BudgetError("idempotency_mismatch") from exc
             conn.execute(
                 text(
-                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, requests_admitted = requests_admitted + 1, version = version + 1 "
-                    "WHERE id = :id"
+                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, "
+                    "requests_admitted = requests_admitted + 1, version = version + 1 WHERE id = :id"
                 ),
-                {"amount": amount, "id": account["id"]},
+                {"amount": amount, "tokens": tokens, "id": account["id"]},
             )
         return True
 
@@ -91,7 +111,7 @@ class BudgetLedger:
                 {"project_id": project_id, "task_id": task_id},
             ).mappings().one()
             request = conn.execute(
-                text("SELECT reserved_micro_usd, usage_status, actual_micro_usd FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"),
+                text("SELECT reserved_micro_usd, usage_status, actual_micro_usd, usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"),
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
             ).mappings().one()
             if request["usage_status"] == "known":
@@ -100,6 +120,12 @@ class BudgetLedger:
                 return
             if request["usage_status"] == "unknown":
                 raise BudgetError("unknown_not_zero")
+            if actual > request["reserved_micro_usd"]:
+                raise BudgetError("actual_exceeds_reservation")
+            detail = request["usage_detail"] or {}
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            reserved_tokens = int(detail.get("reserved_tokens") or 0)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = :actual, input_tokens = :input_tokens, output_tokens = :output_tokens, completed_at = now() "
@@ -110,9 +136,15 @@ class BudgetLedger:
             conn.execute(
                 text(
                     "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :reserved, spent_micro_usd = spent_micro_usd + :actual, "
-                    "tokens_used = tokens_used + :tokens, version = version + 1 WHERE id = :id"
+                    "tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, version = version + 1 WHERE id = :id"
                 ),
-                {"reserved": request["reserved_micro_usd"], "actual": actual, "tokens": input_tokens + output_tokens, "id": account["id"]},
+                {
+                    "reserved": request["reserved_micro_usd"],
+                    "actual": actual,
+                    "reserved_tokens": reserved_tokens,
+                    "tokens": input_tokens + output_tokens,
+                    "id": account["id"],
+                },
             )
 
     def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
@@ -134,7 +166,7 @@ class BudgetLedger:
     def snapshot(self, *, owner_id: str, project_id: str, task_id: str) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             account = conn.execute(
-                text("SELECT limit_micro_usd, spent_micro_usd, held_micro_usd, tokens_used, requests_admitted FROM budget_accounts WHERE task_id = :task_id"),
+                text("SELECT limit_micro_usd, spent_micro_usd, held_micro_usd, tokens_used, tokens_held, requests_admitted FROM budget_accounts WHERE task_id = :task_id"),
                 {"task_id": task_id},
             ).mappings().one()
             unknown = conn.execute(
@@ -147,5 +179,6 @@ class BudgetLedger:
             "held_micro_usd": account["held_micro_usd"],
             "unknown_request_count": unknown,
             "tokens_used": account["tokens_used"],
+            "tokens_held": account["tokens_held"],
             "request_count": account["requests_admitted"],
         }

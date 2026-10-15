@@ -54,6 +54,7 @@ def ensure_database(admin_url: str, database: str = "aether") -> dict[str, str]:
             _execute_script(conn, SQL_DIR / "0002_privileges.sql")
         grants = (SQL_DIR / "0003_grants.sql").read_text(encoding="utf-8")
         conn.execute(grants)
+        _execute_script(conn, SQL_DIR / "0005_runtime_patches.sql")
         host = admin.get("host") or "127.0.0.1"
         port = admin.get("port") or 5432
         for role, password in passwords.items():
