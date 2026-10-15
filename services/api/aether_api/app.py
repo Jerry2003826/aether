@@ -94,7 +94,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def list_projects(request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         if limit < 1 or limit > 100:
             raise ApiError(422, "invalid_limit", "limit 必须在 1 到 100 之间")
-        owner = _service(app).current(_cookie(request))
+        owner = _service(app).authenticate(_cookie(request))
         created_at, last_id = _decode_cursor(cursor)
         with app.state.database.transaction(owner_id=owner["owner_id"]) as conn:
             rows = conn.execute(

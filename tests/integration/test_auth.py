@@ -46,6 +46,20 @@ def test_bootstrap_rejects_non_loopback(role_urls, clean_db, tmp_path) -> None:
     assert response.json()["code"] == "bootstrap_not_loopback"
 
 
+def test_project_list_does_not_rotate_csrf(client: TestClient) -> None:
+    created = _bootstrap(client)
+    original = created["csrf_token"]
+    listed = client.get("/v1/projects")
+    assert listed.status_code == 200
+    assert listed.json()["items"] == []
+    created_project = client.post(
+        "/v1/projects",
+        headers={**ORIGIN, "Idempotency-Key": "csrf-stable-key", "X-CSRF-Token": original},
+        json={"name": "甲"},
+    )
+    assert created_project.status_code == 201, created_project.text
+
+
 def test_session_csrf_origin_and_revoke(client: TestClient) -> None:
     created = _bootstrap(client)
     again = client.post(

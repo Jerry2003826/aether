@@ -82,7 +82,15 @@ class AuthService:
             session = self._insert_session(conn, owner["id"])
         return self._public_session(owner["id"], owner["display_name"], session)
 
+    def authenticate(self, token: str) -> dict[str, str]:
+        """Validate a session for a read-only route. Does not rotate the CSRF token."""
+        with self.database.transaction() as conn:
+            row = self._locked_session(conn, token)
+            conn.execute(text("UPDATE auth_sessions SET last_seen_at = now() WHERE id = :id"), {"id": row["id"]})
+            return {"owner_id": row["owner_id"], "display_name": row["display_name"]}
+
     def current(self, token: str) -> dict[str, Any]:
+        """Return the session and rotate CSRF. Only GET /v1/auth/session should call this."""
         with self.database.transaction() as conn:
             row = self._locked_session(conn, token)
             csrf = secrets.token_urlsafe(32)
