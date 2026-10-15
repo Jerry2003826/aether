@@ -549,7 +549,10 @@ tickets:
   - scripts/install_hermes.py
   - config/hermes.lock.json
   - tests/unit/test_hermes_baseline.py
+  - tests/unit/test_hermes_compare.py
   - tests/integration/test_hermes_probe.py
+  - services/worker/aether_worker/hermes_compare.py
+  - scripts/run_hermes_compare.py
   - reports/f24_criteria.md
 - id: F25
   stage: G6

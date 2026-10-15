@@ -14,7 +14,7 @@
   "not_run": [
     "Hermes four-way comparison"
   ],
-  "next_action": "CodeGraph product enablement has real evidence in reports/f15_product_result.json. Hermes four-way comparison stays not_run. semantic_support stays not_judged and cost_status stays unknown.",
+  "next_action": "comparative_evidence stays not_run. On the supervisor machine install pinned Hermes with scripts/install_hermes.py, then uv run --locked --no-build python scripts/run_hermes_compare.py --out reports/hermes_compare_result.json. Env: AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1, AETHER_LIVE_MODEL_ALIAS=deepseek-chat, AETHER_LIVE_MODEL_KEY. Cap is 8 calls, 8000 tokens, 128 output tokens. Do not mark a winner until that file is reviewed. semantic_support stays not_judged.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -143,6 +143,8 @@
     "status": "done",
     "ci_run": "38698706734",
     "live": "not_run",
+    "compare_script": "scripts/run_hermes_compare.py",
+    "compare_status": "not_run",
     "cli": "hermes-agent v0.22.1 commit 297552a9d646119871391d202509822cd86330df"
   },
   "f25": {

@@ -1,11 +1,5 @@
-# CodeGraph 所有者开关
+# Hermes 四组对照还没跑
 
-示例配置和功能矩阵保持关闭。已安装锁打开，安全默认不变：遥测关闭、容器断网、只索引 git 快照、失败时在快照内降级。
+入口是 `scripts/run_hermes_compare.py`。监督者机器先执行 `scripts/install_hermes.py`，再设置 DeepSeek 的 `AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS` 和 `AETHER_LIVE_MODEL_KEY`。
 
-真实证据命令：
-
-```sh
-uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json
-```
-
-`reports/f15_product_result.json` 是 commit `2047af0` 上的真实结果，五项检查都通过。`readiness.codegraph_enabled` 改为 passed。Hermes 四组对照仍是 not_run。
+上限 8 次调用、8000 token、单次输出 128。开发集和 holdout 分开。`comparative_evidence` 保持 not_run，`superior` 保持 null。
