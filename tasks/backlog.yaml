@@ -386,8 +386,12 @@ tickets:
   - stdio argv无shell拼接；用户内容不能安装新server
   - schema漂移隔离，annotations不能自授权限
   - 真正连接fixture MCP，超时/重连/未知结果与secret隔离通过
-  status: in_progress
-  evidence: []
+  status: done
+  evidence:
+  - services/gateway/aether_gateway/mcp_client.py
+  - tests/fixtures/mcp_fixture.py
+  - tests/unit/test_mcp.py
+  - reports/f17_criteria.md
 - id: F18
   stage: G5
   scope: core
