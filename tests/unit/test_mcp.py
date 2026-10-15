@@ -1,4 +1,6 @@
 import json
+import sys
+import time
 
 import pytest
 
@@ -52,3 +54,30 @@ def test_fixture_timeout_is_unknown() -> None:
     with McpClient(fixture_argv("sleep"), timeout=5) as client:
         result = client.call_tool("echo", {"text": "慢"}, timeout=0.4)
     assert result == {"outcome": "unknown", "result": None}
+
+
+def test_crashed_server_returns_unknown_and_later_calls_do_not_hang() -> None:
+    with McpClient(fixture_argv("crash"), timeout=5) as client:
+        started = time.perf_counter()
+        first = client.call_tool("echo", {"text": "掉线"}, timeout=3)
+        assert first == {"outcome": "unknown", "result": None}
+        assert time.perf_counter() - started < 2
+        started = time.perf_counter()
+        second = client.call_tool("echo", {"text": "再来"}, timeout=3)
+        assert second == {"outcome": "unknown", "result": None}
+        assert time.perf_counter() - started < 0.5
+
+
+def test_missing_or_exiting_server_raises_connect_failed() -> None:
+    started = time.perf_counter()
+    with pytest.raises(McpError) as missing:
+        with McpClient([sys.executable, "tests/fixtures/missing_mcp_server.py"], timeout=5):
+            pass
+    assert missing.value.code == "connect_failed"
+    assert time.perf_counter() - started < 3
+    started = time.perf_counter()
+    with pytest.raises(McpError) as exited:
+        with McpClient(fixture_argv("exit"), timeout=5):
+            pass
+    assert exited.value.code == "connect_failed"
+    assert time.perf_counter() - started < 3

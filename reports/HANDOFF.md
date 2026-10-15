@@ -52,6 +52,6 @@ P1 覆盖：
 - F14 done。PR #1 CI run `38683576919`：unit `32 passed`，integration `112 passed, 2 warnings in 70.42s`。SonarCloud quality gate OK。评分器用 `python -I`，先导入 pytest，再把 `/work/src` 加到 `sys.path` 末尾。顶层 `pytest.py` 和 `sitecustomize.py` 直接失败。隔离结果只认评分器写出的第一行。
 - F16 done。同一 CI run。搜索缓存同时绑定 visibility epoch 和索引代，删除后不再返回已删内容。
 - CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。
-- F17 done。PR #1 CI run `38684264336`：unit `32 passed in 6.36s`，integration `112 passed, 1 warning in 71.65s`。SonarCloud quality gate OK。stdio 使用官方 `mcp` 2.3.0，夹具服务器也是这个 SDK。对照表 `reports/f17_criteria.md`。
+- F17 先标回 in_progress。进程中途崩溃或服务器起不来时，调用返回 unknown 或 `connect_failed`，不再把调用方挂住。等这次 CI 和 SonarCloud 再标 done。对照表 `reports/f17_criteria.md`。
 - F18 in_progress。未批准的 watch 保持 DRAFT，不会创建 Temporal schedule。水位不变不写通知。重复 trigger 只有一条站内通知，且 `external_sent` 为 false。停止之后不再派发。对照表 `reports/f18_criteria.md`。还没标 done。
 - live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

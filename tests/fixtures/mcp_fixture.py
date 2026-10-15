@@ -17,6 +17,8 @@ _mode = sys.argv[1] if len(sys.argv) > 1 else "echo"
 def echo(text: str) -> str:
     if _mode == "sleep":
         time.sleep(30)
+    if _mode == "crash":
+        os._exit(1)
     return text
 
 
@@ -31,4 +33,6 @@ def provider_key_present() -> str:
 
 
 if __name__ == "__main__":
+    if _mode == "exit":
+        raise SystemExit(0)
     server.run(transport="stdio")

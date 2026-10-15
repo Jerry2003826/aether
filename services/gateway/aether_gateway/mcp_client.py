@@ -52,6 +52,9 @@ def admit(tool_name: str, tools: list[dict[str, Any]], *, allowed: set[str], app
         raise McpError("tool_denied")
 
 
+_UNKNOWN = {"outcome": "unknown", "result": None}
+
+
 class McpClient:
     def __init__(self, argv: list[str], *, timeout: float = 5.0) -> None:
         self.argv = _validate_argv(argv)
@@ -60,6 +63,7 @@ class McpClient:
         self._thread = threading.Thread(target=self._loop.run_forever, daemon=True)
         self._queue: asyncio.Queue[tuple[str, dict[str, Any], Future[dict[str, Any]]] | None] | None = None
         self._worker: Future[None] | None = None
+        self._dead = False
 
     def __enter__(self) -> McpClient:
         self._thread.start()
@@ -67,24 +71,42 @@ class McpClient:
 
         async def serve() -> None:
             self._queue = asyncio.Queue()
-            parameters = StdioServerParameters(command=self.argv[0], args=self.argv[1:])
-            async with stdio_client(parameters) as (read, write):
-                async with ClientSession(read, write, read_timeout_seconds=self.timeout) as session:
-                    await session.initialize()
-                    ready.set_result(None)
-                    await self._serve(session)
+            try:
+                parameters = StdioServerParameters(command=self.argv[0], args=self.argv[1:])
+                async with stdio_client(parameters) as (read, write):
+                    async with ClientSession(read, write, read_timeout_seconds=self.timeout) as session:
+                        await session.initialize()
+                        if not ready.done():
+                            ready.set_result(None)
+                        await self._serve(session)
+            except BaseException as exc:
+                self._mark_dead()
+                if not ready.done():
+                    ready.set_exception(McpError("connect_failed"))
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+            finally:
+                self._mark_dead()
 
         self._worker = asyncio.run_coroutine_threadsafe(serve(), self._loop)
-        ready.result(timeout=self.timeout + 5)
+        try:
+            ready.result(timeout=self.timeout)
+        except McpError:
+            self._finish(quiet=True)
+            raise
+        except Exception as exc:
+            self._finish(quiet=True)
+            raise McpError("connect_failed") from exc
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        self._dead = True
         if self._queue is not None:
-            asyncio.run_coroutine_threadsafe(self._queue.put(None), self._loop).result(timeout=5)
-        if self._worker is not None:
-            self._worker.result(timeout=8)
-        self._loop.call_soon_threadsafe(self._loop.stop)
-        self._thread.join(timeout=5)
+            try:
+                asyncio.run_coroutine_threadsafe(self._queue.put(None), self._loop).result(timeout=2)
+            except Exception:
+                pass
+        self._finish(quiet=True)
 
     def request(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self._submit("request", {"method": method, "params": params or {}})
@@ -102,16 +124,54 @@ class McpClient:
         return response
 
     def _submit(self, kind: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if self._dead:
+            return dict(_UNKNOWN)
         done: Future[dict[str, Any]] = Future()
+        wait = float(payload.get("timeout") or self.timeout)
 
         async def enqueue() -> None:
-            if self._queue is None:
-                done.set_result({"outcome": "unknown", "result": None})
+            if self._dead or self._queue is None:
+                if not done.done():
+                    done.set_result(dict(_UNKNOWN))
                 return
             await self._queue.put((kind, payload, done))
 
-        asyncio.run_coroutine_threadsafe(enqueue(), self._loop).result(timeout=5)
-        return done.result(timeout=self.timeout + 5)
+        try:
+            asyncio.run_coroutine_threadsafe(enqueue(), self._loop).result(timeout=2)
+        except Exception:
+            self._mark_dead()
+            return dict(_UNKNOWN)
+        try:
+            return done.result(timeout=wait + 1)
+        except TimeoutError:
+            self._mark_dead()
+            return dict(_UNKNOWN)
+
+    def _mark_dead(self) -> None:
+        self._dead = True
+        queue = self._queue
+        if queue is None:
+            return
+        while True:
+            try:
+                item = queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            if item is None:
+                continue
+            pending = item[2]
+            if not pending.done():
+                pending.set_result(dict(_UNKNOWN))
+
+    def _finish(self, *, quiet: bool) -> None:
+        del quiet
+        if self._worker is not None:
+            try:
+                self._worker.result(timeout=8)
+            except Exception:
+                pass
+        self._loop.call_soon_threadsafe(self._loop.stop)
+        self._thread.join(timeout=3)
 
     async def _serve(self, session: ClientSession) -> None:
         assert self._queue is not None
@@ -125,8 +185,14 @@ class McpClient:
                     result = await self._request(session, str(payload["method"]), dict(payload["params"]))
                 else:
                     result = await self._call_tool(session, str(payload["name"]), dict(payload["arguments"]), float(payload["timeout"]))
-            except MCPError:
-                result = {"outcome": "unknown", "result": None}
+            except BaseException as exc:
+                self._dead = True
+                if not done.done():
+                    done.set_result(dict(_UNKNOWN))
+                self._mark_dead()
+                if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                    raise
+                return
             if not done.done():
                 done.set_result(result)
 

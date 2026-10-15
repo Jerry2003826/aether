@@ -9,3 +9,5 @@
 | 真正连上 fixture MCP，回显并脱敏密钥，密钥不进入 server 环境 | `tests/unit/test_mcp.py::test_fixture_echo_schema_and_secret_redaction` |
 | 重连使用新进程 | `tests/unit/test_mcp.py::test_reconnect_uses_a_new_process` |
 | 超时记为 unknown | `tests/unit/test_mcp.py::test_fixture_timeout_is_unknown` |
+| 服务进程中途退出时，这次和之后的调用都立刻是 unknown | `tests/unit/test_mcp.py::test_crashed_server_returns_unknown_and_later_calls_do_not_hang` |
+| 服务器不存在或立刻退出时，连接失败是 `connect_failed` | `tests/unit/test_mcp.py::test_missing_or_exiting_server_raises_connect_failed` |
