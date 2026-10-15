@@ -1,0 +1,12 @@
+{
+  "status": "probed",
+  "docker": "not_supported",
+  "network_errno": 101,
+  "pid": 1,
+  "host_marker_hidden": true,
+  "provider_key_present": false,
+  "measured_at": "2026-10-15T02:58:31.768304+00:00",
+  "openhands_llm_base_url": "http://127.0.0.1:9/v1",
+  "openhands_live_model": "not_run",
+  "container": "not_created"
+}

@@ -302,8 +302,13 @@ tickets:
   - 实际job调用经受限gateway；不暴露provider/admin密钥
   - start幂等且重启attach既有job；不能重复建容器
   - 真实Linux网络/挂载/进程限制探针；平台未测不标支持
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/runner.py
+  - services/worker/aether_worker/namespace_probe.py
+  - reports/f13-platform.json
+  - reports/f13_criteria.md
+  - tests/integration/test_runner.py
 - id: F14
   stage: G4
   scope: core

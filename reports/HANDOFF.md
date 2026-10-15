@@ -45,6 +45,7 @@ P1 覆盖：
 - F11 done。BM25S generation、pgvector 和实测 BGE-M3 向量做 RRF，重排用实测的 bge-reranker-v2-m3 分数。删除、撤权和跨项目在进入上下文前过滤。旧 generation 标记 stale。中文、英文、emoji 和 `!=` 可检索。全量：`114 passed, 2 warnings in 25.54s`，`EXIT:0`。对照表 `reports/f11_criteria.md`。
 - 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
 - F12 done。记忆按来源声称、提议、推断和用户确认分开保存。冲突只打上同一组标记，不改原来的说法。确认会新增 revision。上下文按预算组装，不把全量历史拼回去。高敏文本和跨项目 CodeGraph 在未批准出口时不会进入上下文。全量：`117 passed, 2 warnings in 26.69s`，`EXIT:0`。对照表 `reports/f12_criteria.md`。
-- 下一步：F13 受限 Linux runner 和 OpenHands。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
+- F13 done。Linux user/mount/pid/net namespace 实测：pid 1，连 `1.1.1.1:443` 得到 errno 101，宿主标记文件被 tmpfs 盖住。Docker 未安装，标 `not_supported`。job 只带网关 token。OpenHands SDK 能把 LLM 指到 `http://127.0.0.1:9/v1`，没有 live 模型调用，也没有创建容器。取消后的外部效果仍是 unknown。全量：`121 passed, 2 warnings in 31.43s`，`EXIT:0`。对照表 `reports/f13_criteria.md`。平台记录 `reports/f13-platform.json`。
+- 下一步：F14 候选导出和独立验收。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。
