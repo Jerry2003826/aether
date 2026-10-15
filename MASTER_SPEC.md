@@ -429,6 +429,8 @@ RRF top30交 `BAAI/bge-reranker-v2-m3`，返回top8；每份文档最多2段，�
 
 把网页、RSS、PDF、代码仓库、MCP响应、第三方skill和LLM输出全部视为不可信。攻击可能诱导泄露API key、读取其他项目、修改验收/日志、扩大权限、反复花钱、运行恶意依赖或伪造完成报告。提示词过滤只能辅助，不是边界；隔离容器也不是无条件安全承诺。
 
+评分器在子进程里跑绑定套件。pytest 返回后立刻把通过数和退出码写进父进程事先打开的管道，然后 `os._exit`，所以候选注册的 `atexit` 来不及再打印假的 `N passed` 或改退出码。父进程只认这根管道，不认子进程标准输出。同进程里仍有剩余风险：导入候选模块时就可以 `os._exit`，也可以在管道写入之前扫到那个文件描述符并抢先写入；候选如果在被 import 时挂上 pytest 钩子，仍可能影响当次收集。这些情况一律不能当成通过。
+
 可信域：owner身份系统、policy/tool registry、gateway、runner-manager、verifier控制进程、release evaluator。应用开发者能修改这些代码，因此自我进化只允许改skill/受限workflow DSL，不允许Agent自动替换可信控制代码。
 
 ## 2. 网络和凭证分区

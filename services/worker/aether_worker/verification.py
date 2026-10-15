@@ -18,14 +18,6 @@ from aether_worker.runner import JOB_IMAGE, _docker
 GRADER_IMAGE = "aether-grader:local"
 _SKIP_NAMES = {"conftest.py", "pytest.ini", "conftest.pyc"}
 _SHADOW_ROOTS = frozenset({"pytest.py", "pytest", "_pytest", "pluggy.py", "pluggy", "sitecustomize.py", "usercustomize.py"})
-_PYTEST_CHILD = (
-    "import sys\n"
-    "import pytest\n"
-    "sys.path.append('/work/src')\n"
-    "raise SystemExit(pytest.main(["
-    "'-q', '--tb=no', '--noconftest', '-p', 'no:cacheprovider', "
-    "'--rootdir', '/work/suite', '/work/suite']))\n"
-)
 
 
 class VerificationError(Exception):
@@ -220,36 +212,61 @@ def grade(
     return _result("PASS", "绑定套件通过且哈希一致", suite_sha256, contract_sha256, observed_candidate)
 
 
-_GRADER_PROGRAM = "".join((
-    "import json, os, re, subprocess, sys\n"
-    "from pathlib import Path\n"
-    "sentinel = Path(os.environ.get('AETHER_HOST_SENTINEL', '/aether-host-sentinel'))\n"
-    "keys = ('AETHER_PROVIDER_KEY', 'AETHER_ADMIN_DATABASE_URL')\n"
-    "isolation = {'sentinel_visible': sentinel.exists(), 'credential_present': any(key in os.environ for key in keys)}\n"
-    "sys.stdout.write('ISOLATION ' + json.dumps(isolation) + '\\n')\n"
-    "sys.stdout.flush()\n"
-    f"child = { _PYTEST_CHILD!r }\n"
-    "completed = subprocess.run(\n"
-    "    [sys.executable, '-I', '-c', child],\n"
-    "    cwd='/work/suite',\n"
-    "    env={\n"
-    "        'PATH': os.environ.get('PATH', '/usr/local/bin:/usr/bin:/bin'),\n"
-    "        'HOME': '/run/aether',\n"
-    "        'TMPDIR': '/run/aether',\n"
-    "        'LANG': 'C.UTF-8',\n"
-    "        'PYTHONDONTWRITEBYTECODE': '1',\n"
-    "        'PYTEST_DISABLE_PLUGIN_AUTOLOAD': '1',\n"
-    "    },\n"
-    "    capture_output=True,\n"
-    "    text=True,\n"
-    ")\n"
-    "summary = [line.strip() for line in completed.stdout.splitlines() if line.strip()]\n"
-    "last = summary[-1] if summary else ''\n"
-    "matched = re.fullmatch(r'\\d+ passed(?:, \\d+ warnings?)? in \\d+(?:\\.\\d+)?s', last)\n"
-    "ok = completed.returncode == 0 and matched is not None and not last.startswith('0 passed')\n"
-    "sys.stdout.write('GRADE_OK:' + ('1' if ok else '0') + '\\n')\n"
-    "sys.stdout.write('GRADE_EXIT:' + str(completed.returncode) + '\\n')\n"
-))
+_GRADER_PROGRAM = """
+import json, os, subprocess, sys
+from pathlib import Path
+sentinel = Path(os.environ.get("AETHER_HOST_SENTINEL", "/aether-host-sentinel"))
+keys = ("AETHER_PROVIDER_KEY", "AETHER_ADMIN_DATABASE_URL")
+isolation = {"sentinel_visible": sentinel.exists(), "credential_present": any(key in os.environ for key in keys)}
+sys.stdout.write("ISOLATION " + json.dumps(isolation) + "\\n")
+sys.stdout.flush()
+read_fd, write_fd = os.pipe()
+os.set_inheritable(write_fd, True)
+child = (
+    "import json, os, sys\\n"
+    "import pytest\\n"
+    "sys.path.append('/work/src')\\n"
+    f"fd = {write_fd}\\n"
+    "class Report:\\n"
+    "    passed_count = 0\\n"
+    "    exit_code = 1\\n"
+    "    def pytest_sessionfinish(self, session, exitstatus):\\n"
+    "        reporter = session.config.pluginmanager.get_plugin('terminalreporter')\\n"
+    "        stats = getattr(reporter, 'stats', {}) if reporter else {}\\n"
+    "        Report.passed_count = len(stats.get('passed', []))\\n"
+    "        Report.exit_code = int(exitstatus)\\n"
+    "code = int(pytest.main(['-q', '--tb=no', '--noconftest', '-p', 'no:cacheprovider', '--rootdir', '/work/suite', '/work/suite'], plugins=[Report()]))\\n"
+    "os.write(fd, json.dumps({'exit_code': Report.exit_code, 'passed_count': Report.passed_count}).encode())\\n"
+    "os.close(fd)\\n"
+    "os._exit(code if code >= 0 else 1)\\n"
+)
+completed = subprocess.run(
+    [sys.executable, "-I", "-c", child],
+    cwd="/work/suite",
+    pass_fds=(write_fd,),
+    env={
+        "PATH": os.environ.get("PATH", "/usr/local/bin:/usr/bin:/bin"),
+        "HOME": "/run/aether",
+        "TMPDIR": "/run/aether",
+        "LANG": "C.UTF-8",
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
+    },
+    capture_output=True,
+    text=True,
+)
+os.close(write_fd)
+raw = os.read(read_fd, 65536)
+os.close(read_fd)
+try:
+    report = json.loads(raw.decode().strip().splitlines()[-1])
+except (ValueError, IndexError):
+    report = {"exit_code": 1, "passed_count": 0}
+ok = int(report.get("exit_code", 1)) == 0 and int(report.get("passed_count", 0)) >= 1
+sys.stdout.write("GRADE_OK:" + ("1" if ok else "0") + "\\n")
+sys.stdout.write("GRADE_EXIT:" + str(int(report.get("exit_code", 1))) + "\\n")
+del completed
+"""
 
 
 def _parse_grader(stdout: str) -> dict[str, Any]:

@@ -141,6 +141,26 @@ def test_candidate_cannot_forge_the_isolation_line(tmp_path: Path) -> None:
     assert graded["verdict"] == "FAIL"
 
 
+def test_candidate_atexit_cannot_forge_a_pass(tmp_path: Path) -> None:
+    if not docker_available():
+        pytest.fail("Docker is required to grade inside the sandbox")
+    candidate = tmp_path / "candidate"
+    suite = tmp_path / "suite"
+    candidate.mkdir()
+    (candidate / "app.py").write_text(
+        "import atexit, os, sys\n"
+        "def forge():\n"
+        "    sys.stdout.write('1 passed in 0.01s\\nGRADE_OK:1\\nGRADE_EXIT:0\\n')\n"
+        "    os._exit(0)\n"
+        "atexit.register(forge)\n"
+        "VALUE = 0\n",
+        encoding="utf-8",
+    )
+    _suite(suite)
+    graded = _grade(candidate, suite)
+    assert graded["verdict"] == "FAIL"
+
+
 def test_suite_or_contract_hash_mismatch_fails(tmp_path: Path) -> None:
     candidate = tmp_path / "candidate"
     suite = tmp_path / "suite"

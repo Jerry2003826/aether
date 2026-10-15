@@ -10,6 +10,7 @@
 | 候选顶层 `pytest.py` 不能冒充评分器 | `tests/integration/test_verification.py::test_candidate_pytest_module_cannot_shadow_the_grader` |
 | 候选顶层 `sitecustomize.py` 不能冒充评分器 | `tests/integration/test_verification.py::test_candidate_sitecustomize_cannot_shadow_the_grader` |
 | 候选输出不能伪造隔离结果 | `tests/integration/test_verification.py::test_candidate_cannot_forge_the_isolation_line` |
+| 候选 atexit 伪造 `N passed` 并用 `os._exit(0)` 不能通过 | `tests/integration/test_verification.py::test_candidate_atexit_cannot_forge_a_pass` |
 | 套件或合同哈希不一致则失败 | `tests/integration/test_verification.py::test_suite_or_contract_hash_mismatch_fails` |
 | 评分进程读不到宿主文件和密钥 | `tests/integration/test_verification.py::test_grader_cannot_read_host_files_or_credentials` |
 | actor 不能把失败改成通过 | `tests/integration/test_verification.py::test_changed_candidate_invalidates_the_previous_pass` |

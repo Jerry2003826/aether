@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F20 skill packages are implemented locally. Wait for PR CI before marking done.",
+  "next_action": "F17 annotation permissions are in progress. Mark done only after this CI is green.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
@@ -112,8 +112,5 @@
     "policy_version": "score-v1",
     "collaborative_filtering": false,
     "ci_run": "38685299953"
-  },
-  "f20": {
-    "status": "in_progress"
   }
 }

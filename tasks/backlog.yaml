@@ -448,7 +448,7 @@ tickets:
   - 元数据/正文/资源按需加载，未审批脚本不执行
   - source trace脱敏且仅train/dev，候选不读取holdout
   - 候选不能请求自动升权或改可信控制代码
-  status: in_progress
+  status: not_started
   evidence: []
 - id: F21
   stage: G5
