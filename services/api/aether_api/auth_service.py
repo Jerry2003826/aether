@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import re
 import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -19,40 +18,38 @@ from aether_domain.security import hashes_match, sha256_text
 from aether_storage.db import Database
 
 HASHER = PasswordHasher()
-_BOOTSTRAP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,80}\.json$")
 _SECRETS_DIR = Path(__file__).resolve().parents[3] / "secrets"
+_BOOTSTRAP_FILE = _SECRETS_DIR / "bootstrap.json"
 
 
 def confine_bootstrap_path(path: Path) -> Path:
-    """Accept only secrets/<safe-name>.json. The returned path is built from that name, not the input path."""
-    if path.is_absolute() or len(path.parts) != 2 or path.parts[0] != "secrets":
-        raise ApiError(403, "bootstrap_path_rejected", "引导文件必须位于 secrets/")
-    name = path.parts[1]
-    if _BOOTSTRAP_NAME.fullmatch(name) is None:
-        raise ApiError(403, "bootstrap_path_rejected", "引导文件名不合法")
+    """Only the fixed secrets/bootstrap.json file is readable or writable."""
+    allowed = {Path("secrets") / "bootstrap.json", _BOOTSTRAP_FILE}
+    if path != Path("secrets/bootstrap.json") and path not in allowed:
+        raise ApiError(403, "bootstrap_path_rejected", "引导文件必须是 secrets/bootstrap.json")
     _SECRETS_DIR.mkdir(parents=True, exist_ok=True)
-    return _SECRETS_DIR / name
+    return _BOOTSTRAP_FILE
 
 
 def issue_bootstrap_secret(path: Path) -> str:
-    destination = confine_bootstrap_path(path)
+    confine_bootstrap_path(path)
     secret = secrets.token_urlsafe(32)
     payload = {"secret_sha256": sha256_text(secret), "consumed": False}
-    destination.write_text(json.dumps(payload), encoding="utf-8")
-    destination.chmod(0o600)
+    _BOOTSTRAP_FILE.write_text(json.dumps(payload), encoding="utf-8")
+    _BOOTSTRAP_FILE.chmod(0o600)
     return secret
 
 
 def _load_bootstrap(path: Path) -> dict[str, Any]:
-    destination = confine_bootstrap_path(path)
-    if not destination.is_file():
+    confine_bootstrap_path(path)
+    if not _BOOTSTRAP_FILE.is_file():
         raise ApiError(403, "bootstrap_unavailable", "引导密钥不存在")
-    return json.loads(destination.read_text(encoding="utf-8"))
+    return json.loads(_BOOTSTRAP_FILE.read_text(encoding="utf-8"))
 
 
 def _save_bootstrap(path: Path, payload: dict[str, Any]) -> None:
-    destination = confine_bootstrap_path(path)
-    destination.write_text(json.dumps(payload), encoding="utf-8")
+    confine_bootstrap_path(path)
+    _BOOTSTRAP_FILE.write_text(json.dumps(payload), encoding="utf-8")
 
 
 class AuthService:

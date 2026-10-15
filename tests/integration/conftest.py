@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import os
-import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -63,7 +62,7 @@ def clean_db(admin_url: str) -> Iterator[None]:
 
 @pytest.fixture
 def client(role_urls: dict[str, str], clean_db: None) -> Iterator[TestClient]:
-    bootstrap_path = Path("secrets") / f"bootstrap-{uuid.uuid4().hex}.json"
+    bootstrap_path = Path("secrets/bootstrap.json")
     secret = issue_bootstrap_secret(bootstrap_path)
     settings = Settings(
         database_url=role_urls["aether_api"],

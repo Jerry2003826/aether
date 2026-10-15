@@ -8,11 +8,14 @@ from scripts.doctor import confine_report_path
 
 class PathConfinementTests(unittest.TestCase):
     def test_bootstrap_file_must_stay_under_secrets(self) -> None:
-        allowed = confine_bootstrap_path(Path("secrets") / "unit-bootstrap.json")
-        self.assertEqual(allowed.parent, Path("secrets").resolve())
+        allowed = confine_bootstrap_path(Path("secrets/bootstrap.json"))
+        self.assertEqual(allowed.name, "bootstrap.json")
+        self.assertEqual(allowed.parent.name, "secrets")
         with self.assertRaises(ApiError) as raised:
             confine_bootstrap_path(Path("/tmp/bootstrap.json"))
         self.assertEqual(raised.exception.code, "bootstrap_path_rejected")
+        with self.assertRaises(ApiError):
+            confine_bootstrap_path(Path("secrets") / "other.json")
 
     def test_doctor_report_must_stay_under_reports(self) -> None:
         allowed = confine_report_path(Path("reports") / "doctor-unit.json")
