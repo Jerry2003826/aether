@@ -1,6 +1,6 @@
 # F26 验收与测试
 
-没有 key 就记 blocked。脚本模型不代替这次 live 验收。`live_ready` 保持 false。F26 在 `STATUS.json` 和 `tasks/backlog.yaml` 里是 `blocked`，不是 `done`。`blocked` 和 `not_run` 都不是通过。
+没有 key 就记 blocked。脚本模型不代替这次 live 验收。`blocked` 和 `not_run` 都不是通过。F26 现在是 `done`。`live_ready` 在交付矩阵里是 passed。结果 JSON 自己的 `live_ready` 仍是 false，脚本不自证。
 
 监督者已在 head `5ab4fef` 用 DeepSeek 跑过一次：`AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`，`AETHER_LIVE_MODEL_ALIAS=deepseek-chat`，Python 3.13.5，退出码 0。原样结果在 `reports/f26_live_result.json`。文件里没有 key。
 
@@ -11,9 +11,7 @@ head `4f1ca09` 的重跑结果已原样保存，退出码 0。Docker 在场，ke
 - 第一次编码失败是探针自己诱导的。提示要求模型提交 `return a - b`，独立测试再按 `add(1, 2) == 3` 判失败。模型看到了这个测试输出并另交了一份源码。这不是模型自己先做对任务、再被独立测试打回。
 - 混合检索是三条固定短文上的冒烟：BM25 加 `config/retrieval/fixture.json` 里已测量的向量，再 RRF。`chunk-apple` 排在第一。这不是检索质量基准，也不是规格里的完整研究演示（导入真实中英资料，按来源版本和引用位置写比较报告）。
 
-因此已经跑过的探针还不是完整 F26。`live_ready` 保持 false。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
-
-完整验收另有入口，监督者还没跑，所以 F26 继续 blocked。结果文件不要提前造。
+因此已经跑过的短探针还不是完整 F26。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
 
 监督者机器需要：
 
@@ -34,7 +32,7 @@ export AETHER_LIVE_MODEL_KEY=...
 uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
 ```
 
-`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 仍不是 live V1，F26 要等这份结果被核对后才能改状态。
+`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。
 
 硬上限是 8 次 chat completion、累计 20000 token、单次输出最多 512 token。20000 token 即使按每百万 token 10 美元计也是 0.20 美元，低于 1 美元。供应商没有返回费用时 `cost_status` 是 `unknown`，不估一个账单。到顶就停，不能记成通过。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志，也不进 OpenHands 进程。job 只拿本机网关的 token。
 
@@ -45,7 +43,16 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 - 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`version=1` 和 `offset=0-92` 与空格写法是同一字段，数字不同仍然失败。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
 - Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
 
-head `dac5c49` 的完整验收退出码是 1，原样结果在 `reports/f26_acceptance_result.json`。协议、OpenHands 补丁（基线 `add(1, 2)=-1`，新容器 `PASS`）和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，等于单次输出上限，报告最后停在 `src-en`。两条引用在截断之前已经写全：`source_id`、`version=1`、完整 sha256、`offset=0-92` 和 `offset=0-283` 都在。失败原因是检查器当时只认 `version 1` 和 `offset 0-92` 这种空格，不认等号。这不是引用写错，也不是截断把引用切掉了。检查器现在两种分隔都认，缺哈希、错 offset 或错 version 仍然失败。F26 继续 blocked，需要用同一条命令重跑。
+head `dac5c49` 的完整验收退出码是 1，原样留在 `reports/f26_acceptance_dac5c49.json`。协议、OpenHands 补丁和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，报告最后停在 `src-en`。两条引用在截断之前已经写全。失败原因是检查器当时只认空格。检查器改完后，监督者在 head `cb22fbc` 重跑，退出码 0。原样结果在 `reports/f26_acceptance_result.json`。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token。四项都通过。
+
+按 `docs/11_delivery.md`，`live_ready` 是产品工程加 F26。产品工程此前已经 passed，这次 F26 的验收项也通过，所以交付矩阵里的 `live_ready` 改为 passed。下面几项照实保留，不算通过：
+
+- `semantic_support` 是 `not_judged`。引用在，不等于已经判断比较内容成立。
+- `cost_status` 是 `unknown`。供应商没有返回费用，不估一个账单。产物哈希有记录。
+- 稠密通道是这三条笔记上的精确余弦，不是 pgvector 基准。reranker 没有用。版本记在验收结果里，不是 Postgres 的 `source_versions` 行。
+- Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+
+结果文件里的 `live_ready` 仍是 false。那是脚本不自证，不是这次交付结论。
 
 ## 已经跑过的短探针
 
@@ -58,7 +65,7 @@ export AETHER_LIVE_MODEL_KEY=...
 python scripts/run_f26_live.py --out reports/f26_live_result.json
 ```
 
-`--out` 只接受相对路径 `reports/f26_live_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 不是 live V1 已验收。
+`--out` 只接受相对路径 `reports/f26_live_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。这条短探针的 `probed` 不是完整验收。
 
 不需要锁文件以外的 pip 包。混合检索会导入仓库里的 `bm25s`。Python 3.11 及以上。推荐：
 
@@ -76,7 +83,7 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 - 编码恢复：第一次要求 `return a - b`，独立测试按 `add(1, 2) == 3` 判失败，然后必须再提交一份不同哈希的 `return a + b`。
 - Linux 隔离：仅当当前是 Linux 且 `docker info` 成功时，用 `python:3.12-alpine` 跑 `--network none --read-only --cap-drop ALL`，确认容器里没有 key、公网连不上。没有 Docker 或镜像拉不下来就记 not_run 和原因，不假装通过。
 
-`status=probed` 只表示这次探针的检查都通过。它不是规格里的完整 F26，也不是 live V1。有 not_run 时退出码是 3（`incomplete`）。`live_ready` 保持 false。
+短探针的 `status=probed` 只表示那次探针的检查都通过。它不是上面的完整验收。有 not_run 时退出码是 3（`incomplete`）。
 
 系统前提：
 

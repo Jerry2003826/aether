@@ -1,13 +1,13 @@
 {
   "spec_version": "1.4",
   "as_of": "2026-10-15",
-  "artifact_type": "core_done_live_blocked",
-  "current_task": "F26",
+  "artifact_type": "core_done_live_ready",
+  "current_task": "none",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
     "product_engineering": "passed",
-    "live_ready": "blocked",
+    "live_ready": "passed",
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_run"
   },
@@ -15,7 +15,7 @@
     "Hermes four-way comparison",
     "CodeGraph product enablement"
   ],
-  "next_action": "F26 stays blocked. Rerun the same command on the supervisor after the citation checker accepts version=1 and offset=0-92: uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json. Env and caps are unchanged: DeepSeek deepseek-chat, 8 calls, 20000 tokens, 512 output tokens. The dac5c49 file stays the recorded failure. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "next_action": "F26 is done from the cb22fbc acceptance file. live_ready is passed because product engineering was already passed and F26 now passes. semantic_support stays not_judged and cost_status stays unknown. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -146,18 +146,21 @@
     "vulnerability_db": "offline_not_run"
   },
   "f26": {
-    "status": "blocked",
-    "live_ready": false,
+    "status": "done",
+    "live_ready": true,
     "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"],
     "probe": "reports/f26_live_result.json",
     "probe_head": "4f1ca09",
     "probe_status": "probed",
     "acceptance_script": "scripts/run_f26_acceptance.py",
-    "acceptance_status": "failed",
-    "acceptance_head": "dac5c49",
+    "acceptance_status": "probed",
+    "acceptance_head": "cb22fbc",
     "acceptance_result": "reports/f26_acceptance_result.json",
+    "acceptance_report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "semantic_support": "not_judged",
+    "cost_status": "unknown",
     "acceptance_cap": {"max_calls": 8, "max_total_tokens": 20000, "max_output_tokens": 512, "spend_cap_usd": 1},
-    "reason": "dac5c49 的完整验收退出码 1。协议、OpenHands 编码和 Linux 隔离通过。研究调用打满 512 token，报告在 src-en 处截断，但两条 sha256、version=1 和 offset 已经写上。检查器只认空格分隔，所以误记 citation_mismatch。F26 继续 blocked，live_ready 保持 false，需要重跑。"
+    "reason": "cb22fbc 的完整验收退出码 0。协议、现场混合检索引用、OpenHands 编码和 Linux 隔离都通过。比较报告 488 token，没有截断。semantic_support 仍是 not_judged，费用 unknown。结果文件里的 live_ready 仍是 false，因为脚本不自证；交付矩阵按产品工程加 F26 记为 passed。"
   },
   "f27": {
     "status": "done",

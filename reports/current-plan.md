@@ -1,18 +1,7 @@
-# F26 仍 blocked，等待完整验收结果
+# F26 已按 cb22fbc 的验收结果标 done
 
-已记录的 `reports/f26_live_result.json` 是三条短文冒烟，第一次编码失败也是提示诱导的。不能据此标 done。
+`reports/f26_acceptance_result.json` 是这次退出码 0 的原样结果。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`。
 
-完整入口：
+`semantic_support` 仍是 `not_judged`，费用仍是 `unknown`。`live_ready` 按产品工程加 F26 记为 passed。Hermes 四组对照和 CodeGraph 仍是 not_run。
 
-```sh
-cd environments/openhands && uv sync --frozen
-cd ../ml && uv sync --frozen
-docker pull python:3.12-alpine
-cd ../..
-export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
-export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
-export AETHER_LIVE_MODEL_KEY=...
-uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
-```
-
-上限 8 次调用、20000 token、单次输出 512。`dac5c49` 的结果已原样记下，研究失败来自引用分隔符。检查器改完后用同一条命令重跑。`live_ready` 保持 false。Hermes 四组对照和 CodeGraph 仍是 not_run。
+`dac5c49` 的失败结果留在 `reports/f26_acceptance_dac5c49.json`。

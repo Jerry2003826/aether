@@ -587,7 +587,7 @@ tickets:
   - 真实用户配置model API通过tools/schema/usage协议探针
   - 研究完整hybrid+引用验收；编码独立测试和恢复通过
   - 无API key/Linux资源如实blocked；脚本模型不替代本项
-  status: blocked
+  status: done
   evidence:
   - services/worker/aether_worker/live_harness.py
   - services/worker/aether_worker/f26_acceptance.py
@@ -598,6 +598,8 @@ tickets:
   - tests/unit/test_f26_acceptance.py
   - reports/f26_criteria.md
   - reports/f26_live_result.json
+  - reports/f26_acceptance_result.json
+  - reports/f26_acceptance_dac5c49.json
 - id: F27
   stage: G6
   scope: core
