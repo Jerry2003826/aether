@@ -113,6 +113,15 @@ tools:
   result_type: CodeAffectedTestsResult
   required_capability: code:read
   enforcement: Read-only test hints. Cannot overwrite trusted verifier suite or mark tests passed.
+- id: external.draft
+  risk: R2
+  idempotency: idempotent_write
+  approval: required
+  argument_fields:
+    text: string
+  result_type: OperationResult
+  required_capability: external:draft
+  enforcement: MCP annotations cannot lower this risk or skip approval.
 mcp:
   default: disabled_until_reviewed
   accept_tool_schema_changes_automatically: false

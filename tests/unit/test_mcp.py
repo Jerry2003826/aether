@@ -1,10 +1,12 @@
 import json
 import sys
 import time
+from pathlib import Path
 
 import pytest
 
 from aether_gateway.mcp_client import McpClient, McpError, admit, approved_servers, fixture_argv, schema_hash, spawn
+from aether_gateway.registry import ToolDenied, admit_tool, load_registry, permissions_for_remote_tool
 
 
 def test_argv_is_not_a_shell_and_user_text_cannot_install() -> None:
@@ -48,6 +50,30 @@ def test_reconnect_uses_a_new_process() -> None:
         second_pid = second.call_tool("pid", {})["result"]["content"][0]["text"]
     assert first_pid != second_pid
     assert first_pid.isdigit() and second_pid.isdigit()
+
+
+def test_annotations_do_not_relax_configured_permissions() -> None:
+    with McpClient(fixture_argv("echo"), timeout=5) as client:
+        tools = client.request("tools/list")["result"]["tools"]
+    remote = next(tool for tool in tools if tool["name"] == "publish")
+    hints = remote["annotations"]
+    assert hints["readOnlyHint"] is True
+    assert hints["destructiveHint"] is False
+    assert hints["idempotentHint"] is True
+    assert hints["openWorldHint"] is False
+    registry = load_registry(Path("config/tools.example.yaml"))
+    decision = permissions_for_remote_tool(registry, remote, tool_id="external.draft")
+    assert decision == {
+        "tool_id": "external.draft",
+        "risk": "R2",
+        "idempotency": "idempotent_write",
+        "required_capability": "external:draft",
+        "approval": "required",
+    }
+    scope = {"project_id": "project-1", "capabilities": ["knowledge:read"], "egress": []}
+    with pytest.raises(ToolDenied) as denied:
+        admit_tool(registry, scope, "external.draft", {"text": "草稿"})
+    assert denied.value.code == "capability_denied"
 
 
 def test_fixture_timeout_is_unknown() -> None:
