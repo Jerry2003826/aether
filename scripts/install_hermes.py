@@ -14,6 +14,8 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+import urllib.error
 import urllib.request
 from pathlib import Path
 
@@ -51,19 +53,30 @@ def _fail(message: str) -> None:
 def _download(url: str, destination: Path) -> None:
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".partial")
-    try:
-        request = urllib.request.Request(url, headers={"User-Agent": "aether-hermes-install"})
-        with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as handle:
-            while True:
-                chunk = response.read(1024 * 1024)
-                if not chunk:
-                    break
-                handle.write(chunk)
-    except Exception:
-        if partial.exists():
-            partial.unlink()
-        raise
-    partial.replace(destination)
+    request = urllib.request.Request(url, headers={"User-Agent": "aether-hermes-install"})
+    delay = 2
+    for attempt in range(5):
+        try:
+            with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as handle:
+                while True:
+                    chunk = response.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    handle.write(chunk)
+            partial.replace(destination)
+            return
+        except urllib.error.HTTPError as exc:
+            if partial.exists():
+                partial.unlink()
+            if exc.code not in {429, 500, 502, 503, 504} or attempt == 4:
+                raise
+        except urllib.error.URLError:
+            if partial.exists():
+                partial.unlink()
+            if attempt == 4:
+                raise
+        time.sleep(delay)
+        delay *= 2
 
 
 def _archive_sha(archive: Path, member: str) -> str:
