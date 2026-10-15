@@ -540,7 +540,7 @@ tickets:
   - 基线安装/CLI探针真实执行；缺key标live not_run
   - 相同模型/权限/预算与fresh/frozen learned环境；无法匹配差异显式列出
   - 开发集与最终holdout分离，raw结果/unknown费用/置信区间可重算；无数据不声称领先
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/hermes_baseline.py
   - scripts/install_hermes.py
@@ -564,7 +564,7 @@ tickets:
   - 使用实际构建产物生成SBOM；漏洞库时效与离线/在线模式可见
   - 固定依赖和完整许可文件；不得用README宽松标签替代依赖审计
   - 恢复DB+artifact后先停止外部dispatch并对账；不down -v删数据
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/supply.py
   - tests/unit/test_supply_chain.py
