@@ -1,0 +1,25 @@
+{
+  "is_actual_lock": false,
+  "generated_by_task": "F00",
+  "mode": "offline",
+  "providers": {
+    "user_provider": {
+      "model_id": null,
+      "base_url": null,
+      "pricing_version": null,
+      "live_enabled": false
+    }
+  },
+  "aliases": ["planner", "actor", "coder", "judge", "extractor"],
+  "ml": {
+    "embedding_model_id": "BAAI/bge-m3",
+    "embedding_revision": null,
+    "dimension_probed": null,
+    "reranker_revision": null,
+    "weights_present": false
+  },
+  "scripted": {
+    "label": "SCRIPTED_PROVIDER_NOT_REAL_AI",
+    "report_usage_status": "scripted"
+  }
+}

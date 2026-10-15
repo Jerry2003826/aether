@@ -22,8 +22,14 @@ tickets:
   - uv/pnpm或等价锁实际解析；不动系统Python
   - 真Postgres和Temporal可连；缺ML/OpenHands不阻塞本任务
   - doctor区分installed/configured/probed，null不是已锁定
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - uv.lock
+  - apps/web/pnpm-lock.yaml
+  - infra/images.lock.json
+  - config/upstream.lock.json
+  - config/models.lock.json
+  - reports/doctor.json
 - id: F01
   stage: G0
   scope: core
@@ -39,8 +45,10 @@ tickets:
   - 四个OpenHands包按兼容release组合导入，确认LLM gateway可配置
   - BGE模型revision/维数/资源验证；缺下载标blocked而非随机向量
   - 非live探针无需购买模型，live结果另列F26；不为兼容迁移整个控制面
-  status: not_started
-  evidence: []
+  status: blocked
+  evidence:
+  - reports/f01-probe.json
+  - environments/openhands/uv.lock
 - id: F02
   stage: G1
   scope: core

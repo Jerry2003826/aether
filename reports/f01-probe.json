@@ -1,0 +1,42 @@
+{
+  "openhands": {
+    "status": "passed",
+    "reason": null,
+    "selected_release": "1.54.0",
+    "selection": "PyPI current versions of the four packages matched 1.54.0 on the probe date; not a hand-written digest",
+    "interpreter": "CPython 3.13.16 via uv",
+    "imports": {
+      "openhands.sdk": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/sdk/__init__.py"
+      },
+      "openhands.tools": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/tools/__init__.py"
+      },
+      "openhands.workspace": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/workspace/__init__.py"
+      },
+      "openhands.agent_server": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/agent_server/__init__.py"
+      }
+    },
+    "llm_gateway_configured": true,
+    "llm_gateway_note": "LLM(base_url) accepted a local gateway URL. No provider was called.",
+    "sync_returncode": 0,
+    "live_model": "not_run",
+    "stderr_tail": null
+  },
+  "ml": {
+    "status": "blocked",
+    "reason": "Hub metadata was read, but FlagEmbedding was not installed and weights were not loaded. Published hidden_size is not a measured dimension.",
+    "embedding_revision": null,
+    "hub_revision_unverified": "5617a9f61b028005a4858fdac845db406aefb181",
+    "published_hidden_size_unverified": 1024,
+    "dimension_probed": null,
+    "weights_present": false,
+    "package_install": "not_run"
+  }
+}

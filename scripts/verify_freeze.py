@@ -5,6 +5,10 @@ from pathlib import Path
 from typing import Any
 import yaml
 ROOT=Path(__file__).resolve().parents[1]
+DEPENDENCY_PARTS={'.venv','node_modules','.git','.next','data','secrets','__pycache__'}
+
+def is_dependency_path(path:Path)->bool:
+    return any(part in DEPENDENCY_PARTS for part in path.parts)
 
 def read_yaml(path:Path)->Any:
     with path.open(encoding='utf-8') as f:return yaml.safe_load(f)
@@ -72,7 +76,7 @@ def verify(root:Path=ROOT)->dict[str,Any]:
     # Parse all active structured artifacts and check internal JSON pointers.
     parsed=0
     for path in sorted(root.rglob('*')):
-        if not path.is_file() or 'archive' in path.parts:continue
+        if not path.is_file() or 'archive' in path.parts or is_dependency_path(path):continue
         if path.suffix=='.json':obj=json.loads(path.read_text());parsed+=1
         elif path.suffix in {'.yaml','.yml'}:obj=read_yaml(path);parsed+=1
         elif path.suffix=='.jsonl':
@@ -100,7 +104,8 @@ def verify(root:Path=ROOT)->dict[str,Any]:
             for info in z.infolist():
                 require(not info.filename.startswith('/') and '..' not in Path(info.filename).parts,'Unsafe archived path')
         archives.append(path.name)
-    require(list(root.rglob('AGENTS.md'))==[root/'AGENTS.md'],'Competing active AGENTS.md files')
+    agents=[path for path in root.rglob('AGENTS.md') if not is_dependency_path(path)]
+    require(agents==[root/'AGENTS.md'],'Competing active AGENTS.md files')
     from importlib.util import spec_from_file_location,module_from_spec
     spec=spec_from_file_location('spec_builder',root/'scripts/rebuild_spec.py')
     mod=module_from_spec(spec);spec.loader.exec_module(mod)
