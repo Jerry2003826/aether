@@ -350,6 +350,9 @@ tickets:
   - tests/integration/test_codegraph.py
   - config/codegraph.lock.json
   - reports/f15_criteria.md
+  - reports/f15_product_result.json
+  - scripts/run_codegraph_product.py
+  - services/worker/aether_worker/codegraph_evidence.py
 - id: F16
   stage: G5
   scope: core

@@ -1,0 +1,216 @@
+{
+  "status": "passed",
+  "product_enabled": true,
+  "telemetry": "off",
+  "checks": {
+    "index": true,
+    "calls": true,
+    "dependency": true,
+    "invalidation": true,
+    "degraded": true
+  },
+  "copied_files": 273,
+  "index": {
+    "cold_index_seconds": 2.004376201002742,
+    "reported_cold_index_seconds": 1.9947071760034305,
+    "file_count": 162,
+    "node_count": 2674,
+    "edge_count": 7081,
+    "db_size_bytes": 8892416,
+    "state": "complete",
+    "version": "1.6.2",
+    "cache_key": "03b9c01324f188de91747737386a549a8495cb71f251409c34dc475de9083d3d",
+    "snapshot_sha256": "b29e968d87ede2a5d0f3c1387c156d9da529e03677341e4b771d2809dae4ed14"
+  },
+  "call": {
+    "caller": "build_report",
+    "caller_file": "services/worker/aether_worker/acceptance_report.py",
+    "callee": "_counts",
+    "callee_file": "services/worker/aether_worker/acceptance_report.py",
+    "agreement": {
+      "callee_hit": true,
+      "caller_hit": true,
+      "extra_callees": [],
+      "extra_callers": [],
+      "ok": true
+    },
+    "callers": [
+      {
+        "name": "build_report",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/acceptance_report.py",
+        "start_line": 24,
+        "relationships": [
+          "calls"
+        ]
+      }
+    ],
+    "callees": [
+      {
+        "name": "_counts",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/acceptance_report.py",
+        "start_line": 11,
+        "relationships": [
+          "calls"
+        ]
+      }
+    ]
+  },
+  "dependency": {
+    "file": "services/worker/aether_worker/f26_acceptance.py",
+    "module": "aether_worker.live_harness",
+    "name": "redact_secret",
+    "ast_import": true,
+    "graph_import": true,
+    "rows": [
+      {
+        "name": "_linux_isolation",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/live_harness.py",
+        "start_line": 292,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_post_gateway",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 546,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_docker_check",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 152,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "main",
+        "kind": "function",
+        "relative_path": "scripts/run_f26_live.py",
+        "start_line": 19,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_redact_report",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 882,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "run_f26_acceptance",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 710,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "run_live_probe",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/live_harness.py",
+        "start_line": 493,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "main",
+        "kind": "function",
+        "relative_path": "scripts/run_f26_acceptance.py",
+        "start_line": 22,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_post",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/live_harness.py",
+        "start_line": 331,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_default_launch",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 520,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "_redact_tree",
+        "kind": "function",
+        "relative_path": "services/worker/aether_worker/live_harness.py",
+        "start_line": 75,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "do_POST",
+        "kind": "method",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 382,
+        "relationships": [
+          "calls"
+        ]
+      },
+      {
+        "name": "run_f26_acceptance.py",
+        "kind": "file",
+        "relative_path": "scripts/run_f26_acceptance.py",
+        "start_line": 1,
+        "relationships": [
+          "imports"
+        ]
+      },
+      {
+        "name": "run_f26_live.py",
+        "kind": "file",
+        "relative_path": "scripts/run_f26_live.py",
+        "start_line": 1,
+        "relationships": [
+          "imports"
+        ]
+      },
+      {
+        "name": "f26_acceptance.py",
+        "kind": "file",
+        "relative_path": "services/worker/aether_worker/f26_acceptance.py",
+        "start_line": 1,
+        "relationships": [
+          "imports"
+        ]
+      }
+    ]
+  },
+  "invalidation": {
+    "code": "stale_snapshot"
+  },
+  "degraded": {
+    "reason": "graph_unavailable",
+    "matches": [
+      "services/worker/aether_worker/acceptance_report.py",
+      "services/worker/aether_worker/codegraph_evidence.py"
+    ]
+  },
+  "network_none": true,
+  "git_commit": "2047af0dbfc1412bfd755def1e800d1caf6aae99"
+}

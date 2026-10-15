@@ -8,4 +8,4 @@
 uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json
 ```
 
-`readiness.codegraph_enabled` 在结果检查全部通过之前保持 `not_run`。
+`reports/f15_product_result.json` 是 commit `2047af0` 上的真实结果，五项检查都通过。`readiness.codegraph_enabled` 改为 passed。Hermes 四组对照仍是 not_run。
