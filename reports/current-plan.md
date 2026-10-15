@@ -1,11 +1,9 @@
-# F21 回滚原子性
+# F22 控制台与 API
 
-目标：回滚中途失败时，当前版本指针和 canary 状态要么一起变，要么都不提交。
+目标：49 个设计操作都有真实实现。页面走真实 API。错误、加载、断线和键盘路径要有测试。原始 HTML 不执行。
 
-合同：`docs/07_learning_evaluation.md`。
+合同：`docs/08_api_ui.md`，`contracts/openapi.yaml`，`contracts/endpoint_stages.yaml`。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_skill_eval.py::test_rollback_is_atomic_when_the_second_write_fails`
-
-进度：本地与原有 canary 用例一起 2 passed，整文件 4 passed。状态 in_progress，等 PR CI 和 Sonar 通过后再标 done。
+进度：F20、F21 已按 CI run `38687896639` 标 done。开始对照未实现的操作。
 
 阻塞：无。

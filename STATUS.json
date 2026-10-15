@@ -114,11 +114,11 @@
     "ci_run": "38685299953"
   },
   "f20": {
-    "status": "in_progress",
-    "ci_run": "38686196972"
+    "status": "done",
+    "ci_run": "38687896639"
   },
   "f21": {
-    "status": "in_progress",
-    "ci_run": "38686730319"
+    "status": "done",
+    "ci_run": "38687896639"
   }
 }
