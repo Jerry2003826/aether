@@ -12,7 +12,7 @@ import secrets
 import socket
 import subprocess
 import sys
-import threading
+import tempfile
 import time
 import uuid
 from pathlib import Path
@@ -72,18 +72,20 @@ def _write(report: dict[str, object]) -> str:
     return text
 
 
-def _drain(pipe, bucket: list[str]) -> None:
-    if pipe is None:
-        return
-    for line in pipe:
-        bucket.append(line)
+def _start(args: list[str], env: dict[str, str]) -> tuple[subprocess.Popen[str], Path]:
+    descriptor, name = tempfile.mkstemp(prefix="aether-live-")
+    os.close(descriptor)
+    log_path = Path(name)
+    handle = log_path.open("w", encoding="utf-8")
+    proc = subprocess.Popen(args, cwd=ROOT, env=env, stdout=handle, stderr=subprocess.STDOUT, text=True)
+    handle.close()
+    return proc, log_path
 
 
-def _start(args: list[str], env: dict[str, str]) -> tuple[subprocess.Popen[str], list[str]]:
-    bucket: list[str] = []
-    proc = subprocess.Popen(args, cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
-    threading.Thread(target=_drain, args=(proc.stdout, bucket), daemon=True).start()
-    return proc, bucket
+def _read_log(path: Path | None) -> str:
+    if path is None or not path.is_file():
+        return ""
+    return path.read_text(encoding="utf-8", errors="replace")
 
 
 def _stop(proc: subprocess.Popen[str] | None) -> None:
@@ -97,27 +99,31 @@ def _stop(proc: subprocess.Popen[str] | None) -> None:
         proc.wait(timeout=10)
 
 
-def _wait_http(url: str) -> bool:
-    deadline = time.time() + 30
+def _wait_ready(api_url: str, api: subprocess.Popen[str], worker_log: Path, worker: subprocess.Popen[str]) -> bool:
+    # A fresh runner can spend most of a minute importing the worker.
+    deadline = time.time() + 90
+    http_ok = False
     while time.time() < deadline:
-        try:
-            if httpx.get(url, timeout=2).status_code < 500:
-                return True
-        except httpx.HTTPError:
-            pass
+        if not http_ok:
+            try:
+                if httpx.get(api_url, timeout=2).status_code < 500:
+                    http_ok = True
+            except httpx.HTTPError:
+                pass
+        worker_ok = "aether-worker-ready" in _read_log(worker_log)
+        if http_ok and worker_ok:
+            return True
+        if (api.poll() is not None and not http_ok) or (worker.poll() is not None and not worker_ok):
+            return False
         time.sleep(0.2)
     return False
 
 
-def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str]) -> bool:
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        if any(needle in line for line in bucket):
-            return True
-        if proc.poll() is not None:
-            return False
-        time.sleep(0.1)
-    return False
+def _log_tail(path: Path | None, secret: str) -> str:
+    text = redact_secret(_read_log(path), secret)
+    if len(text) > 4000:
+        text = text[-4000:]
+    return text
 
 
 def _exception_report(step: str, exc: BaseException) -> dict[str, object]:
@@ -153,17 +159,30 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
             "AETHER_ORIGINS": ORIGIN,
             "AETHER_COOKIE_SECURE": "",
             "AETHER_INTAKE_PAUSE_SECONDS": "0",
+            "PYTHONUNBUFFERED": "1",
         }
     )
     step = "start_processes"
     api: subprocess.Popen[str] | None = None
     worker: subprocess.Popen[str] | None = None
+    api_log: Path | None = None
+    worker_log: Path | None = None
     try:
-        api, _api_logs = _start([sys.executable, "-m", "aether_api.main"], child)
-        worker, worker_logs = _start([sys.executable, "-m", "aether_worker"], child)
+        api, api_log = _start([sys.executable, "-m", "aether_api.main"], child)
+        worker, worker_log = _start([sys.executable, "-m", "aether_worker"], child)
         step = "wait_ready"
-        if not _wait_http(f"http://127.0.0.1:{api_port}/health/live") or not _wait_line(worker_logs, "aether-worker-ready", worker):
-            return _report("incomplete", reason="api_or_worker_did_not_start", step=step)
+        if not _wait_ready(f"http://127.0.0.1:{api_port}/health/live", api, worker_log, worker):
+            time.sleep(0.2)
+            secret_value = os.environ.get(LIVE_KEY) or ""
+            return _report(
+                "incomplete",
+                reason="api_or_worker_did_not_start",
+                step=step,
+                api_returncode=None if api.poll() is None else api.returncode,
+                worker_returncode=None if worker.poll() is None else worker.returncode,
+                api_log=_log_tail(api_log, secret_value),
+                worker_log=_log_tail(worker_log, secret_value),
+            )
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=30) as http:
             step = "bootstrap"
             bootstrap = http.post(
@@ -232,6 +251,9 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
         _stop(worker)
         _stop(api)
         secret_path.unlink(missing_ok=True)
+        for path in (api_log, worker_log):
+            if path is not None:
+                path.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:
