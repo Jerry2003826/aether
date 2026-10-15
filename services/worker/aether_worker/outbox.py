@@ -14,7 +14,7 @@ from aether_storage.db import Database
 def enqueue_task(database: Database, *, owner_id: str, project_id: str, goal: str, command_key: str) -> dict[str, str]:
     task_id = str(uuid.uuid4())
     workflow_id = f"task-{task_id}"
-    payload = {"task_id": task_id, "goal": goal}
+    payload = {"task_id": task_id, "workflow_id": workflow_id, "goal": goal, "command_id": command_key}
     digest = sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(

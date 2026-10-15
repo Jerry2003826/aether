@@ -22,6 +22,8 @@ AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/
 EXIT:0
 ```
 
+dispatcher 接上之后又跑了同一条全量命令：`74 passed, 2 warnings in 14.91s`，`EXIT:0`。
+
 P1 覆盖：
 
 - `aether_api` 不能写 operations、budget_accounts、model_requests、audit_events、verification_results、evaluation_runs；不能 UPDATE/DELETE command_outbox。新表不继承 DML。
@@ -34,7 +36,7 @@ P1 覆盖：
 
 - F00、F02、F03、F04、F05、F06、F07：done
 - F01：blocked。BGE 权重未加载，`dimension_probed` 为 null。
-- F07 的 Workflow、Activity 和 outbox 事务是真实的。命令发件箱还没有 dispatcher 把行投递到 Temporal。下一步做这件事，不把未投递标成已投递。
-- F08 及之后未开始。F15 不跳过。
+- F07 done。`aether_dispatcher` 把 `command_outbox` 投到真实 Temporal。Temporal 拒绝时行留在 DELIVERING，任务保持 QUEUED，不会被标成成功。同一个 command_id 再投递不会在 Workflow 里出现两次。
+- 下一步：F08 最小真实 UI 和可回放事件。F15 不跳过。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。
