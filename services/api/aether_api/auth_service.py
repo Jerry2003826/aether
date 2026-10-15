@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import secrets
 from datetime import UTC, datetime, timedelta
@@ -42,8 +43,7 @@ def issue_bootstrap_secret(path: Path) -> str:
     destination = confine_bootstrap_path(path)
     secret = secrets.token_urlsafe(32)
     payload = {"secret_sha256": sha256_text(secret), "consumed": False}
-    destination.write_text(json.dumps(payload), encoding="utf-8")
-    destination.chmod(0o600)
+    _write_confined(destination, json.dumps(payload))
     return secret
 
 
@@ -54,9 +54,15 @@ def _load_bootstrap(path: Path) -> dict[str, Any]:
     return json.loads(destination.read_text(encoding="utf-8"))
 
 
+def _write_confined(destination: Path, content: str) -> None:
+    # destination is always secrets/<validated-name>.json from confine_bootstrap_path.
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)  # NOSONAR pythonsecurity:S2083
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(content)
+
+
 def _save_bootstrap(path: Path, payload: dict[str, Any]) -> None:
-    destination = confine_bootstrap_path(path)
-    destination.write_text(json.dumps(payload), encoding="utf-8")
+    _write_confined(confine_bootstrap_path(path), json.dumps(payload))
 
 
 class AuthService:
