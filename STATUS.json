@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F18 watches and in-app notifications.",
+  "next_action": "F18 watch implementation is in progress. After it is pushed, close the MCP session-crash gap.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
@@ -102,5 +102,8 @@
     "status": "done",
     "sdk": "mcp==2.3.0",
     "ci_run": "38684264336"
+  },
+  "f18": {
+    "status": "in_progress"
   }
 }

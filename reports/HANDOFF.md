@@ -53,4 +53,5 @@ P1 覆盖：
 - F16 done。同一 CI run。搜索缓存同时绑定 visibility epoch 和索引代，删除后不再返回已删内容。
 - CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。
 - F17 done。PR #1 CI run `38684264336`：unit `32 passed in 6.36s`，integration `112 passed, 1 warning in 71.65s`。SonarCloud quality gate OK。stdio 使用官方 `mcp` 2.3.0，夹具服务器也是这个 SDK。对照表 `reports/f17_criteria.md`。
-- 下一步：F18 主题跟踪和站内通知。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F18 in_progress。未批准的 watch 保持 DRAFT，不会创建 Temporal schedule。水位不变不写通知。重复 trigger 只有一条站内通知，且 `external_sent` 为 false。停止之后不再派发。对照表 `reports/f18_criteria.md`。还没标 done。
+- live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

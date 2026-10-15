@@ -408,7 +408,7 @@ tickets:
   - owner批准来源/频率/预算后才启用
   - 无变更不总结；重复trigger不重复通知
   - 停止watch阻止后续dispatch；默认不发送外部消息
-  status: not_started
+  status: in_progress
   evidence: []
 - id: F19
   stage: G5
