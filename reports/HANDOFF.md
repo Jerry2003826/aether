@@ -43,6 +43,7 @@ P1 覆盖：
 - F09 done。本地产物经真实存储和文本工具进入脚本网关，HTTP 调用 1 次，哈希与 `aether_verifier` 的 PASS/FAIL 写入验收表。过期候选在 actor 自报 PASS 时仍为 FAIL。worker 重启后重投同一命令，`research.call` 仍是 1 条。全量：`87 passed, 2 warnings in 17.84s`，`EXIT:0`。对照表 `reports/f09_criteria.md`。
 - F10 done。码点偏移覆盖中文、emoji 和 CRLF。空正文失败。loopback 与跳向 loopback 的重定向都不会发出连接。授权夹具上的 HTTP 下载写入 SourceVersion，chunk 的 embedding 仍是 null。全量：`90 passed, 2 warnings in 18.62s`，`EXIT:0`。对照表 `reports/f10_criteria.md`。
 - F11 blocked。依赖 F01，BGE 维度未实测，不用随机向量。F12、F16 以及依赖它们的任务因此还不能标 done。F13 也依赖 F01。F15 仍排在 F14 之后，不跳过。
-- 下一步未阻塞任务：F17 MCP。live 模型、CodeGraph、Hermes 仍是 not_run。
+- 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
+- 下一步：F11 仍等 BGE 实测维度。F13/F14/F15 按依赖排在 F01 之后，F15 不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

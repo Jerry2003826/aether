@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F11 stays blocked until BGE-M3 dimension is measured. Next unblocked backlog task after that chain is F17.",
+  "next_action": "F11 stays blocked until BGE-M3 dimension is measured. F17 has a local stdio fixture but is not done until the official MCP SDK is the client.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "F10 full suite: 90 passed, 2 warnings in 18.62s, EXIT:0.",
+  "last_test_result": "After MCP fixture tests: 94 passed, 2 warnings in 18.19s, EXIT:0. F17 is not done.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
