@@ -58,8 +58,10 @@ P1 覆盖：
 - F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
 - F21 done。PR #1 CI run `38686730319`：unit `40 passed in 7.73s`，integration `118 passed, 1 warning in 75.07s`。SonarCloud quality gate OK。对照表 `reports/f21_criteria.md`。
 - F20、F21 done。PR #1 CI run `38687896639`：unit `40 passed in 7.43s`，integration `123 passed, 1 warning in 72.10s`。SonarCloud quality gate OK。密钥整段替换。脚本整目录哈希后在容器里用 `python -I` 执行。回滚中途失败时指针和 canary 状态都不提交。对照表 `reports/f20_criteria.md`、`reports/f21_criteria.md`。
-- F22–F27 done。PR #1 CI run `38694676859`：unit `49 passed in 10.97s`，integration `136 passed, 1 warning in 97.37s`。SonarCloud quality gate OK。对照表 `reports/f22_criteria.md` 到 `reports/f27_criteria.md`。
-- F24 Hermes 对照 live 是 not_run。本机没有 Hermes CLI，没有领先结论。
-- F26 `live_ready` 是 false。要跑真实探针必须同时提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`。缺任何一个就是 blocked，脚本模型不代替。
+- F22、F23、F27 在 PR #1 CI run `38694676859` 上是 done：unit `49 passed in 10.97s`，integration `136 passed, 1 warning in 97.37s`。SonarCloud quality gate OK。那次 head 是 `6bc678b`，随后 `5dde69a` 把 F24–F26 也标成 done。这次评审把后三项打回。
+- F24 是 in_progress。CI 会安装 Hermes v0.22.1（提交 `297552a9d646119871391d202509822cd86330df`，归档 sha256 `45ebe864dbf65ecd31693a811ddd6e2e449b1878b835b563cf0a28d6a9c4bf38`）并运行 `hermes --version`。本地探针输出第一行是 `Hermes Agent v0.22.1 (2026.9.24) · stable · local 297552a9d646`。四组对照实验和 `AETHER_LIVE_MODEL_KEY` 仍是 not_run，没有领先结论。只有当前 head 的 CI 和 Sonar 都绿，才能把 F24 标成 done。
+- F25 是 in_progress。恢复会在同一事务里写回 `tables.json`，并把 `PENDING`/`DELIVERING` 改成 `STOPPED`。产物先复制到临时目录再改名。漏洞库仍是 offline not_run。同样要等当前 head 变绿。
+- F26 是 blocked，不是 done。`live_ready` 是 false。要跑真实探针必须同时提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`。缺任何一个就是 blocked，脚本模型不代替。
+- `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
 - CodeGraph 产品开关仍然关闭，`codegraph_enabled` 是 false，仍是 not_run。
-- 下一步：补上那三个 live 变量后再跑 F26 探针。不宣布 live 可用。
+- 下一步：等这次 head 的 PR CI 和 Sonar。绿了再把 F24 和 F25 标 done。F26 保持 blocked。
