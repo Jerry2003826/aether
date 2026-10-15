@@ -190,7 +190,6 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
             project_id=project_id,
             task_id=task_id,
             goal=goal,
-            sources=sources,
             budget=start_payload.get("budget"),
             allowed_ids=allowed,
         )
@@ -874,7 +873,6 @@ def _ensure_live_answer(
     project_id: str,
     task_id: str,
     goal: str,
-    sources: list[str],
     budget: Any,
     allowed_ids: list[str] | None = None,
 ) -> str | dict[str, str] | None:
@@ -888,7 +886,6 @@ def _ensure_live_answer(
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
     if fresh_state != "ok":
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法或不可读", code="allowed_sources_invalid", missing=missing_sources)
-    sources = fresh
     spec = _budget_from_payload(budget)
     ledger = BudgetLedger(database)
     try:
@@ -914,7 +911,7 @@ def _ensure_live_answer(
     cost_ceiling = int(int(spec["max_cost_micro_usd"]) * (1 - fraction))
     tokens_left = token_ceiling - int(account["tokens_used"]) - int(account["tokens_held"])
     cost_left = cost_ceiling - int(account["actual_known_micro_usd"]) - int(account["held_micro_usd"])
-    prompt = research_prompt(goal=goal, sources=sources)
+    prompt = research_prompt(goal=goal, sources=fresh)
     input_estimate = estimate_tokens(prompt)
     output_cap = min(OUTPUT_TOKEN_CAP, max(0, tokens_left - input_estimate))
     request_key = f"research-{task_id}"
