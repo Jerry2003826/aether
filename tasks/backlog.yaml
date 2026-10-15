@@ -386,7 +386,7 @@ tickets:
   - stdio argv无shell拼接；用户内容不能安装新server
   - schema漂移隔离，annotations不能自授权限
   - 真正连接fixture MCP，超时/重连/未知结果与secret隔离通过
-  status: not_started
+  status: in_progress
   evidence: []
 - id: F18
   stage: G5

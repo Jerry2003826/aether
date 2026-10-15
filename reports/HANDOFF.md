@@ -51,4 +51,6 @@ P1 覆盖：
 - F16 done。PR #1 CI run `38682012230`：unit `32 passed`，integration `103 passed, 2 warnings in 70.39s`。SonarCloud quality gate OK。删除是 tombstone：visibility epoch 增加，BM25 generation 退休，已删 chunk 的向量被清空，推荐特征快照记为失效。晚到的向量和记忆文本写不回去。结果写明备份和 Temporal 历史还在。对照表 `reports/f16_criteria.md`。
 - F14 done。PR #1 CI run `38683576919`：unit `32 passed`，integration `112 passed, 2 warnings in 70.42s`。SonarCloud quality gate OK。评分器用 `python -I`，先导入 pytest，再把 `/work/src` 加到 `sys.path` 末尾。顶层 `pytest.py` 和 `sitecustomize.py` 直接失败。隔离结果只认评分器写出的第一行。
 - F16 done。同一 CI run。搜索缓存同时绑定 visibility epoch 和索引代，删除后不再返回已删内容。
-- CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。下一步：F17 官方 MCP SDK。live 模型、Hermes 仍是 not_run。
+- CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。
+- F17 in_progress。stdio 客户端改为官方 `mcp` 2.3.0。夹具服务器也由这个 SDK 启动。本地 `tests/unit/test_mcp.py` 为 4 passed。等这次 PR 的 CI 和 SonarCloud。对照表 `reports/f17_criteria.md`。
+- live 模型、Hermes 仍是 not_run。

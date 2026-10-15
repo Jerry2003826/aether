@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F17 with the official MCP Python SDK.",
+  "next_action": "Wait for PR CI and SonarCloud on the official MCP client, then continue F18.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
@@ -97,5 +97,9 @@
     "status": "done",
     "physical_delete": false,
     "ci_run": "38683576919"
+  },
+  "f17": {
+    "status": "in_progress",
+    "sdk": "mcp==2.3.0"
   }
 }

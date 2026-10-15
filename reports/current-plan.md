@@ -1,11 +1,11 @@
-# F16 记忆删除
+# F17 MCP
 
-目标：忘记一条记忆或一个 chunk 时先做 tombstone，抬高 visibility epoch，并让旧的向量和摘要任务写不回去。
+目标：用官方 `mcp` Python SDK 连接本地夹具服务器。argv 不经过 shell。schema 漂移隔离。annotations 不能授权。
 
-合同：`docs/05_knowledge.md`，`docs/09_data.md`，`docs/14_BOUNDARIES_AND_FAILURES.md`。
+合同：`docs/06_security.md`，`config/tools.example.yaml`。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py`
+测试：`uv run --locked --no-build pytest -q tests/unit/test_mcp.py`
 
-进度：本地测试已通过。还没标 done。
+进度：本地 4 passed。还没标 done。
 
 阻塞：无。
