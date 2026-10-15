@@ -344,8 +344,12 @@ tickets:
   - 固定release/schema/遥测关闭并实测公网阻断
   - snapshot而非host path，改码hash失效、跨project拒绝
   - 取消能清理；fallback明确；成本包含冷索引；不减少trusted suite
-  status: in_progress
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/codegraph_adapter.py
+  - tests/integration/test_codegraph.py
+  - config/codegraph.lock.json
+  - reports/f15_criteria.md
 - id: F16
   stage: G5
   scope: core

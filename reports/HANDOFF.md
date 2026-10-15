@@ -47,5 +47,5 @@ P1 覆盖：
 - F12 done。没有测试产物的 `observed_test` 降为 proposed。同一 CI run 通过。对照表 `reports/f12_criteria.md`。
 - F13 done。GitHub runner 上的真实容器测试通过：同一 job 只有一个容器，重启后重新挂上；容器内公网、元数据和 Docker socket 不可达，密钥不在环境里，只能打到该 job 的脚本网关。对照表 `reports/f13_criteria.md`。
 - F14 done。PR #1 CI run `38678232085`：unit `32 passed`，integration `100 passed, 2 warnings in 45.73s`。SonarCloud quality gate OK。评分在沙箱里只跑绑定套件。对照表 `reports/f14_criteria.md`。
-- F15 in_progress。适配器安装核对过 sha512 的 `@colbymchenry/codegraph@1.6.2`，CLI 在无网络命名空间里跑，没有执行 `codegraph install`。产品开关仍是关闭。本地 `uv run --locked --no-build pytest -q tests/integration/test_codegraph.py` 为 `2 passed`。还没把这项标 done，等这次 PR 的 CI 和 SonarCloud。对照表 `reports/f15_criteria.md`。
-- live 模型、Hermes 仍是 not_run。CodeGraph 产品启用仍是 not_run。
+- F15 done。PR #1 CI run `38681057899`：unit `32 passed`，integration `102 passed, 2 warnings in 52.97s`。SonarCloud quality gate OK，可靠性、安全、可维护性都是 1。CodeGraph 1.6.2 的 CLI 在 `--network none` 容器里跑，包哈希已核对。产品开关仍然关闭，所以 `codegraph_enabled` 仍是 not_run。对照表 `reports/f15_criteria.md`。
+- 下一步：F16 记忆纠正和派生索引失效。live 模型、Hermes 仍是 not_run。
