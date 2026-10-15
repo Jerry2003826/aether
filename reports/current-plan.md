@@ -1,15 +1,15 @@
-# F02 领域迁移、单 owner 认证与项目隔离
+# F03 不可变产物与安全导入
 
-目标：把 `contracts/schema.sql` 变成可重复的迁移，用运行时数据库角色验证 RLS 和项目隔离，并提供 bootstrap/session API。
+目标：项目内 content-addressed 产物，上传校验 hash、长度和媒体类型，拒绝 zip-slip、符号链接、硬链接和解压超额。
 
-合同：`contracts/schema.sql`、`contracts/openapi.yaml` 的 auth/project/health。
+合同：`contracts/schema.sql` 的 artifacts；`POST/GET/DELETE /v1/projects/{project_id}/artifacts`。
 
-拟改路径：`migrations/`、`packages/storage/aether_storage/`、`services/api/aether_api/`、`tests/integration/`。
+拟改路径：`packages/storage/aether_storage/artifacts.py`、`services/api/aether_api/app.py`、`tests/integration/test_artifacts.py`。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_auth.py tests/integration/test_rls.py`
+测试：`AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_artifacts.py`
 
 进度：未开始。
 
 结果：无。
 
-阻塞：无。F01 的权重缺口不阻塞本任务。
+阻塞：无。

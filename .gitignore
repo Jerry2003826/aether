@@ -8,6 +8,7 @@ __pycache__/
 .pytest_cache/
 node_modules/
 .next/
+*.tsbuildinfo
 *.log
 !reports/reference-tests.log
 !reports/pack-verification.log

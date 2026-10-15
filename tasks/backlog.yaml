@@ -66,8 +66,12 @@ tickets:
   - 实际runtime DB角色测RLS/复合FK，非superuser
   - CSRF/Origin/会话撤销/默认loopback验证
   - 跨project列表/详情/连接池scope隔离通过
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - migrations/versions/0001_initial.py
+  - tests/integration/test_auth.py
+  - tests/integration/test_rls.py
+  - tests/integration/test_migration.py
 - id: F03
   stage: G1
   scope: core

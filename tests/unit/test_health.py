@@ -4,7 +4,7 @@ from unittest import mock
 
 from fastapi.testclient import TestClient
 
-from aether_api.health import create_app
+from aether_api.app import create_app
 
 
 class HealthTests(unittest.TestCase):

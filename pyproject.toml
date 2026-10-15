@@ -26,11 +26,11 @@ dependencies = [
 dev = ["pytest>=8"]
 
 [tool.setuptools.packages.find]
-where = ["packages/domain", "services/api"]
+where = ["packages/domain", "packages/storage", "services/api"]
 include = ["aether_*"]
 
 [tool.pytest.ini_options]
-pythonpath = [".", "packages/domain", "services/api"]
+pythonpath = [".", "packages/domain", "packages/storage", "services/api"]
 testpaths = ["tests/unit", "tests/integration"]
 
 [tool.uv]
