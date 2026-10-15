@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import json
 import os
 import signal
@@ -100,6 +101,9 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     resolved = endpoints or endpoints_from_env()
     configure(resolved)
     client = await Client.connect(resolved.temporal_address)
+    executor = concurrent.futures.ThreadPoolExecutor(max_workers=8, thread_name_prefix="aether-blocking")
+    loop = asyncio.get_running_loop()
+    loop.set_default_executor(executor)
     worker = Worker(
         client,
         task_queue=resolved.task_queue,
@@ -111,21 +115,23 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     verifier = Database(resolved.verifier_url)
     store = ArtifactStore(resolved.artifact_root, database)
     stop = asyncio.Event()
-    loop = asyncio.get_running_loop()
     for signame in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signame, stop.set)
-    async with worker:
-        print("aether-worker-ready", flush=True)
-        while not stop.is_set():
-            await deliver_pending(
-                dispatcher,
-                client,
-                task_queue=resolved.task_queue,
-                workflow=DurableTaskWorkflow,
-                intake_pause_seconds=resolved.intake_pause_seconds,
-            )
-            route_pending(dispatcher, database, verifier, store)
-            try:
-                await asyncio.wait_for(stop.wait(), timeout=0.25)
-            except TimeoutError:
-                continue
+    try:
+        async with worker:
+            print("aether-worker-ready", flush=True)
+            while not stop.is_set():
+                await deliver_pending(
+                    dispatcher,
+                    client,
+                    task_queue=resolved.task_queue,
+                    workflow=DurableTaskWorkflow,
+                    intake_pause_seconds=resolved.intake_pause_seconds,
+                )
+                await asyncio.to_thread(route_pending, dispatcher, database, verifier, store)
+                try:
+                    await asyncio.wait_for(stop.wait(), timeout=0.25)
+                except TimeoutError:
+                    continue
+    finally:
+        executor.shutdown(wait=False, cancel_futures=False)

@@ -11,6 +11,14 @@ from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 
+def _detail(value: object) -> dict:
+    if isinstance(value, str):
+        return json.loads(value)
+    if isinstance(value, dict):
+        return dict(value)
+    return {}
+
+
 class BudgetError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -167,6 +175,219 @@ class BudgetLedger:
             ).rowcount
             if updated != 1:
                 raise BudgetError("not_reserved")
+
+    def prepare_model_call(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        amount: int,
+        role: str,
+        tokens: int,
+        model_alias: str,
+        prompt_sha256: str,
+        output_cap: int,
+        source_snapshot_sha256: str,
+    ) -> dict[str, object]:
+        """Reserve once, then either send, reuse a stored response, or stop.
+
+        A previous reservation is not permission to call the provider again.
+        """
+        if amount < 0 or tokens < 0:
+            raise BudgetError("invalid_amount")
+        request = {
+            "alias": model_alias,
+            "prompt_sha256": prompt_sha256,
+            "max_tokens": output_cap,
+            "source_snapshot_sha256": source_snapshot_sha256,
+        }
+        digest = sha256_text(json.dumps({
+            "project_id": project_id,
+            "task_id": task_id,
+            "request_key": request_key,
+            "model_alias": model_alias,
+            "request": request,
+        }, sort_keys=True, separators=(",", ":")))
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text(
+                    "SELECT id, limit_micro_usd, spent_micro_usd, held_micro_usd, token_limit, tokens_used, tokens_held, "
+                    "max_requests, requests_admitted, verification_reserve_fraction "
+                    "FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            existing = conn.execute(
+                text(
+                    "SELECT usage_status, request_sha256, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if existing is not None:
+                detail = _detail(existing["usage_detail"])
+                if detail.get("prompt_sha256") not in {None, prompt_sha256}:
+                    return {"action": "conflict"}
+                if detail.get("dispatch_state") == "response_recorded":
+                    return {"action": "reuse", "book_result": str(detail.get("book_result") or "replayed"), "response": detail}
+                if existing["usage_status"] == "reserved":
+                    conn.execute(
+                        text(
+                            "UPDATE model_requests SET usage_status = 'unknown', actual_micro_usd = NULL "
+                            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                        ),
+                        {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+                    )
+                return {"action": "unreconciled"}
+            if output_cap < 1 or amount < 1 or tokens < 1:
+                return {"action": "denied"}
+            fraction = float(account["verification_reserve_fraction"])
+            ceiling = int(account["limit_micro_usd"] * (1 - fraction))
+            token_ceiling = int(account["token_limit"] * (1 - fraction))
+            if account["spent_micro_usd"] + account["held_micro_usd"] + amount > ceiling:
+                return {"action": "denied"}
+            if account["tokens_used"] + account["tokens_held"] + tokens > token_ceiling or account["requests_admitted"] + 1 > account["max_requests"]:
+                return {"action": "denied"}
+            detail = {
+                "reserved_tokens": tokens,
+                "dispatch_state": "dispatched",
+                "prompt_sha256": prompt_sha256,
+                "output_cap": output_cap,
+                "source_snapshot_sha256": source_snapshot_sha256,
+            }
+            conn.execute(
+                text(
+                    "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
+                    "VALUES (:project_id, :task_id, :request_key, :digest, :role, :model_alias, :amount, 'reserved', CAST(:detail AS jsonb))"
+                ),
+                {
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": request_key,
+                    "digest": digest,
+                    "role": role,
+                    "model_alias": model_alias,
+                    "amount": amount,
+                    "detail": json.dumps(detail),
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, "
+                    "requests_admitted = requests_admitted + 1, version = version + 1 WHERE id = :id"
+                ),
+                {"amount": amount, "tokens": tokens, "id": account["id"]},
+            )
+        return {"action": "send"}
+
+    def record_model_response(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        output: str,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        cost_micro_usd: int | None,
+        upstream_model: str | None,
+        requested_alias: str | None,
+    ) -> str:
+        """Store the provider response before any later artifact write.
+
+        Known tokens are booked even when the price is missing. A reported
+        price above the reservation is kept and not settled as if it fit.
+        """
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_status, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().one()
+            detail = _detail(request["usage_detail"])
+            if detail.get("dispatch_state") == "response_recorded":
+                return str(detail.get("book_result") or "replayed")
+            reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            reserved_cost = int(request["reserved_micro_usd"])
+            reported_tokens = None if input_tokens is None or output_tokens is None else input_tokens + output_tokens
+            tokens_fit = reported_tokens is not None and reported_tokens <= reserved_tokens
+            if tokens_fit and cost_micro_usd is not None and cost_micro_usd <= reserved_cost:
+                book_result = "settled"
+                usage_status = "known"
+                actual = cost_micro_usd
+            elif tokens_fit and cost_micro_usd is None:
+                book_result = "held"
+                usage_status = "unknown"
+                actual = None
+            else:
+                book_result = "overrun"
+                usage_status = "observed"
+                actual = cost_micro_usd
+            detail.update(
+                {
+                    "dispatch_state": "response_recorded",
+                    "output": output,
+                    "book_result": book_result,
+                    "reported_input_tokens": input_tokens,
+                    "reported_output_tokens": output_tokens,
+                    "reported_cost_micro_usd": cost_micro_usd,
+                    "cost_source": "provider_response" if cost_micro_usd is not None else "unreported",
+                    "reconciliation": "unreconciled" if book_result == "overrun" else "booked",
+                    "upstream_model": upstream_model,
+                    "requested_alias": requested_alias,
+                }
+            )
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = :usage_status, actual_micro_usd = :actual, "
+                    "input_tokens = :input_tokens, output_tokens = :output_tokens, model_revision = :upstream, "
+                    "usage_detail = CAST(:detail AS jsonb), completed_at = CASE WHEN :usage_status = 'known' THEN now() ELSE completed_at END "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                ),
+                {
+                    "usage_status": usage_status,
+                    "actual": actual,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "upstream": upstream_model,
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": request_key,
+                },
+            )
+            if book_result == "settled":
+                conn.execute(
+                    text(
+                        "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :reserved, spent_micro_usd = spent_micro_usd + :actual, "
+                        "tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, version = version + 1 WHERE id = :id"
+                    ),
+                    {
+                        "reserved": reserved_cost,
+                        "actual": cost_micro_usd,
+                        "reserved_tokens": reserved_tokens,
+                        "tokens": reported_tokens,
+                        "id": account["id"],
+                    },
+                )
+            elif tokens_fit:
+                conn.execute(
+                    text(
+                        "UPDATE budget_accounts SET tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, "
+                        "version = version + 1 WHERE id = :id"
+                    ),
+                    {"reserved_tokens": reserved_tokens, "tokens": reported_tokens, "id": account["id"]},
+                )
+        return book_result
 
     def snapshot(self, *, owner_id: str, project_id: str, task_id: str) -> dict:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

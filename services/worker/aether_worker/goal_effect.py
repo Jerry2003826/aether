@@ -7,6 +7,7 @@ stays in place; a new observation gets a new row.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
@@ -23,13 +24,11 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
-from aether_worker.research import cites_fact, offline_fact, record_verification, research_prompt, scripted_answer
+from aether_worker.research import cites_fact, estimate_tokens, goal_completion_state, record_verification, required_facts, research_prompt, scripted_answer
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-4"
-MIN_CALL_TOKENS = 8
-CALL_TOKEN_RESERVE = 512
-CALL_COST_RESERVE = 50_000
+VERIFIER_VERSION = "goal-artifact-5"
+OUTPUT_TOKEN_CAP = 256
 DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -77,25 +76,43 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+async def _run_blocking(func, *args):
+    """Run sync database, disk, and provider work off the activity event loop.
+
+    The thread is not killed when the activity is cancelled. Publishing still
+    checks pause and cancel after the thread returns, so a late response is a
+    receipt rather than a new success.
+    """
+    work = asyncio.create_task(asyncio.to_thread(func, *args))
+    while True:
+        done, _pending = await asyncio.wait({work}, timeout=2)
+        if work in done:
+            return work.result()
+        try:
+            activity.heartbeat("running")
+        except RuntimeError:
+            continue
+
+
 @activity.defn
 async def prepare_task(payload: dict) -> dict[str, str]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
-    return prepare_task_effect(ENDPOINTS, payload)
+    return await _run_blocking(prepare_task_effect, ENDPOINTS, payload)
 
 
 @activity.defn
 async def execute_task(payload: dict) -> dict[str, str]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
-    return execute_task_effect(ENDPOINTS, payload)
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
 
 
 @activity.defn
 async def apply_task_control(payload: dict) -> dict[str, Any]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
-    return apply_task_control_effect(ENDPOINTS, payload)
+    return await _run_blocking(apply_task_control_effect, ENDPOINTS, payload)
 
 
 @activity.defn
@@ -151,11 +168,11 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     start_payload = _task_start_payload(worker, project_id, task_id)
     allowed_ids = start_payload.get("allowed_source_ids")
     allowed = allowed_ids if isinstance(allowed_ids, list) else None
-    sources, _snapshot, source_state = _source_snapshot(worker, store, owner_id, project_id, allowed_ids=allowed)
+    sources, _snapshot, source_state, missing_sources = _source_snapshot(worker, store, owner_id, project_id, allowed_ids=allowed)
     if source_state == "empty":
         return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
     if source_state == "invalid":
-        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法", code="allowed_sources_invalid")
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法或不可读", code="allowed_sources_invalid", missing=missing_sources)
     if not sources:
         actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
         return {"status": actual, "task_id": task_id}
@@ -165,7 +182,18 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if endpoints.research_provider == "scripted":
         answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
     else:
-        answer = _ensure_live_answer(endpoints, worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources, budget=start_payload.get("budget"))
+        answer = _ensure_live_answer(
+            endpoints,
+            worker,
+            store,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            goal=goal,
+            sources=sources,
+            budget=start_payload.get("budget"),
+            allowed_ids=allowed,
+        )
         if isinstance(answer, dict):
             return answer
     if answer is None:
@@ -504,7 +532,7 @@ def _ensure_verification(
     store = ArtifactStore(endpoints.artifact_root, verifier)
     ledger, deleted = _artifact_ledger(verifier, owner_id, project_id, artifact_id)
     observed, readable = _observe_bytes(store, owner_id, project_id, artifact_id)
-    sources, snapshot, _source_state = _source_snapshot(verifier, store, owner_id, project_id, allowed_ids=allowed_ids)
+    sources, snapshot, source_state, _missing = _source_snapshot(verifier, store, owner_id, project_id, allowed_ids=allowed_ids)
     authoritative = _load_authoritative_contract(verifier, owner_id, project_id, task_id)
     contract_ok = (
         authoritative is not None
@@ -513,7 +541,17 @@ def _ensure_verification(
         and authoritative["stored_digest"] == authoritative["digest"]
     )
     byte_ok = (not deleted) and readable is not None and ledger is not None and observed == ledger
-    goal_state = _goal_state(readable, goal, sources)
+    if source_state == "invalid":
+        goal_state = "fail"
+    else:
+        goal_state = _goal_state(readable, goal, sources)
+    answer_text = ""
+    if readable is not None:
+        try:
+            answer_text = readable.decode("utf-8")
+        except UnicodeError:
+            answer_text = ""
+    cited = any(cites_fact(answer_text, fact) for fact in required_facts(source_text="\n".join(sources), goal=goal))
     stored_artifact_sha = ledger or observed
     if not contract_ok:
         outcome = "fail"
@@ -567,7 +605,7 @@ def _ensure_verification(
         "pipeline": "pass",
         "byte_integrity": "pass" if byte_ok else "fail",
         "goal_completion": goal_state,
-        "citation": "pass" if goal_state == "pass" else "fail",
+        "citation": "pass" if cited else "fail",
         "contract_binding": "pass" if contract_ok else "fail",
     }
     stored = store.put(
@@ -695,9 +733,9 @@ def _source_snapshot(
     project_id: str,
     *,
     allowed_ids: list[str] | None = None,
-) -> tuple[list[str], str, str]:
+) -> tuple[list[str], str, str, list[str]]:
     if allowed_ids is not None and len(allowed_ids) == 0:
-        return [], sha256_text(""), "empty"
+        return [], sha256_text(""), "empty", []
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         if allowed_ids is None:
             rows = conn.execute(
@@ -720,23 +758,28 @@ def _source_snapshot(
                     {"project_id": project_id, "id": item},
                 ).mappings().first()
                 if row is None or row["deleted_at"] is not None or row["task_id"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
-                    return [], sha256_text("invalid"), "invalid"
+                    return [], sha256_text("invalid"), "invalid", [str(item)]
                 rows.append(row)
     texts: list[str] = []
     parts: list[str] = []
+    explicit = allowed_ids is not None
     for row in rows:
         artifact_id = str(row["id"])
         try:
             data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
         except ArtifactError:
+            if explicit:
+                return [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
             parts.append(f"{artifact_id}:unreadable")
             continue
         parts.append(f"{artifact_id}:{row['sha256']}")
         try:
             texts.append(data.decode("utf-8"))
         except UnicodeError:
+            if explicit:
+                return [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
             continue
-    return texts, sha256_text("\n".join(parts)), "ok"
+    return texts, sha256_text("\n".join(parts)), "ok", []
 
 
 def _missing_live_settings(endpoints: WorkerEndpoints) -> list[str]:
@@ -833,12 +876,19 @@ def _ensure_live_answer(
     goal: str,
     sources: list[str],
     budget: Any,
+    allowed_ids: list[str] | None = None,
 ) -> str | dict[str, str] | None:
     existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
         return existing["id"]
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
+    fresh, snapshot_sha, fresh_state, missing_sources = _source_snapshot(database, store, owner_id, project_id, allowed_ids=allowed_ids)
+    if fresh_state == "empty":
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
+    if fresh_state != "ok":
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法或不可读", code="allowed_sources_invalid", missing=missing_sources)
+    sources = fresh
     spec = _budget_from_payload(budget)
     ledger = BudgetLedger(database)
     try:
@@ -854,84 +904,102 @@ def _ensure_live_answer(
         )
     except IntegrityError:
         pass
-    if _task_age_seconds(database, owner_id, project_id, task_id) > int(spec["active_seconds"]):
+    # active_seconds is wall time from tasks.created_at, including queue and pause.
+    age = _task_age_seconds(database, owner_id, project_id, task_id)
+    if age > int(spec["active_seconds"]):
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
-    snapshot = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
+    account = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
     fraction = float(spec["verification_reserve_fraction"])
     token_ceiling = int(int(spec["max_tokens"]) * (1 - fraction))
     cost_ceiling = int(int(spec["max_cost_micro_usd"]) * (1 - fraction))
-    request_ceiling = int(spec["max_model_requests"])
-    tokens_left = token_ceiling - int(snapshot["tokens_used"]) - int(snapshot["tokens_held"])
-    cost_left = cost_ceiling - int(snapshot["actual_known_micro_usd"]) - int(snapshot["held_micro_usd"])
-    requests_left = request_ceiling - int(snapshot["request_count"])
-    if tokens_left < MIN_CALL_TOKENS:
-        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="tokens")
-    if cost_left < 1:
-        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="cost")
-    if requests_left < 1:
-        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="calls")
-    reserve_tokens = min(CALL_TOKEN_RESERVE, tokens_left)
-    reserve_cost = min(CALL_COST_RESERVE, cost_left)
-    if reserve_tokens < MIN_CALL_TOKENS:
-        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="tokens")
+    tokens_left = token_ceiling - int(account["tokens_used"]) - int(account["tokens_held"])
+    cost_left = cost_ceiling - int(account["actual_known_micro_usd"]) - int(account["held_micro_usd"])
+    prompt = research_prompt(goal=goal, sources=sources)
+    input_estimate = estimate_tokens(prompt)
+    output_cap = min(OUTPUT_TOKEN_CAP, max(0, tokens_left - input_estimate))
     request_key = f"research-{task_id}"
-    reserved = ledger.reserve(
+    prompt_sha = sha256_text(prompt)
+    prepared = ledger.prepare_model_call(
         owner_id=owner_id,
         project_id=project_id,
         task_id=task_id,
         request_key=request_key,
-        amount=reserve_cost,
+        amount=max(0, cost_left),
         role="research",
-        tokens=reserve_tokens,
+        tokens=max(0, input_estimate + output_cap),
         model_alias=endpoints.live_model_alias,
-        request={"alias": endpoints.live_model_alias},
+        prompt_sha256=prompt_sha,
+        output_cap=output_cap,
+        source_snapshot_sha256=snapshot_sha,
     )
-    if not reserved:
+    action = str(prepared["action"])
+    if action == "denied":
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="reservation")
-    if _block_execution(database, owner_id, project_id, task_id) is not None:
-        return None
-    gateway = ModelGateway(
-        database,
-        upstream_base=endpoints.live_model_base,
-        provider_key=endpoints.live_model_key,
-        timeout=endpoints.live_timeout_seconds,
-    )
-    token = gateway.issue_token(
-        owner_id=owner_id,
-        project_id=project_id,
-        capabilities=["knowledge:read"],
-        aliases=[endpoints.live_model_alias],
-    )
-    prompt = research_prompt(goal=goal, sources=sources)
-    try:
-        result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": min(256, reserve_tokens)})
-    except GatewayDenied:
-        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
-        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")
-    _remember_model_call(database, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, result=result)
-    if result.get("usage_status") == "unknown" and not result.get("output"):
-        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
-        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游超时", code="upstream_timeout")
-    output = str(result.get("output") or "").strip()
-    if not output:
-        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
-        return ""
-    reported_tokens = int(result.get("input_tokens") or 0) + int(result.get("output_tokens") or 0)
-    cost = result.get("actual_cost_micro_usd")
-    if result.get("usage_status") != "known" or cost is None or reported_tokens > reserve_tokens or int(cost) > reserve_cost:
-        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
-    else:
-        ledger.settle(
+    if action in {"unreconciled", "conflict"}:
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型调用结果未能对账", code="live_call_unreconciled")
+    if action == "send":
+        remaining = max(0.05, float(spec["active_seconds"]) - _task_age_seconds(database, owner_id, project_id, task_id))
+        gateway = ModelGateway(
+            database,
+            upstream_base=endpoints.live_model_base,
+            provider_key=endpoints.live_model_key,
+            timeout=min(float(endpoints.live_timeout_seconds), remaining),
+        )
+        token = gateway.issue_token(
+            owner_id=owner_id,
+            project_id=project_id,
+            capabilities=["knowledge:read"],
+            aliases=[endpoints.live_model_alias],
+        )
+        try:
+            result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
+        except GatewayDenied:
+            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")
+        if result.get("usage_status") == "unknown" and not result.get("output"):
+            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游超时", code="upstream_timeout")
+        output = str(result.get("output") or "").strip()
+        if not output:
+            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return ""
+        input_tokens = result.get("input_tokens")
+        output_tokens = result.get("output_tokens")
+        book_result = ledger.record_model_response(
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            actual=int(cost),
-            input_tokens=int(result.get("input_tokens") or 0),
-            output_tokens=int(result.get("output_tokens") or 0),
+            output=output,
+            input_tokens=None if input_tokens is None else int(input_tokens),
+            output_tokens=None if output_tokens is None else int(output_tokens),
+            cost_micro_usd=None if result.get("actual_cost_micro_usd") is None else int(result["actual_cost_micro_usd"]),
+            upstream_model=None if result.get("upstream_model") is None else str(result["upstream_model"]),
+            requested_alias=None if result.get("requested_alias") is None else str(result["requested_alias"]),
         )
-    if _block_execution(database, owner_id, project_id, task_id) is not None:
-        return None
+        recorded = {
+            "output": output,
+            "reported_input_tokens": input_tokens,
+            "reported_output_tokens": output_tokens,
+            "reported_cost_micro_usd": result.get("actual_cost_micro_usd"),
+            "cost_source": "provider_response" if result.get("actual_cost_micro_usd") is not None else "unreported",
+            "upstream_model": result.get("upstream_model"),
+            "requested_alias": result.get("requested_alias"),
+            "book_result": book_result,
+        }
+    else:
+        recorded = dict(prepared.get("response") or {})
+        book_result = str(prepared.get("book_result") or recorded.get("book_result") or "replayed")
+        output = str(recorded.get("output") or "").strip()
+        if not output:
+            return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型调用结果未能对账", code="live_call_unreconciled")
+    if book_result == "overrun":
+        return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型回报超出预留，需要对账", code="budget_unreconciled")
+    if _task_age_seconds(database, owner_id, project_id, task_id) > int(spec["active_seconds"]):
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
+    blocked = _block_execution(database, owner_id, project_id, task_id)
+    if blocked is not None:
+        return {"status": blocked, "task_id": task_id}
     stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
     _bind_task_artifact(
         database,
@@ -952,13 +1020,13 @@ def _ensure_live_answer(
             "calls": 1,
             "model_mode": "live",
             "offline": False,
-            "requested_alias": result.get("requested_alias"),
-            "upstream_model": result.get("upstream_model"),
-            "input_tokens": result.get("input_tokens"),
-            "output_tokens": result.get("output_tokens"),
-            "cost_micro_usd": result.get("actual_cost_micro_usd"),
-            "cost_status": result.get("cost_status") or "unknown",
-            "usage_status": result.get("usage_status"),
+            "requested_alias": recorded.get("requested_alias"),
+            "upstream_model": recorded.get("upstream_model"),
+            "input_tokens": recorded.get("reported_input_tokens"),
+            "output_tokens": recorded.get("reported_output_tokens"),
+            "cost_micro_usd": recorded.get("reported_cost_micro_usd"),
+            "cost_status": "known" if recorded.get("cost_source") == "provider_response" else "unknown",
+            "usage_status": "known" if book_result == "settled" else "unknown",
         },
     )
     return str(stored["artifact_id"])
@@ -1039,16 +1107,7 @@ def _goal_state(data: bytes | None, goal: str, sources: list[str]) -> str:
         answer = data.decode("utf-8").strip()
     except UnicodeError:
         return "fail"
-    fact = offline_fact(source_text="\n".join(sources), goal=goal)
-    if not fact:
-        return "unverifiable"
-    if not answer or answer == goal.strip():
-        return "fail"
-    if fact in answer:
-        return "pass"
-    if cites_fact(answer, fact):
-        return "pass"
-    return "uncited"
+    return goal_completion_state(answer=answer, goal=goal, source_text="\n".join(sources))
 
 
 def _artifact_ledger(database: Database, owner_id: str, project_id: str, artifact_id: str) -> tuple[str | None, bool]:

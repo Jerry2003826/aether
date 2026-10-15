@@ -7,6 +7,8 @@ import re
 from datetime import datetime
 from typing import Any
 
+import tiktoken
+
 from sqlalchemy import text
 from temporalio import activity
 
@@ -98,7 +100,7 @@ def research_prompt(*, goal: str, sources: list[str]) -> str:
 
 
 def cites_fact(answer: str, fact: str) -> bool:
-    """The answer quotes the full source line or a contiguous span of at least 12 characters."""
+    """Citation clue only. A 12-character span does not prove the goal is done."""
     if len(fact) < 8 or not answer:
         return False
     if fact in answer:
@@ -106,6 +108,76 @@ def cites_fact(answer: str, fact: str) -> bool:
     if len(fact) < 12:
         return False
     return any(fact[start : start + 12] in answer for start in range(0, len(fact) - 11))
+
+
+_TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+_NUMBER = re.compile(r"\d+(?:\.\d+)?|[零〇一二三四五六七八九十百千万亿]+")
+
+
+def estimate_tokens(text: str) -> int:
+    """Budgeting count for the text we are about to send.
+
+    cl100k is a local tokenizer, not the provider invoice. The larger of that
+    count and the CJK character count is what the reservation must cover.
+    """
+    counted = len(_TOKEN_ENCODING.encode(text))
+    cjk = sum(1 for char in text if "\u4e00" <= char <= "\u9fff")
+    return max(counted, cjk)
+
+
+def required_facts(*, source_text: str, goal: str) -> list[str]:
+    """Every source line that overlaps the goal. One overlap is not the whole question."""
+    goal_text = goal.strip()
+    lines: list[str] = []
+    for line in source_text.splitlines():
+        fact = line.strip()
+        if len(fact) < 8 or fact == goal_text or fact in goal_text:
+            continue
+        lines.append(fact)
+    if not lines or _outside_excerpt(goal_text):
+        return []
+    overlapping = [fact for fact in lines if _tokens(goal_text) & _tokens(fact)]
+    if overlapping:
+        return overlapping
+    if len(lines) == 1 and _excerpt_request(goal_text):
+        return [lines[0]]
+    return []
+
+
+def _numbers(text: str) -> list[str]:
+    return _NUMBER.findall(text)
+
+
+def _covers(answer: str, fact: str) -> bool:
+    if fact in answer:
+        return True
+    numbers = _numbers(fact)
+    return bool(numbers) and all(number in _numbers(answer) for number in numbers)
+
+
+def fact_satisfied(answer: str, fact: str, goal: str) -> bool:
+    """The answer carries this fact's values and does not replace them."""
+    allowed = set(_numbers(fact)) | set(_numbers(goal))
+    if any(number not in allowed for number in _numbers(answer)):
+        return False
+    return _covers(answer, fact)
+
+
+def goal_completion_state(*, answer: str, goal: str, source_text: str) -> str:
+    """Separate goal satisfaction from a short citation overlap."""
+    facts = required_facts(source_text=source_text, goal=goal)
+    if not facts:
+        return "unverifiable"
+    if not answer or answer.strip() == goal.strip():
+        return "fail"
+    allowed = set(_numbers(goal))
+    for fact in facts:
+        allowed.update(_numbers(fact))
+    if any(number not in allowed for number in _numbers(answer)):
+        return "fail"
+    if all(_covers(answer, fact) for fact in facts):
+        return "pass"
+    return "fail"
 
 
 def scripted_answer(*, source_text: str, goal: str) -> str:

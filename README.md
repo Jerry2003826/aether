@@ -210,7 +210,7 @@ export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
 uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
 ```
 
-`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。上传接口返回 `artifact_id`。失败时结果里有 `step`、`error_type` 和去掉密钥后的 `error_message`。监督者在 head `7eb911b` 上用真实 key 跑过一次：退出码 0，`status=probed`，任务 `SUCCEEDED`，1 次 `research.call`，1 次验证，`cost_status=unknown`。原样结果在 [`reports/live_task_check.json`](reports/live_task_check.json)，文件 sha256 是 `085b8b3224c305fd5ad0fece2069e939237d7ed04a8fc262862d61943fb8fc91`。结果里的 `live_ready` 是 `false`。这次检查不改交付矩阵里的 `live_ready`。
+`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。上传接口返回 `artifact_id`。失败时结果里有 `step`、`error_type` 和去掉密钥后的 `error_message`。监督者在 head `7eb911b` 上用真实 key 跑过一次：退出码 0，`status=probed`，任务 `SUCCEEDED`，1 次 `research.call`，1 次验证，`cost_status=unknown`。原样结果在 [`reports/live_task_check.json`](reports/live_task_check.json)，文件 sha256 是 `085b8b3224c305fd5ad0fece2069e939237d7ed04a8fc262862d61943fb8fc91`。结果里的 `live_ready` 是 `false`。这次检查不改交付矩阵里的 `live_ready`。第四轮之后，只重叠十二个字不再判目标完成；显式来源有一份不可读会停在 `NEEDS_REVIEW`。上面两条命令仍然可以重跑。
 
 ## 当前状态
 
