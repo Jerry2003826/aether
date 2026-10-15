@@ -8,13 +8,14 @@ from typing import Any
 
 from sqlalchemy import create_engine, text
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.pool import NullPool
 
 
 class Database:
     def __init__(self, url: str) -> None:
         if url.startswith("postgresql://"):
             url = "postgresql+psycopg://" + url.removeprefix("postgresql://")
-        self.engine: Engine = create_engine(url, pool_pre_ping=True, future=True)
+        self.engine: Engine = create_engine(url, poolclass=NullPool, future=True)
 
     @contextmanager
     def transaction(self, *, owner_id: str | None = None, project_id: str | None = None) -> Iterator[Connection]:
