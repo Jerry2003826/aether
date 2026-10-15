@@ -66,15 +66,15 @@ def _mark(database: Database, project_id: str, command_id: str, status: str) -> 
         )
 
 
-async def _signal(client: Client, *, workflow_id: str, task_id: str, command_id: str, task_queue: str) -> None:
+async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: str, task_id: str, command_id: str, task_queue: str) -> None:
     try:
-        handle = await client.start_workflow(TaskWorkflow.run, task_id, id=workflow_id, task_queue=task_queue)
+        handle = await client.start_workflow(workflow.run, task_id, id=workflow_id, task_queue=task_queue)
     except WorkflowAlreadyStartedError:
         handle = client.get_workflow_handle(workflow_id)
-    await handle.signal(TaskWorkflow.command, {"command_id": command_id})
+    await handle.signal(workflow.command, {"command_id": command_id})
 
 
-async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20) -> dict[str, list[str]]:
+async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20, workflow: type[TaskWorkflow] = TaskWorkflow) -> dict[str, list[str]]:
     """Signal each pending command. Temporal rejection leaves the row DELIVERING for a later poll."""
     delivered: list[str] = []
     failed: list[str] = []
@@ -89,7 +89,7 @@ async def deliver_pending(database: Database, client: Client, *, task_queue: str
         workflow_id = str(payload.get("workflow_id") or f"task-{task_id}")
         command_id = str(payload.get("command_id") or command_key)
         try:
-            await _signal(client, workflow_id=workflow_id, task_id=str(task_id), command_id=command_id, task_queue=task_queue)
+            await _signal(client, workflow=workflow, workflow_id=workflow_id, task_id=str(task_id), command_id=command_id, task_queue=task_queue)
         except Exception:
             failed.append(command_key)
             continue

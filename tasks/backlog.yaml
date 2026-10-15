@@ -213,8 +213,12 @@ tickets:
   - 真实存储/Temporal/网关/本地工具/独立verifier；仅模型可scripted
   - worker重启、命令重投、审批重放、过期候选验收拒绝
   - 记录调用次数/产物hash和真实测试日志，不只打印state string
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/research.py
+  - services/worker/aether_worker/research_workflow.py
+  - tests/integration/test_kernel.py
+  - reports/f09_criteria.md
 - id: F10
   stage: G3
   scope: core
