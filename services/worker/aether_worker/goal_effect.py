@@ -32,6 +32,7 @@ class WorkerEndpoints:
     artifact_root: Path
     temporal_address: str
     task_queue: str
+    intake_pause_seconds: float = 0
 
 
 ENDPOINTS: WorkerEndpoints | None = None

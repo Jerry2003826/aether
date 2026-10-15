@@ -155,6 +155,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             "AETHER_TEMPORAL_ADDRESS": address,
             "AETHER_ARTIFACT_ROOT": str(artifact_root),
             "AETHER_TASK_QUEUE": queue,
+            "AETHER_INTAKE_PAUSE_SECONDS": "4",
             "AETHER_BIND_HOST": "127.0.0.1",
             "AETHER_API_PORT": str(api_port),
             "AETHER_BOOTSTRAP_PATH": str(secret_path),

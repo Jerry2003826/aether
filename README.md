@@ -132,6 +132,8 @@ export AETHER_TASK_QUEUE=aether-tasks
 uv run --locked --no-build python -m aether_worker
 ```
 
+`AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。
+
 进程打出 `aether-worker-ready` 后开始轮询。`SIGTERM` 或 `SIGINT` 让当前这一轮结束后退出。队列默认 `aether-tasks`，测试可以改 `AETHER_TASK_QUEUE`。
 
 引导密钥由 `issue_bootstrap_secret` 写入 `secrets/bootstrap.json`（文件里是哈希）。终端只显示一次明文。随后向 loopback 的 `POST /v1/auth/bootstrap` 提交 `bootstrap_secret`、`display_name` 和至少 12 个字符的 `passphrase`。

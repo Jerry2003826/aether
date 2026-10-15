@@ -18,7 +18,7 @@
 
 **根因：** 常驻进程会消费 outbox，但没有把读取、脚本执行和独立验收接成会改变任务状态的活动。
 
-**修改：** 仍是 Temporal 加 `command_outbox`。`prepare_task` 把任务写成 `RUNNING`。工作流durable sleep 4 秒后，`execute_task` 用 `ArtifactStore.get` 读取已上传文本，调用 `scripted_answer`（明确不是 live 模型），再由 `aether_verifier` 读盘验收。PASS 才是 `SUCCEEDED`，检查失败是 `FAILED`，没有可读取资料是 `NEEDS_REVIEW`。编码作业继续走已有的 `coding.create`，由同一个进程调用 `apply_console_commands`。进程测试在看到 `RUNNING` 时停掉 worker，再启动，然后检查终态；第二次启动不增加 `research.call`。
+**修改：** 仍是 Temporal 加 `command_outbox`。`prepare_task` 把任务写成 `RUNNING`。`execute_task` 用 `ArtifactStore.get` 读取已上传文本，调用 `scripted_answer`（明确不是 live 模型），再由 `aether_verifier` 读盘验收。PASS 才是 `SUCCEEDED`，检查失败是 `FAILED`，没有可读取资料是 `NEEDS_REVIEW`。编码作业继续走已有的 `coding.create`，由同一个进程调用 `apply_console_commands`。`AETHER_INTAKE_PAUSE_SECONDS` 默认 0，正式路径在 `RUNNING` 之后立刻执行。进程测试把它设成 4，在看到 `RUNNING` 时停掉 worker，再启动，然后检查终态；第二次启动不增加 `research.call`。
 
 **修复后：** `tests/integration/test_worker_process.py` 通过。任务离开 `QUEUED`，回答里有资料中的事实，不是目标原文，验证者是 `aether_verifier`，`research.call` 只有一条。
 
