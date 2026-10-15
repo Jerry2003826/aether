@@ -1,16 +1,9 @@
-# F22 控制台与 API
+# F23 安全与故障回归
 
-目标：49 个设计操作都有真实路由。列表读数据库，变更先入命令再由 worker 或 verifier 落库。页面走这些 API。原始 HTML 不执行。
+目标：网页、代码注释、MCP、Skill 四类载体，以及 SSRF、身份、审批、预算竞态、导入和删后回写，都有会失败的探针。安全失败阻止发布。
 
-合同：`docs/08_api_ui.md`，`contracts/openapi.yaml`，`contracts/endpoint_stages.yaml`。
+合同：`docs/06_security.md`，`docs/14_BOUNDARIES_AND_FAILURES.md`。
 
-测试：
+进度：F22 已按 CI run `38690927397` 标 done。开始对照现有探针。
 
-```text
-uv run pytest -q tests/unit/test_openapi_contract.py
-AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_console_api.py tests/integration/test_console_browser.py
-```
-
-进度：本地浏览器用例已通过。状态 in_progress，等 PR CI 和 Sonar 通过后再标 done。
-
-阻塞：检索在没有绑定索引进程时返回 503，不编造命中。模型探针在 live 未运行时是 unavailable。
+阻塞：无。
