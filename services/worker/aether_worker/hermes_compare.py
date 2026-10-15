@@ -12,6 +12,7 @@ import os
 import secrets
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 import urllib.error
@@ -30,6 +31,7 @@ RESULT_NAME = "hermes_compare_result.json"
 MAX_CALLS = 8
 MAX_TOTAL_TOKENS = 8000
 MAX_OUTPUT_TOKENS = 128
+JSON_TYPE = "application/json"
 TASK = "计算 1+2。只回复一个 JSON 对象，键 answer，值是整数。不要其他文字。"
 LESSON = "冻结笔记：若题目要求只回复 JSON，则不要加解释或代码块。"
 CASE_ID = "DEV-COMPARE-SUM"
@@ -122,7 +124,7 @@ class _Handler(BaseHTTPRequestHandler):
         request = urllib.request.Request(
             server.upstream,
             data=forwarded,
-            headers={"Authorization": f"Bearer {server.key}", "Content-Type": "application/json"},
+            headers={"Authorization": f"Bearer {server.key}", "Content-Type": JSON_TYPE},
             method="POST",
         )
         opener = urllib.request.build_opener(_NoRedirect)
@@ -176,7 +178,7 @@ class _Handler(BaseHTTPRequestHandler):
     def _send(self, status: int, payload: dict[str, Any]) -> None:
         data = json.dumps(payload).encode()
         self.send_response(status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", JSON_TYPE)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
@@ -254,7 +256,7 @@ def _post_gateway(url: str, body: dict[str, Any], token: str, secret: str) -> st
     request = urllib.request.Request(
         url.rstrip("/") + "/chat/completions",
         data=json.dumps(body).encode(),
-        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+        headers={"Authorization": f"Bearer {token}", "Content-Type": JSON_TYPE},
         method="POST",
     )
     opener = urllib.request.build_opener(_NoRedirect)
@@ -277,6 +279,71 @@ def _stamp(calls: list[dict[str, Any]], before: int, group: str, prompt: str) ->
     for row in calls[before:]:
         row["group"] = group
         row["prompt_sha256"] = digest
+
+
+def _append_injected(calls: list[dict[str, Any]], name: str, prompt: str) -> None:
+    calls.append(
+        {
+            "id": "",
+            "group": name,
+            "source": "injected",
+            "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(),
+            "cost_status": "unknown",
+            "total_tokens": None,
+        }
+    )
+
+
+def _invoke_group(
+    name: str,
+    prompt: str,
+    *,
+    learned: bool,
+    home: Path,
+    work: Path,
+    gateway: _Gateway | None,
+    gateway_url: str,
+    token: str,
+    secret: str,
+    alias: str,
+    binary: Path,
+    launch: Callable[[str, dict[str, str], Path], str] | None,
+    complete: Callable[[str], str] | None,
+    calls: list[dict[str, Any]],
+) -> str:
+    if name.startswith("hermes"):
+        child = _child_env(home, gateway_url, token, secret)
+        if launch is not None:
+            text = launch(prompt, child, home)
+            _append_injected(calls, name, prompt)
+            return text
+        if gateway is None:
+            raise RuntimeError("gateway_missing")
+        _write_home(home, gateway_url, token, learned=learned)
+        work.mkdir(parents=True, exist_ok=True)
+        before_gateway = len(gateway.calls)
+        text = _default_hermes(binary, prompt, child, work)
+        if len(gateway.calls) == before_gateway:
+            raise RuntimeError("no_metered_call")
+        _stamp(gateway.calls, before_gateway, name, prompt)
+        calls.extend(gateway.calls[before_gateway:])
+        return text
+    if complete is not None:
+        text = complete(prompt)
+        _append_injected(calls, name, prompt)
+        return text
+    if gateway is None:
+        raise RuntimeError("gateway_missing")
+    before_gateway = len(gateway.calls)
+    text = _post_gateway(
+        gateway_url,
+        {"model": alias, "messages": [{"role": "user", "content": prompt}], "max_tokens": MAX_OUTPUT_TOKENS},
+        token,
+        secret,
+    )
+    _stamp(gateway.calls, before_gateway, name, prompt)
+    calls.extend(gateway.calls[before_gateway:])
+    return text
 
 
 def _blocked(missing: list[str]) -> dict[str, Any]:
@@ -363,39 +430,25 @@ def run_four_way(
                 groups[name] = {"status": "not_run", "reason": "cap", "success": None, "cost_status": "unknown"}
                 continue
             start = len(calls)
-            home = Path(os.environ.get("TMPDIR", "/tmp")) / f"aether-hermes-{name}-{token[:8]}"
+            home = Path(tempfile.mkdtemp(prefix="aether-hermes-"))
             work = home / "work"
             try:
-                if name.startswith("hermes"):
-                    child = _child_env(home, gateway_url, token, secret)
-                    if launch is not None:
-                        text = launch(prompt, child, home)
-                        calls.append({"id": "", "group": name, "source": "injected", "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "cost_status": "unknown", "total_tokens": None})
-                    else:
-                        assert gateway is not None
-                        _write_home(home, gateway_url, token, learned=learned)
-                        work.mkdir(parents=True, exist_ok=True)
-                        before_gateway = len(gateway.calls)
-                        text = _default_hermes(binary, prompt, child, work)
-                        if len(gateway.calls) == before_gateway:
-                            raise RuntimeError("no_metered_call")
-                        _stamp(gateway.calls, before_gateway, name, prompt)
-                        calls.extend(gateway.calls[before_gateway:])
-                else:
-                    if complete is not None:
-                        text = complete(prompt)
-                        calls.append({"id": "", "group": name, "source": "injected", "prompt_sha256": hashlib.sha256(prompt.encode()).hexdigest(), "cost_status": "unknown", "total_tokens": None})
-                    else:
-                        assert gateway is not None
-                        before_gateway = len(gateway.calls)
-                        text = _post_gateway(
-                            gateway_url,
-                            {"model": alias, "messages": [{"role": "user", "content": prompt}], "max_tokens": MAX_OUTPUT_TOKENS},
-                            token,
-                            secret,
-                        )
-                        _stamp(gateway.calls, before_gateway, name, prompt)
-                        calls.extend(gateway.calls[before_gateway:])
+                text = _invoke_group(
+                    name,
+                    prompt,
+                    learned=learned,
+                    home=home,
+                    work=work,
+                    gateway=gateway,
+                    gateway_url=gateway_url,
+                    token=token,
+                    secret=secret,
+                    alias=alias,
+                    binary=binary,
+                    launch=launch,
+                    complete=complete,
+                    calls=calls,
+                )
                 if secret and secret in text:
                     raise RuntimeError("secret_in_output")
                 graded = grade_answer(text)
@@ -427,7 +480,7 @@ def run_four_way(
             finally:
                 if home.exists():
                     shutil.rmtree(home, ignore_errors=True)
-    except Exception as exc:
+    except (RuntimeError, OSError) as exc:
         error = redact_secret(f"{type(exc).__name__}:{exc}", secret)
     finally:
         if gateway is not None:
