@@ -25,6 +25,7 @@ from aether_worker.f26_acceptance import (
 )
 
 _RECORDED = Path(__file__).resolve().parents[2] / "reports" / "f26_acceptance_result.json"
+_DAC5C49 = Path(__file__).resolve().parents[2] / "reports" / "f26_acceptance_dac5c49.json"
 _RECORDED_REPORT_SHA = "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf"
 
 
@@ -258,7 +259,7 @@ def test_secret_in_an_executor_error_is_redacted(monkeypatch) -> None:
 
 
 def test_dac5c49_report_cites_both_sources_with_equals_signs() -> None:
-    payload = json.loads(_RECORDED.read_text(encoding="utf-8"))
+    payload = json.loads(_DAC5C49.read_text(encoding="utf-8"))
     report = payload["research"]["report"]
     sources = payload["research"]["sources"]
     assert hashlib.sha256(report.encode()).hexdigest() == _RECORDED_REPORT_SHA

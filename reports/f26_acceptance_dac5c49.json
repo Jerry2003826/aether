@@ -1,0 +1,237 @@
+{
+  "status": "failed",
+  "live_ready": false,
+  "scripted_substitute": false,
+  "git_commit": "dac5c490dbd6bef3b38372123ff4c1696626e1b7",
+  "started_at": "2026-10-15T09:19:28.770856+00:00",
+  "model_alias": "deepseek-chat",
+  "model_base": "https://api.deepseek.com/v1",
+  "caps": {
+    "max_calls": 8,
+    "max_total_tokens": 20000,
+    "max_output_tokens": 512,
+    "spend_cap_usd": 1
+  },
+  "calls": 3,
+  "calls_detail": [
+    {
+      "id": "call-1",
+      "upstream_id": "6155709b-8e05-478d-be78-5d0e9b37fdad",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 1837,
+      "request_sha256": "d430229a21d5c40df396402b33d7fecd787edd6ff9b2fb99345b4646c21900fc",
+      "completion_sha256": null,
+      "prompt_tokens": 299,
+      "completion_tokens": 51,
+      "total_tokens": 350,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [],
+      "reason": null,
+      "source": "gateway",
+      "kind": "protocol",
+      "prompt_sha256": "aa46713f057a1cca69b80b33cb7ac232c481963ca45b679b4cd54bd11a3970fc"
+    },
+    {
+      "id": "call-2",
+      "upstream_id": "3a969c4b-42e2-402a-a30c-4411dce3c267",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 1593,
+      "request_sha256": "347bcf83ef33cb482f2fc8216ce8b61612dcea393757d837b011d54d6bfb6997",
+      "completion_sha256": "54c6de625efa902135ae3cd8c04a72dc7ce84f793092c58c0f2c21930084e7a0",
+      "prompt_tokens": 87,
+      "completion_tokens": 21,
+      "total_tokens": 108,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "reason": null,
+      "source": "gateway",
+      "kind": "coding",
+      "prompt_sha256": "35cf8c52245673d575a9dc26bcf705ed1d6d98d4d278d13f0d93adbd6b0bfcf1"
+    },
+    {
+      "id": "call-3",
+      "upstream_id": "1679a587-ddaf-4186-8578-393e4418abbe",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 3403,
+      "request_sha256": "723ea56ba04d081dd50461b91ab18ec63eca7987fde47e8416c3957d22c360cc",
+      "completion_sha256": "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf",
+      "prompt_tokens": 360,
+      "completion_tokens": 512,
+      "total_tokens": 872,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "reason": null,
+      "source": "gateway",
+      "kind": "research",
+      "prompt_sha256": "2c311756b482f9e7540a35714852ef4b8cb77ac3954692ea3df732ba1039085b"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 746,
+    "completion_tokens": 584,
+    "total_tokens": 1330,
+    "cost_micro_usd": null,
+    "cost_status": "unknown"
+  },
+  "cost_status": "unknown",
+  "protocol": {
+    "status": "pass",
+    "tools": "pass",
+    "schema": "pass",
+    "usage": "pass",
+    "reason": null,
+    "usage_detail": {
+      "prompt_tokens": 299,
+      "completion_tokens": 51,
+      "total_tokens": 350,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    }
+  },
+  "coding": {
+    "status": "pass",
+    "snapshot_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+    "checker_sha256": "b9372ddd27dabb1f5bd744325f0539af030692b7ab240c14689970516d85d4fb",
+    "executor": "openhands-sdk",
+    "attempts": [
+      {
+        "exit_code": 0,
+        "stdout": "add(1, 2)=3\nadd(-4, 4)=0\nPASS\n",
+        "passed": true,
+        "tree_sha256": "71fe64eb15805d29aa3806328b88f66bd53b390d8a3c787908c9aae6c8823d34",
+        "runner": "docker",
+        "image": "python:3.12-alpine",
+        "flags": [
+          "--network",
+          "none",
+          "--read-only",
+          "--cap-drop",
+          "ALL",
+          "--pids-limit",
+          "32"
+        ],
+        "reason": null,
+        "pre_patch_tree_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+        "patch_sha256": "8f75a68646c879fd0cff5c02708c010fb1c01d67ef9930d4e419106feb7897aa",
+        "patch_writer": "openhands",
+        "checker_sha256": "b9372ddd27dabb1f5bd744325f0539af030692b7ab240c14689970516d85d4fb",
+        "reused_failed_tree": false,
+        "accepted": true,
+        "response_sha256": "54c6de625efa902135ae3cd8c04a72dc7ce84f793092c58c0f2c21930084e7a0"
+      }
+    ],
+    "baseline": {
+      "exit_code": 1,
+      "stdout": "add(1, 2)=-1\nadd(-4, 4)=-8\nFAIL\n",
+      "passed": false,
+      "tree_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+      "runner": "docker",
+      "image": "python:3.12-alpine",
+      "flags": [
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--pids-limit",
+        "32"
+      ],
+      "reason": null,
+      "accepted": false
+    },
+    "sdk": "openai/deepseek-chat",
+    "openhands_release": "1.54.0",
+    "reason": null
+  },
+  "research": {
+    "status": "fail",
+    "reason": "citation_mismatch",
+    "semantic_support": "not_judged",
+    "version_store": "acceptance_report",
+    "encoder": "live",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "tokenizer_version": "jieba-0.42.1-dict-forward-max+code-symbols",
+    "dimension": 1024,
+    "dense_index": "exact_cosine",
+    "lexical_index": "bm25s",
+    "reranker": "not_used",
+    "query": "比较中英实验笔记：标准大气压下水的沸点、容器。Compare water boiling point and beaker.",
+    "bm25": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "dense": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "rrf": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "ranks": {
+      "src-zh": 1,
+      "src-en": 2,
+      "src-piano": 3
+    },
+    "sources": [
+      {
+        "source_id": "src-zh",
+        "path": "evals/f26_sources/boiling-zh.txt",
+        "version": 1,
+        "content_sha256": "9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360",
+        "start_offset": 0,
+        "end_offset": 92
+      },
+      {
+        "source_id": "src-en",
+        "path": "evals/f26_sources/boiling-en.txt",
+        "version": 1,
+        "content_sha256": "135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71",
+        "start_offset": 0,
+        "end_offset": 283
+      },
+      {
+        "source_id": "src-piano",
+        "path": "evals/f26_sources/piano-zh.txt",
+        "version": 1,
+        "content_sha256": "03d5806339a746d7071aa574cb40ed7785d56e9c942171597e5cf382fd05b675",
+        "start_offset": 0,
+        "end_offset": 41
+      }
+    ],
+    "report": "仅根据给定检索结果，在“沸点”相关条目中，src-zh 与 src-en 可比较如下：\n\n**相同之处（2 条）**\n1. 两者都说明/指向同一背景：2024 年 3 月实验室笔记的对应语言版本。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n2. 两者都写明：在标准大气压下，水的沸点是 100 摄氏度。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n\n**不同之处（2 条）**\n1. 容器不同：src-zh 写的是玻璃烧杯；src-en 写的是钢烧杯。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n2. 加热方式不同：src-zh 写的是酒精灯；src-en",
+    "report_sha256": "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf",
+    "citations_cover_sources": false
+  },
+  "linux_isolation": {
+    "image": "python:3.12-alpine",
+    "flags": [
+      "--network",
+      "none",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--pids-limit",
+      "32"
+    ],
+    "exit_code": 0,
+    "network_errno": 101,
+    "secret_present": false,
+    "status": "pass",
+    "reason": null
+  },
+  "error": null
+}

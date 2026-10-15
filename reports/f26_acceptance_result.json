@@ -1,9 +1,9 @@
 {
-  "status": "failed",
+  "status": "probed",
   "live_ready": false,
   "scripted_substitute": false,
-  "git_commit": "dac5c490dbd6bef3b38372123ff4c1696626e1b7",
-  "started_at": "2026-10-15T09:19:28.770856+00:00",
+  "git_commit": "cb22fbc59a274f9e4a9189f8a26ab5ca350f6343",
+  "started_at": "2026-10-15T09:31:09.290134+00:00",
   "model_alias": "deepseek-chat",
   "model_base": "https://api.deepseek.com/v1",
   "caps": {
@@ -16,10 +16,10 @@
   "calls_detail": [
     {
       "id": "call-1",
-      "upstream_id": "6155709b-8e05-478d-be78-5d0e9b37fdad",
+      "upstream_id": "97f05cea-4642-48ba-a2f8-72ea6e7084d8",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 1837,
+      "latency_ms": 1495,
       "request_sha256": "d430229a21d5c40df396402b33d7fecd787edd6ff9b2fb99345b4646c21900fc",
       "completion_sha256": null,
       "prompt_tokens": 299,
@@ -35,15 +35,15 @@
     },
     {
       "id": "call-2",
-      "upstream_id": "3a969c4b-42e2-402a-a30c-4411dce3c267",
+      "upstream_id": "183d24f1-c756-4e98-821e-19e1fd265389",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 1593,
+      "latency_ms": 1376,
       "request_sha256": "347bcf83ef33cb482f2fc8216ce8b61612dcea393757d837b011d54d6bfb6997",
-      "completion_sha256": "54c6de625efa902135ae3cd8c04a72dc7ce84f793092c58c0f2c21930084e7a0",
+      "completion_sha256": "0f61b1f74f852a38ec8221882ce0be69808cdaf930d9048bdfe07df5545d32e9",
       "prompt_tokens": 87,
-      "completion_tokens": 21,
-      "total_tokens": 108,
+      "completion_tokens": 22,
+      "total_tokens": 109,
       "cost_micro_usd": null,
       "cost_status": "unknown",
       "dropped_fields": [
@@ -56,15 +56,15 @@
     },
     {
       "id": "call-3",
-      "upstream_id": "1679a587-ddaf-4186-8578-393e4418abbe",
+      "upstream_id": "09039ca0-3a04-45b1-bbfa-62e5e3d0b7b5",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 3403,
+      "latency_ms": 2847,
       "request_sha256": "723ea56ba04d081dd50461b91ab18ec63eca7987fde47e8416c3957d22c360cc",
-      "completion_sha256": "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf",
+      "completion_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
       "prompt_tokens": 360,
-      "completion_tokens": 512,
-      "total_tokens": 872,
+      "completion_tokens": 488,
+      "total_tokens": 848,
       "cost_micro_usd": null,
       "cost_status": "unknown",
       "dropped_fields": [
@@ -78,8 +78,8 @@
   ],
   "usage": {
     "prompt_tokens": 746,
-    "completion_tokens": 584,
-    "total_tokens": 1330,
+    "completion_tokens": 561,
+    "total_tokens": 1307,
     "cost_micro_usd": null,
     "cost_status": "unknown"
   },
@@ -108,7 +108,7 @@
         "exit_code": 0,
         "stdout": "add(1, 2)=3\nadd(-4, 4)=0\nPASS\n",
         "passed": true,
-        "tree_sha256": "71fe64eb15805d29aa3806328b88f66bd53b390d8a3c787908c9aae6c8823d34",
+        "tree_sha256": "d8c7e5f48c774fc4bcf08a22e0bb7ff601b1222ea9021ca540605040fa97d240",
         "runner": "docker",
         "image": "python:3.12-alpine",
         "flags": [
@@ -122,12 +122,12 @@
         ],
         "reason": null,
         "pre_patch_tree_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
-        "patch_sha256": "8f75a68646c879fd0cff5c02708c010fb1c01d67ef9930d4e419106feb7897aa",
+        "patch_sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
         "patch_writer": "openhands",
         "checker_sha256": "b9372ddd27dabb1f5bd744325f0539af030692b7ab240c14689970516d85d4fb",
         "reused_failed_tree": false,
         "accepted": true,
-        "response_sha256": "54c6de625efa902135ae3cd8c04a72dc7ce84f793092c58c0f2c21930084e7a0"
+        "response_sha256": "0f61b1f74f852a38ec8221882ce0be69808cdaf930d9048bdfe07df5545d32e9"
       }
     ],
     "baseline": {
@@ -154,8 +154,8 @@
     "reason": null
   },
   "research": {
-    "status": "fail",
-    "reason": "citation_mismatch",
+    "status": "pass",
+    "reason": null,
     "semantic_support": "not_judged",
     "version_store": "acceptance_report",
     "encoder": "live",
@@ -212,9 +212,9 @@
         "end_offset": 41
       }
     ],
-    "report": "仅根据给定检索结果，在“沸点”相关条目中，src-zh 与 src-en 可比较如下：\n\n**相同之处（2 条）**\n1. 两者都说明/指向同一背景：2024 年 3 月实验室笔记的对应语言版本。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n2. 两者都写明：在标准大气压下，水的沸点是 100 摄氏度。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n\n**不同之处（2 条）**\n1. 容器不同：src-zh 写的是玻璃烧杯；src-en 写的是钢烧杯。  \n   - src-zh：source_id=src-zh，version=1，sha256=9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360，offset=0-92  \n   - src-en：source_id=src-en，version=1，sha256=135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71，offset=0-283  \n2. 加热方式不同：src-zh 写的是酒精灯；src-en",
-    "report_sha256": "db93defd5af32d96328eb28baf572736f2d83f2521dd9a9c354284c4ade62bcf",
-    "citations_cover_sources": false
+    "report": "相同之处：两条都说明在标准大气压下水的沸点是 100 摄氏度。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。两条也都没有声称这个沸点在高原上仍然相同。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。\n\n不同之处：容器不同，src-zh 是玻璃烧杯，src-en 是钢烧杯。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。加热工具不同，src-zh 用酒精灯，src-en 用电热板。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。",
+    "report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "citations_cover_sources": true
   },
   "linux_isolation": {
     "image": "python:3.12-alpine",
