@@ -139,14 +139,26 @@ def build_report() -> dict:
     }
 
 
+def confine_report_path(path: Path) -> Path:
+    """Doctor reports may only be written under reports/."""
+    root = (ROOT / "reports").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = path if path.is_absolute() else Path.cwd() / path
+    candidate = candidate.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise SystemExit("doctor output must stay inside reports/")
+    return candidate
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--require-services", action="store_true")
     parser.add_argument("--write", type=Path, default=ROOT / "reports" / "doctor.json")
     args = parser.parse_args()
     report = build_report()
-    args.write.parent.mkdir(parents=True, exist_ok=True)
-    args.write.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    destination = confine_report_path(args.write)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
     if not any(item["name"] == "python" and item["configured"] for item in report["components"]):
         return 1

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import uuid
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -61,8 +62,8 @@ def clean_db(admin_url: str) -> Iterator[None]:
 
 
 @pytest.fixture
-def client(role_urls: dict[str, str], clean_db: None, tmp_path: Path) -> Iterator[TestClient]:
-    bootstrap_path = tmp_path / "bootstrap.json"
+def client(role_urls: dict[str, str], clean_db: None) -> Iterator[TestClient]:
+    bootstrap_path = Path("secrets") / f"bootstrap-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(bootstrap_path)
     settings = Settings(
         database_url=role_urls["aether_api"],
@@ -74,7 +75,10 @@ def client(role_urls: dict[str, str], clean_db: None, tmp_path: Path) -> Iterato
     app = create_app(settings)
     with TestClient(app) as test_client:
         test_client.bootstrap_secret = secret  # type: ignore[attr-defined]
-        yield test_client
+        try:
+            yield test_client
+        finally:
+            bootstrap_path.unlink(missing_ok=True)
 
 
 def insert_task(database: Database, owner_id: str, project_id: str, goal: str) -> str:

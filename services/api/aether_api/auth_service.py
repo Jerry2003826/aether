@@ -19,7 +19,19 @@ from aether_storage.db import Database
 HASHER = PasswordHasher()
 
 
+def confine_bootstrap_path(path: Path) -> Path:
+    """Bootstrap files may only live under secrets/, regardless of AETHER_BOOTSTRAP_PATH."""
+    root = Path("secrets").resolve()
+    root.mkdir(parents=True, exist_ok=True)
+    candidate = path if path.is_absolute() else Path.cwd() / path
+    candidate = candidate.resolve()
+    if candidate != root and root not in candidate.parents:
+        raise ApiError(403, "bootstrap_path_rejected", "引导文件必须位于 secrets/")
+    return candidate
+
+
 def issue_bootstrap_secret(path: Path) -> str:
+    path = confine_bootstrap_path(path)
     secret = secrets.token_urlsafe(32)
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = {"secret_sha256": sha256_text(secret), "consumed": False}
@@ -29,12 +41,14 @@ def issue_bootstrap_secret(path: Path) -> str:
 
 
 def _load_bootstrap(path: Path) -> dict[str, Any]:
+    path = confine_bootstrap_path(path)
     if not path.is_file():
         raise ApiError(403, "bootstrap_unavailable", "引导密钥不存在")
     return json.loads(path.read_text(encoding="utf-8"))
 
 
 def _save_bootstrap(path: Path, payload: dict[str, Any]) -> None:
+    path = confine_bootstrap_path(path)
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
