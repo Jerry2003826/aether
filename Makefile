@@ -24,7 +24,7 @@ acceptance-report:
 	$(UV) run python -c 'from aether_worker.acceptance_report import build_report; print(build_report(__import__("pathlib").Path("reports/junit.xml"), __import__("pathlib").Path("STATUS.json")))'
 
 demo-live:
-	$(UV) run python -c 'from aether_worker.live_harness import run_live_probe; import json,sys; report=run_live_probe(); print(json.dumps(report, ensure_ascii=False)); sys.exit({"probed": 0, "failed": 1, "blocked": 2}[report["status"]])'
+	$(UV) run python scripts/run_f26_live.py --out reports/f26_live_result.json
 
 backup:
 	@echo 'backup 需要 AETHER_ADMIN_DATABASE_URL、产物目录和目标目录，见 services/worker/aether_worker/supply.py'

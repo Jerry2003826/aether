@@ -65,4 +65,4 @@ P1 覆盖：
 - `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
 - 最新绿的是 head `86eb0d7`。PR CI run `38699224527`：unit `51 passed in 8.25s`，integration `137 passed, 1 warning in 97.68s`。push run `38699216284`。SonarCloud quality gate OK。F00–F25 与 F27 是 done。F26 是 blocked。
 - 仍是 not_run：F26 live 探针、Hermes 四组对照、CodeGraph 产品启用。漏洞库仍是 offline not_run。
-- 下一步：用户提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS` 后再跑 F26 live。不宣布 live 可用，也不宣布对照领先。
+- 下一步：监督者在自己的机器上设置 `AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`、`AETHER_LIVE_MODEL_ALIAS=deepseek-chat` 和 `AETHER_LIVE_MODEL_KEY`，运行 `python scripts/run_f26_live.py --out reports/f26_live_result.json`。不需要额外 pip 包。key 不进仓库。F26 保持 blocked，直到结果文件交回来。混合检索、Linux 隔离、Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。

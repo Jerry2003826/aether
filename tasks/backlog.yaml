@@ -590,6 +590,7 @@ tickets:
   status: blocked
   evidence:
   - services/worker/aether_worker/live_harness.py
+  - scripts/run_f26_live.py
   - tests/unit/test_live_harness.py
   - reports/f26_criteria.md
 - id: F27
