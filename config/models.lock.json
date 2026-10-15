@@ -13,10 +13,11 @@
   "aliases": ["planner", "actor", "coder", "judge", "extractor"],
   "ml": {
     "embedding_model_id": "BAAI/bge-m3",
-    "embedding_revision": null,
-    "dimension_probed": null,
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
     "reranker_revision": null,
-    "weights_present": false
+    "weights_present": true,
+    "device": "cpu"
   },
   "scripted": {
     "label": "SCRIPTED_PROVIDER_NOT_REAL_AI",

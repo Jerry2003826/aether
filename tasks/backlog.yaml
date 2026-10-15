@@ -45,10 +45,12 @@ tickets:
   - 四个OpenHands包按兼容release组合导入，确认LLM gateway可配置
   - BGE模型revision/维数/资源验证；缺下载标blocked而非随机向量
   - 非live探针无需购买模型，live结果另列F26；不为兼容迁移整个控制面
-  status: blocked
+  status: done
   evidence:
   - reports/f01-probe.json
   - environments/openhands/uv.lock
+  - environments/ml/probe_encode.py
+  - environments/ml/uv.lock
 - id: F02
   stage: G1
   scope: core
@@ -254,7 +256,7 @@ tickets:
   - 真实embedding/revision，BM25/dense/RRF/rerank分组对照
   - 授权过滤在检索/重排/LLM上下文前；删除/撤权即时不可见
   - 索引atomic swap与stale标记；中英/emoji/代码符号场景可复现
-  status: blocked
+  status: not_started
   evidence: []
 - id: F12
   stage: G3

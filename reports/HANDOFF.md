@@ -37,13 +37,13 @@ P1 覆盖：
 ## 状态
 
 - F00、F02、F03、F04、F05、F06、F07：done
-- F01：blocked。BGE 权重未加载，`dimension_probed` 为 null。
+- F01 done。CPU 上对 `aether probe` 做了一次 BAAI/bge-m3 编码，`dimension_probed` 为 1024，revision 为 `5617a9f61b028005a4858fdac845db406aefb181`。OpenHands 仍是 partial，live 模型 not_run。
 - F07 done。`aether_dispatcher` 把 `command_outbox` 投到真实 Temporal。Temporal 拒绝时行留在 DELIVERING，任务保持 QUEUED，不会被标成成功。同一个 command_id 再投递不会在 Workflow 里出现两次。
 - F08 done。任务创建返回 202，状态保持 QUEUED，并经 dispatcher 进入真实 Temporal。SSE 用 Last-Event-ID 按 sequence 补齐，响应里有 pending command 和 projection_updated_at。审批决定由服务端核对 owner、哈希和版本。事件和产物不跨项目。全量：`83 passed, 2 warnings in 16.57s`，`EXIT:0`。对照表 `reports/f08_criteria.md`。
 - F09 done。本地产物经真实存储和文本工具进入脚本网关，HTTP 调用 1 次，哈希与 `aether_verifier` 的 PASS/FAIL 写入验收表。过期候选在 actor 自报 PASS 时仍为 FAIL。worker 重启后重投同一命令，`research.call` 仍是 1 条。全量：`87 passed, 2 warnings in 17.84s`，`EXIT:0`。对照表 `reports/f09_criteria.md`。
-- F10 done。码点偏移覆盖中文、emoji 和 CRLF。空正文失败。loopback 与跳向 loopback 的重定向都不会发出连接。授权夹具上的 HTTP 下载写入 SourceVersion，chunk 的 embedding 仍是 null。全量：`90 passed, 2 warnings in 18.62s`，`EXIT:0`。对照表 `reports/f10_criteria.md`。
-- F11 blocked。依赖 F01，BGE 维度未实测，不用随机向量。F12、F16 以及依赖它们的任务因此还不能标 done。F13 也依赖 F01。F15 仍排在 F14 之后，不跳过。
+- F10 done。HTTPS 把连接钉在解析出的地址上，证书和 SNI 仍核对原主机名。响应按流计数，超限即断开。RSS 在带资源限制的子进程里用 defusedxml 解析。Playwright 受控 profile 实际执行了页面脚本。`allow_hosts` 没有测试开关时拒绝。`resource_heads` 的 `FOR UPDATE` 只是派发前预检。全量：`99 passed, 2 warnings in 22.99s`，`EXIT:0`。对照表 `reports/f10_criteria.md`。
+- F11 已解除 blocked。下一步做混合检索。F15 仍排在 F14 之后，不跳过。
 - 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
-- 下一步：F11 仍等 BGE 实测维度。F13/F14/F15 按依赖排在 F01 之后，F15 不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
+- 下一步：F11 混合检索。F15 仍排在 F14 之后，不跳过。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

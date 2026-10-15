@@ -15,7 +15,7 @@
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "After MCP fixture tests: 94 passed, 2 warnings in 18.19s, EXIT:0. F17 is not done.",
+  "last_test_result": "F10 TLS/stream/parser fixes: 99 passed, 2 warnings in 22.99s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -25,8 +25,11 @@
     "status": "done"
   },
   "f01": {
-    "status": "blocked",
-    "recovery": "Load BAAI/bge-m3 weights and record measured dimension and revision."
+    "status": "done",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
+    "device": "cpu",
+    "live_model": "not_run"
   },
   "f02": {
     "status": "done",
@@ -64,7 +67,6 @@
     "embedding": "not_filled"
   },
   "f11": {
-    "status": "blocked",
-    "recovery": "Measure BAAI/bge-m3 dimension before BM25/dense/RRF comparison. Do not substitute random vectors."
+    "status": "not_started"
   }
 }

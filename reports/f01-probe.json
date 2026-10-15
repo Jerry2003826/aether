@@ -30,13 +30,14 @@
     "stderr_tail": null
   },
   "ml": {
-    "status": "blocked",
-    "reason": "Hub metadata was read, but FlagEmbedding was not installed and weights were not loaded. Published hidden_size is not a measured dimension.",
-    "embedding_revision": null,
-    "hub_revision_unverified": "5617a9f61b028005a4858fdac845db406aefb181",
-    "published_hidden_size_unverified": 1024,
-    "dimension_probed": null,
-    "weights_present": false,
-    "package_install": "not_run"
+    "status": "passed",
+    "reason": null,
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
+    "weights_present": true,
+    "package_install": "uv sync --frozen",
+    "device": "cpu",
+    "sample_norm": 1.0,
+    "encode_input": "aether probe"
   }
 }

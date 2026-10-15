@@ -59,54 +59,38 @@ def probe_openhands() -> dict:
 
 def probe_ml() -> dict:
     env = ROOT / "environments" / "ml"
-    hub = run(
-        [
-            "python3",
-            "-c",
-            "import json,urllib.request; raw=urllib.request.urlopen('https://huggingface.co/api/models/BAAI/bge-m3', timeout=20).read(); meta=json.loads(raw); sha=meta.get('sha'); cfg=json.loads(urllib.request.urlopen('https://huggingface.co/BAAI/bge-m3/resolve/'+sha+'/config.json', timeout=20).read()); print(json.dumps({'sha': sha, 'hidden_size': cfg.get('hidden_size')}))",
-        ],
-        ROOT,
-        timeout=40,
-    )
-    hub_meta = None
-    if hub["returncode"] == 0 and hub["stdout"].strip():
-        try:
-            hub_meta = json.loads(hub["stdout"].strip().splitlines()[-1])
-        except json.JSONDecodeError:
-            hub_meta = None
     if os.environ.get("AETHER_PROBE_ML") != "1":
         return {
             "status": "blocked",
-            "reason": "Hub metadata was read, but FlagEmbedding was not installed and weights were not loaded. Published hidden_size is not a measured dimension.",
+            "reason": "Set AETHER_PROBE_ML=1 to load BAAI/bge-m3 and encode on CPU. Published hidden_size is not a measured dimension.",
             "embedding_revision": None,
-            "hub_revision_unverified": None if hub_meta is None else hub_meta.get("sha"),
-            "published_hidden_size_unverified": None if hub_meta is None else hub_meta.get("hidden_size"),
             "dimension_probed": None,
             "weights_present": False,
             "package_install": "not_run",
+            "device": None,
         }
-    lock = run(["uv", "lock"], env, timeout=180)
-    if lock["returncode"] != 0:
-        return {"status": "blocked", "reason": "uv lock failed", "lock": lock, "embedding_revision": None, "dimension": None}
     sync = run(["uv", "sync", "--frozen"], env, timeout=900)
-    imported = run(
-        ["uv", "run", "--frozen", "python", "-c", "import FlagEmbedding, json; print(json.dumps({'file': getattr(FlagEmbedding, '__file__', None)}))"],
-        env,
-        timeout=180,
-    )
-    ok = sync["returncode"] == 0 and imported["returncode"] == 0
-    if ok:
-        reason = "FlagEmbedding imported, but weights were not loaded and dimension was not measured"
-    else:
-        reason = "FlagEmbedding install or import failed"
+    encoded = run(["uv", "run", "--frozen", "python", "probe_encode.py"], env, timeout=1800)
+    payload = None
+    if encoded["returncode"] == 0 and encoded["stdout"].strip():
+        try:
+            payload = json.loads(encoded["stdout"].strip().splitlines()[-1])
+        except json.JSONDecodeError:
+            payload = None
+    dimension = None if payload is None else payload.get("dimension_probed")
+    revision = None if payload is None else payload.get("embedding_revision")
+    measured = isinstance(dimension, int) and dimension > 0 and isinstance(revision, str) and len(revision) == 40
     return {
-        "status": "blocked",
-        "reason": reason,
-        "import_ok": ok,
-        "embedding_revision": None,
-        "dimension": None,
-        "weights_present": False,
-        "sync": {"returncode": sync["returncode"], "stderr": sync["stderr"][-1000:]},
+        "status": "passed" if measured and sync["returncode"] == 0 else "blocked",
+        "reason": None if measured else "FlagEmbedding encode did not return a measured dimension and revision",
+        "embedding_revision": revision,
+        "dimension_probed": dimension,
+        "weights_present": bool(payload and payload.get("weights_present")),
+        "package_install": "uv sync --frozen",
+        "device": None if payload is None else payload.get("device"),
+        "sample_norm": None if payload is None else payload.get("sample_norm"),
+        "sync_returncode": sync["returncode"],
+        "stderr_tail": None if measured else encoded["stderr"][-1000:],
     }
 
 
