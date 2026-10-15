@@ -20,10 +20,14 @@ dependencies = [
   "argon2-cffi>=23",
   "python-multipart>=0.0.18",
   "litellm>=1.55",
+  "defusedxml>=0.7.1",
 ]
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = [
+    "playwright>=1.64.0",
+    "pytest>=8",
+]
 
 [tool.setuptools.packages.find]
 where = ["packages/domain", "packages/storage", "services/api", "services/gateway", "services/worker"]

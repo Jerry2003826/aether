@@ -88,6 +88,7 @@ class OperationLedger:
             if approval is None or approval["decision"] != "approved" or approval["intent_digest"] != digest or approval["expires_at"] <= datetime.now(UTC):
                 raise OperationError("approval_rejected")
             if approval["consumed_by_operation_id"] is None:
+                # Pre-check only. This lock ends when the transaction commits, before sender() runs.
                 current_version = conn.execute(
                     text(
                         "SELECT version FROM resource_heads WHERE project_id = :project_id AND resource_id = :resource_id FOR UPDATE"

@@ -65,6 +65,8 @@ jobs:
           python-version: "3.13"
       - name: Resolve control-plane lock
         run: uv sync --locked --no-build
+      - name: Install Playwright Chromium
+        run: uv run --locked --no-build playwright install --with-deps chromium
       - name: Integration tests and doctor
         env:
           AETHER_REQUIRE_SERVICES: "1"

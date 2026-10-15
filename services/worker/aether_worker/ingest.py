@@ -2,14 +2,21 @@
 
 from __future__ import annotations
 
+import ssl
 import hashlib
 import ipaddress
+import json
+import os
 import socket
+import subprocess
+import sys
+from pathlib import Path
 from typing import Callable
-from urllib.parse import urlsplit, urlunsplit
-from xml.etree import ElementTree
+from urllib.parse import urlsplit
 
+import httpcore
 import httpx
+from httpx._config import create_ssl_context
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -18,6 +25,8 @@ from aether_storage.db import Database
 PARSER_VERSION = "text-1"
 CHUNKER_VERSION = "codepoint-1"
 MAX_HTTP_BYTES = 10 * 1024 * 1024
+FIXTURE_ENV = "AETHER_INGEST_ALLOW_FIXTURES"
+_REDIRECTS = {301, 302, 303, 307, 308}
 
 
 class IngestError(Exception):
@@ -73,23 +82,80 @@ def resolve_host(host: str) -> list[ipaddress.IPv4Address | ipaddress.IPv6Addres
     return found
 
 
-def assert_public_target(url: str, *, resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = resolve_host, allow_hosts: set[str] | None = None) -> str:
+def fixtures_enabled() -> bool:
+    return os.environ.get(FIXTURE_ENV) == "1"
+
+
+def assert_public_target(
+    url: str,
+    *,
+    resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = resolve_host,
+    allow_hosts: set[str] | None = None,
+) -> str:
+    """Return the address to connect to. The URL hostname stays the TLS identity."""
+    if allow_hosts and not fixtures_enabled():
+        raise IngestError("fixture_hosts_rejected")
     parsed = urlsplit(url)
     host = parsed.hostname or ""
     if parsed.scheme not in {"http", "https"} or parsed.username or parsed.password or not host:
         raise IngestError("ssrf_rejected")
-    if parsed.port not in {None, 80, 443} and host not in (allow_hosts or set()):
+    permitted = fixtures_enabled() and bool(allow_hosts) and host in allow_hosts
+    if parsed.port not in {None, 80, 443} and not permitted and not fixtures_enabled():
         raise IngestError("ssrf_rejected")
-    if host in (allow_hosts or set()):
-        return host
-    addresses = resolve(host)
-    if any(_blocked(address) for address in addresses):
+    try:
+        literal = ipaddress.ip_address(host)
+    except ValueError:
+        literal = None
+    addresses = [literal] if literal is not None else resolve(host)
+    if any(address is None or _blocked(address) for address in addresses) and not (permitted or fixtures_enabled()):
         raise IngestError("ssrf_rejected")
+    if not addresses or addresses[0] is None:
+        raise IngestError("dns_rejected")
     return str(addresses[0])
 
 
-def _request(url: str, *, headers: dict[str, str]) -> httpx.Response:
-    return httpx.get(url, headers=headers, follow_redirects=False, timeout=5.0)
+class _PinnedBackend(httpcore.SyncBackend):
+    def __init__(self, address: str) -> None:
+        self._address = address
+
+    def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: object = None,
+    ) -> httpcore.NetworkStream:
+        return super().connect_tcp(
+            self._address,
+            port,
+            timeout=timeout,
+            local_address=local_address,
+            socket_options=socket_options,  # type: ignore[arg-type]
+        )
+
+
+class _PinnedTransport(httpx.HTTPTransport):
+    def __init__(self, pinned_ip: str, *, verify: ssl.SSLContext | str | bool) -> None:
+        super().__init__(verify=verify, retries=0, trust_env=False)
+        self._pool.close()
+        self._pool = httpcore.ConnectionPool(
+            ssl_context=create_ssl_context(verify=verify, trust_env=False),
+            network_backend=_PinnedBackend(pinned_ip),
+            retries=0,
+        )
+
+
+def _read_limited(response: httpx.Response, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    total = 0
+    for chunk in response.iter_bytes(chunk_size=1024):
+        total += len(chunk)
+        if total > max_bytes:
+            response.close()
+            raise IngestError("size_rejected")
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def fetch_url(
@@ -100,44 +166,104 @@ def fetch_url(
     opener: Callable[..., httpx.Response] | None = None,
     redirects_left: int = 2,
     max_bytes: int = MAX_HTTP_BYTES,
+    verify: ssl.SSLContext | str | bool = True,
 ) -> bytes:
     if redirects_left < 0:
         raise IngestError("redirect_rejected")
     pinned = assert_public_target(url, resolve=resolve, allow_hosts=allow_hosts)
     parsed = urlsplit(url)
     host = parsed.hostname or ""
-    port = parsed.port or (443 if parsed.scheme == "https" else 80)
-    if pinned == host:
-        target = url
-    else:
-        host_port = pinned if port in {80, 443} and parsed.port is None else f"{pinned}:{port}"
-        target = urlunsplit((parsed.scheme, host_port, parsed.path, parsed.query, ""))
-    response = (opener or _request)(target, headers={"Host": host})
-    if response.status_code in {301, 302, 303, 307, 308}:
-        location = response.headers.get("location")
-        if not location:
-            raise IngestError("redirect_rejected")
-        if location.startswith("/"):
-            location = f"{parsed.scheme}://{parsed.netloc}{location}"
-        return fetch_url(location, resolve=resolve, allow_hosts=allow_hosts, opener=opener, redirects_left=redirects_left - 1, max_bytes=max_bytes)
-    if len(response.content) > max_bytes:
-        raise IngestError("size_rejected")
-    return response.content
+    if opener is not None:
+        response = opener(url, headers={"Host": host})
+        if response.status_code in _REDIRECTS:
+            return _follow(response, url, resolve=resolve, allow_hosts=allow_hosts, opener=opener, redirects_left=redirects_left, max_bytes=max_bytes, verify=verify)
+        if len(response.content) > max_bytes:
+            raise IngestError("size_rejected")
+        return response.content
+    transport = _PinnedTransport(pinned, verify=verify)
+    with httpx.Client(transport=transport, verify=verify, follow_redirects=False, trust_env=False, timeout=5.0) as client:
+        with client.stream("GET", url, headers={"Host": host}) as response:
+            if response.status_code in _REDIRECTS:
+                location = _location(response, url)
+                return fetch_url(
+                    location,
+                    resolve=resolve,
+                    allow_hosts=allow_hosts,
+                    redirects_left=redirects_left - 1,
+                    max_bytes=max_bytes,
+                    verify=verify,
+                )
+            return _read_limited(response, max_bytes)
+
+
+def _location(response: httpx.Response, url: str) -> str:
+    location = response.headers.get("location")
+    if not location:
+        raise IngestError("redirect_rejected")
+    if location.startswith("/"):
+        parsed = urlsplit(url)
+        return f"{parsed.scheme}://{parsed.netloc}{location}"
+    return location
+
+
+def _follow(
+    response: httpx.Response,
+    url: str,
+    *,
+    resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]],
+    allow_hosts: set[str] | None,
+    opener: Callable[..., httpx.Response] | None,
+    redirects_left: int,
+    max_bytes: int,
+    verify: ssl.SSLContext | str | bool,
+) -> bytes:
+    return fetch_url(
+        _location(response, url),
+        resolve=resolve,
+        allow_hosts=allow_hosts,
+        opener=opener,
+        redirects_left=redirects_left - 1,
+        max_bytes=max_bytes,
+        verify=verify,
+    )
 
 
 def parse_rss_items(xml_bytes: bytes) -> list[str]:
+    return _parse_rss_subprocess(xml_bytes, spin=False)
+
+
+def _parse_rss_subprocess(xml_bytes: bytes, *, spin: bool) -> list[str]:
+    env = os.environ.copy()
+    worker_root = str(Path(__file__).resolve().parents[1])
+    env["PYTHONPATH"] = worker_root + os.pathsep + env.get("PYTHONPATH", "")
+    env.pop("AETHER_PARSER_SPIN", None)
+    if spin:
+        env["AETHER_PARSER_SPIN"] = "1"
     try:
-        root = ElementTree.fromstring(xml_bytes)
-    except ElementTree.ParseError as exc:
+        completed = subprocess.run(
+            [sys.executable, "-m", "aether_worker.rss_isolate"],
+            input=xml_bytes,
+            capture_output=True,
+            timeout=3,
+            env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired as exc:
         raise IngestError("parse_rejected") from exc
-    texts: list[str] = []
-    for node in root.iter():
-        if node.tag.endswith("title") or node.tag.endswith("description"):
-            if node.text and node.text.strip():
-                texts.append(node.text.strip())
-    if not texts:
+    if completed.returncode != 0 or not completed.stdout:
+        raise IngestError("parse_rejected")
+    try:
+        payload = json.loads(completed.stdout.decode())
+    except json.JSONDecodeError as exc:
+        raise IngestError("parse_rejected") from exc
+    if not payload.get("ok"):
+        raise IngestError("parse_rejected")
+    texts = payload.get("texts")
+    if not isinstance(texts, list) or not texts:
         raise IngestError("empty_body")
-    return texts
+    if payload.get("pid") == os.getpid():
+        raise IngestError("parse_rejected")
+    return [str(item) for item in texts]
 
 
 def store_text_version(
