@@ -1,6 +1,6 @@
 # 研究任务改用 live 模型
 
-基线 `e1cc9e5`。默认提供者是 live。`AETHER_RESEARCH_PROVIDER=scripted` 才走离线摘录。预算在调用前预留。`allowed_source_ids` 按字面限制资料。
+基线 `e1cc9e5`。默认提供者是 live。`AETHER_RESEARCH_PROVIDER=scripted` 才走离线摘录。预算在调用前预留。`allowed_source_ids` 按字面限制资料。`scripts/run_live_task_check.py` 读取上传响应的 `artifact_id`。异常结果包含步骤、类型和去掉密钥后的消息。
 
 # 审计三轮
 

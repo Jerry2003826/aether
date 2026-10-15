@@ -120,7 +120,19 @@ def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str]) -> b
     return False
 
 
+def _exception_report(step: str, exc: BaseException) -> dict[str, object]:
+    secret = os.environ.get(LIVE_KEY) or ""
+    return _report(
+        "failed",
+        reason="exception",
+        step=step,
+        error_type=type(exc).__name__,
+        error_message=redact_secret(str(exc), secret),
+    )
+
+
 def _run_task(env: dict[str, str]) -> dict[str, object]:
+    step = "startup"
     api_port = _port()
     queue = f"aether-live-check-{uuid.uuid4()}"
     artifact_root = ROOT / "data" / "live-task-check"
@@ -143,43 +155,54 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
             "AETHER_INTAKE_PAUSE_SECONDS": "0",
         }
     )
-    api, _api_logs = _start([sys.executable, "-m", "aether_api.main"], child)
-    worker, worker_logs = _start([sys.executable, "-m", "aether_worker"], child)
+    step = "start_processes"
+    api: subprocess.Popen[str] | None = None
+    worker: subprocess.Popen[str] | None = None
     try:
+        api, _api_logs = _start([sys.executable, "-m", "aether_api.main"], child)
+        worker, worker_logs = _start([sys.executable, "-m", "aether_worker"], child)
+        step = "wait_ready"
         if not _wait_http(f"http://127.0.0.1:{api_port}/health/live") or not _wait_line(worker_logs, "aether-worker-ready", worker):
-            return _report("incomplete", reason="api_or_worker_did_not_start")
+            return _report("incomplete", reason="api_or_worker_did_not_start", step=step)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=30) as http:
+            step = "bootstrap"
             bootstrap = http.post(
                 "/v1/auth/bootstrap",
                 headers={"Origin": ORIGIN},
                 json={"bootstrap_secret": secret, "display_name": "所有者", "passphrase": PASSPHRASE},
             )
             if bootstrap.status_code != 201:
-                return _report("failed", reason="bootstrap_failed", http_status=bootstrap.status_code)
+                return _report("failed", reason="bootstrap_failed", step=step, http_status=bootstrap.status_code)
             csrf = bootstrap.json()["csrf_token"]
 
             def headers(key: str) -> dict[str, str]:
                 return {"Origin": ORIGIN, "X-CSRF-Token": csrf, "Idempotency-Key": key}
 
+            step = "create_project"
             project = http.post("/v1/projects", headers=headers("live-project"), json={"name": "真实模型检查"})
             if project.status_code != 201:
-                return _report("failed", reason="project_failed", http_status=project.status_code)
+                return _report("failed", reason="project_failed", step=step, http_status=project.status_code)
             project_id = project.json()["id"]
+            step = "upload"
             uploaded = http.post(
                 f"/v1/projects/{project_id}/artifacts",
                 headers=headers("live-doc"),
                 files={"file": ("note.txt", f"{FACT}\n".encode(), "text/plain")},
             )
             if uploaded.status_code != 201:
-                return _report("failed", reason="upload_failed", http_status=uploaded.status_code)
+                return _report("failed", reason="upload_failed", step=step, http_status=uploaded.status_code)
+            step = "read_upload"
+            artifact_id = str(uploaded.json()["artifact_id"])
+            step = "create_task"
             created = http.post(
                 f"/v1/projects/{project_id}/tasks",
                 headers=headers("live-task"),
-                json={"goal": GOAL, "allowed_source_ids": [uploaded.json()["id"]]},
+                json={"goal": GOAL, "allowed_source_ids": [artifact_id]},
             )
             if created.status_code != 202:
-                return _report("failed", reason="task_failed", http_status=created.status_code)
+                return _report("failed", reason="task_failed", step=step, http_status=created.status_code)
             task_id = created.json()["resource_id"]
+            step = "poll_task"
             deadline = time.time() + 120
             last: dict[str, object] = {}
             while time.time() < deadline:
@@ -189,11 +212,12 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
                     if last.get("status") in {"SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"}:
                         break
                 time.sleep(0.5)
+            step = "read_events"
             events = http.get(f"/v1/projects/{project_id}/tasks/{task_id}/events")
             event_text = events.text if events.status_code == 200 else ""
             call_count = event_text.count("research.call")
             if last.get("status") not in {"SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"} or call_count != 1:
-                return _report("failed", task_status=last.get("status"), research_calls=call_count, reason="task_did_not_finish_one_live_call")
+                return _report("failed", task_status=last.get("status"), research_calls=call_count, reason="task_did_not_finish_one_live_call", step=step)
             return _report(
                 "probed",
                 task_status=last.get("status"),
@@ -202,6 +226,8 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
                 verification_count=len(last.get("verification_results") or []),
                 cost_status="unknown",
             )
+    except Exception as exc:
+        return _exception_report(step, exc)
     finally:
         _stop(worker)
         _stop(api)
@@ -222,7 +248,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         report = _run_task(dict(os.environ))
     except Exception as exc:
-        report = _report("failed", reason=redact_secret(f"{type(exc).__name__}", os.environ.get(LIVE_KEY) or ""))
+        report = _exception_report(str(getattr(exc, "step", "run_task")), exc)
     text = _write(report)
     sys.stdout.write(text)
     return {"probed": 0, "failed": 1, "blocked": 2, "incomplete": 3}[str(report["status"])]

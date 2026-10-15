@@ -172,13 +172,14 @@
     "probe_status": "probed",
     "acceptance_script": "scripts/run_f26_acceptance.py",
     "acceptance_status": "probed",
-    "acceptance_head": "cb22fbc",
+    "acceptance_head": "d694f89",
     "acceptance_result": "reports/f26_acceptance_result.json",
-    "acceptance_report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "acceptance_report_sha256": "710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe",
+    "acceptance_file_sha256": "52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38",
     "semantic_support": "not_judged",
     "cost_status": "unknown",
     "acceptance_cap": {"max_calls": 8, "max_total_tokens": 20000, "max_output_tokens": 512, "spend_cap_usd": 1},
-    "reason": "cb22fbc 的完整验收退出码 0。协议、现场混合检索引用、OpenHands 编码和 Linux 隔离都通过。比较报告 488 token，没有截断。semantic_support 仍是 not_judged，费用 unknown。结果文件里的 live_ready 仍是 false，因为脚本不自证；交付矩阵按产品工程加 F26 记为 passed。"
+    "reason": "d694f89 的完整验收退出码 0。协议、现场 BGE、OpenHands 1.54.0 和 Linux 隔离都通过。3 次调用，合计 1303 token。比较报告 completion 484 token。semantic_support 仍是 not_judged，费用 unknown。结果文件里的 live_ready 仍是 false，因为脚本不自证；交付矩阵按产品工程加 F26 记为 passed。"
   },
   "f27": {
     "status": "done",
