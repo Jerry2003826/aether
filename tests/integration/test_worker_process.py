@@ -187,7 +187,14 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
                 json={"kind": "url", "locator": locator, "allowed_domains": ["example.test"]},
             )
             assert source.status_code == 202, source.text
-            goal = "进程目标：" + uuid.uuid4().hex
+            fact = "事实：水在标准大气压下于一百摄氏度沸腾"
+            uploaded = http.post(
+                f"/v1/projects/{project_id}/artifacts",
+                headers=_headers(csrf, "proc-source-doc"),
+                files={"file": ("note.txt", f"{fact}\n".encode(), "text/plain")},
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            goal = "请根据已上传资料回答沸点"
             created = http.post(
                 f"/v1/projects/{project_id}/tasks",
                 headers=_headers(csrf, "proc-task"),
@@ -195,14 +202,20 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             )
             assert created.status_code == 202, created.text
             task_id = created.json()["resource_id"]
-            observed = _observe(http, project_id, task_id, locator, goal, worker, worker_logs)
+            _wait_status(http, project_id, task_id, "RUNNING", worker, worker_logs)
             _stop(worker)
             worker = None
-            time.sleep(0.5)
-            held = _observe(http, project_id, task_id, locator, goal, None, worker_logs)
-            assert held["sources"] == observed["sources"]
-            assert held["artifacts"] == observed["artifacts"]
-            assert held["verifications"] == observed["verifications"]
+            interrupted = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
+            assert interrupted.status_code == 200, interrupted.text
+            assert interrupted.json()["status"] == "RUNNING", interrupted.text
+            worker_logs.clear()
+            worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
+            _wait_line(worker_logs, "aether-worker-ready", worker)
+            finished = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
+            assert finished["status"] == "SUCCEEDED"
+            assert finished["research_calls"] == 1
+            _stop(worker)
+            worker = None
             second = http.post(
                 f"/v1/projects/{project_id}/sources",
                 headers=_headers(csrf, "proc-source-2"),
@@ -212,58 +225,75 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             worker_logs.clear()
             worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
             _wait_line(worker_logs, "aether-worker-ready", worker)
-            restarted = _wait_sources(http, project_id, 2, worker, worker_logs)
-            assert restarted["sources"] == 2
-            assert restarted["artifacts"] == observed["artifacts"]
-            assert restarted["verifications"] == observed["verifications"]
-            assert len(restarted["locators"]) == 2
+            _wait_locator(http, project_id, locator + "/again", worker, worker_logs)
+            stable = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
+            assert stable["research_calls"] == 1
+            assert stable["verifications"] == finished["verifications"]
+            assert stable["answer_sha"] == finished["answer_sha"]
+            sources = http.get(f"/v1/projects/{project_id}/sources")
+            assert sources.status_code == 200
+            locators = [item["locator"] for item in sources.json()["items"]]
+            assert locator in locators
+            assert locators.count(locator) == 1
+            assert locators.count(locator + "/again") == 1
     finally:
         _stop(worker)
         _stop(api)
         secret_path.unlink(missing_ok=True)
 
 
-def _observe(http: httpx.Client, project_id: str, task_id: str, locator: str, goal: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> dict[str, object]:
-    deadline = time.time() + 45
+def _wait_status(http: httpx.Client, project_id: str, task_id: str, status: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> dict:
+    deadline = time.time() + 30
     last = ""
     while time.time() < deadline:
         if worker is not None and worker.poll() is not None:
             raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
-        sources = http.get(f"/v1/projects/{project_id}/sources")
         task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
-        if sources.status_code != 200 or task.status_code != 200:
-            last = sources.text + task.text
-            time.sleep(0.25)
+        if task.status_code == 200 and task.json()["status"] == status:
+            return task.json()
+        last = task.text
+        time.sleep(0.05)
+    raise AssertionError(f"任务没有进入 {status}: {last}\n{''.join(logs[-40:])}")
+
+
+def _wait_verified(http: httpx.Client, project_id: str, task_id: str, fact: str, goal: str, worker: subprocess.Popen[str], logs: list[str]) -> dict[str, object]:
+    deadline = time.time() + 45
+    last = ""
+    while time.time() < deadline:
+        if worker.poll() is not None:
+            raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
+        task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
+        events = http.get(f"/v1/projects/{project_id}/tasks/{task_id}/events")
+        if task.status_code != 200:
+            last = task.text
+            time.sleep(0.2)
             continue
-        items = sources.json()["items"]
         body = task.json()
-        verifications = body["verification_results"]
-        if any(item["locator"] == locator for item in items) and body["artifact_ids"] and verifications:
-            downloaded = []
-            for artifact_id in body["artifact_ids"]:
-                artifact = http.get(f"/v1/projects/{project_id}/artifacts/{artifact_id}")
-                assert artifact.status_code == 200, artifact.text
-                downloaded.append(artifact.content)
-            goal_bytes = next(blob for blob in downloaded if goal.encode() in blob)
-            document = json.loads(goal_bytes)
-            assert document["goal"] == goal
-            assert document["task_id"] == task_id
-            passed = next(item for item in verifications if item["verdict"] == "PASS")
-            assert passed["verifier_identity"] == "aether_verifier"
-            assert passed["artifact_sha256"] == hashlib.sha256(goal_bytes).hexdigest()
-            assert body["status"] == "QUEUED"
-            return {
-                "sources": len(items),
-                "artifacts": len(body["artifact_ids"]),
-                "verifications": len(verifications),
-                "locators": [item["locator"] for item in items],
-            }
-        last = json.dumps({"sources": items, "task": body}, ensure_ascii=False)
-        time.sleep(0.25)
-    raise AssertionError(f"命令没有被 worker 消费: {last}\n{''.join(logs[-40:])}")
+        if body["status"] not in {"SUCCEEDED", "FAILED", "NEEDS_REVIEW"}:
+            last = task.text
+            time.sleep(0.2)
+            continue
+        passed = next((item for item in body["verification_results"] if item["verdict"] == "PASS"), None)
+        assert body["status"] == "SUCCEEDED", task.text
+        assert passed is not None, task.text
+        assert passed["verifier_identity"] == "aether_verifier"
+        answer = b""
+        for artifact_id in body["artifact_ids"]:
+            downloaded = http.get(f"/v1/projects/{project_id}/artifacts/{artifact_id}")
+            assert downloaded.status_code == 200, downloaded.text
+            if hashlib.sha256(downloaded.content).hexdigest() == passed["artifact_sha256"]:
+                answer = downloaded.content
+        assert answer, task.text
+        text = answer.decode()
+        assert fact in text
+        assert text.strip() != goal
+        assert json.loads(json.dumps({"goal": goal}))["goal"] != text.strip()
+        assert events.text.count("research.call") == 1
+        return {"status": body["status"], "verifications": len(body["verification_results"]), "research_calls": 1, "answer_sha": passed["artifact_sha256"]}
+    raise AssertionError(f"任务没有完成验证: {last}\n{''.join(logs[-40:])}")
 
 
-def _wait_sources(http: httpx.Client, project_id: str, count: int, worker: subprocess.Popen[str], logs: list[str]) -> dict[str, object]:
+def _wait_locator(http: httpx.Client, project_id: str, locator: str, worker: subprocess.Popen[str], logs: list[str]) -> None:
     deadline = time.time() + 30
     last = ""
     while time.time() < deadline:
@@ -271,21 +301,8 @@ def _wait_sources(http: httpx.Client, project_id: str, count: int, worker: subpr
             raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
         sources = http.get(f"/v1/projects/{project_id}/sources")
         assert sources.status_code == 200, sources.text
-        items = sources.json()["items"]
-        projects = http.get("/v1/projects")
-        assert projects.status_code == 200
-        project_id_live = projects.json()["items"][0]["id"]
-        task_list = http.get(f"/v1/projects/{project_id_live}/tasks")
-        task_id = task_list.json()["items"][0]["id"]
-        task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
-        if len(items) >= count and task.status_code == 200:
-            body = task.json()
-            return {
-                "sources": len(items),
-                "artifacts": len(body["artifact_ids"]),
-                "verifications": len(body["verification_results"]),
-                "locators": [item["locator"] for item in items],
-            }
+        if any(item["locator"] == locator for item in sources.json()["items"]):
+            return
         last = sources.text
-        time.sleep(0.25)
-    raise AssertionError(f"重启后没有消费新命令: {last}\n{''.join(logs[-40:])}")
+        time.sleep(0.2)
+    raise AssertionError(f"来源没有被消费: {last}\n{''.join(logs[-40:])}")

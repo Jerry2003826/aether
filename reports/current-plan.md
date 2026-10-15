@@ -1,7 +1,11 @@
-# Hermes 四组探测已记录，还不能判断领先
+# 审计二轮
 
-监督者在 head `fcceba5` 上用 live key 跑了 `scripts/run_hermes_compare.py`。原样结果在 `reports/hermes_compare_result.json`。四组各 1 条，都答对，6 次计量调用。每组 n=1，Wilson 95% 区间约 0.21–1.0。`comparative_evidence` 保持 not_run，`superior` 保持 null，费用 unknown。请求别名 `deepseek-chat`，上游返回的 model 是 `deepseek-flash`。
+基线 `55fd636fa1615314c129f5728663f3450595bc47`。
 
-上限 8 次调用、8000 token、单次输出 128、四组 45 秒墙钟。子进程环境是允许名单，learned 读取 `memories/MEMORY.md`，工具集是空的 `bot_room`，网关保留 SSE。
+- R2-01：验证者自己读候选字节，证据键包含候选、合同和摘要。
+- C01：Temporal 活动读取已上传文本，脚本提供者写回答，验证后进入 SUCCEEDED、FAILED 或 NEEDS_REVIEW。
+- R2-02：日志写满才算成功；截断尾隔离，中间坏行单独报错。
+- R2-03：规范化 `./` 成员路径，重名拒绝。
+- R2-04：`Database.fetch_one` / `fetch_all` 回到类上。
 
-审计一轮的 D01–D04 和 C01 已在 main（`9d22bb8`）上。记录见 `reports/audits/gpt_round1/REPAIR_RESULT.md`。
+没有改 `STATUS.json`。脚本路径不是 live 模型。

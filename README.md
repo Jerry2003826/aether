@@ -118,7 +118,7 @@ Worker 是同一个 Python 源码里的另一个进程，不是第二套调度�
 | `evaluation.create`、`skill.evaluate` | `aether_verifier` 调用 `apply_verifier_commands` |
 | `memory.*` | `aether_worker` 调用 `apply_memory_commands` |
 
-`deliver_pending` 不会领取控制台、记忆或验证命令。停掉进程再启动时，已经 `DELIVERED` 的命令不会再执行一次；Temporal 按 `command_id` 去重，产物和验证按任务幂等。
+`deliver_pending` 不会领取控制台、记忆或验证命令。`start` 先把任务标成 `RUNNING`，再读取本项目已上传的文本，用明确标记的脚本提供者生成回答，然后由 `aether_verifier` 重新读取磁盘上的候选。只有独立观察的哈希、来源摘录和合同都对得上才是 `PASS`，任务才进入 `SUCCEEDED`；对不上是 `FAILED`，没有可读取的资料是 `NEEDS_REVIEW`。这不是 live 模型。停掉进程再启动时，已经完成的活动不会再执行一次；Temporal 按 `command_id` 去重，回答和验证按任务幂等。编码作业仍走 `coding.create`，由同一个进程调用已有的授权作业写入，不另起调度器。
 
 把 `ensure_database` 返回的三个角色 URL 设进环境。产物目录必须和 API 的 `AETHER_ARTIFACT_ROOT` 是同一个路径。
 

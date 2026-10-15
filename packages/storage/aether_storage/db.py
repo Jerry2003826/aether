@@ -50,6 +50,13 @@ class Database:
                     raise
                 _run_callbacks(after_commit)
 
+    def fetch_one(self, conn: Connection, statement: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
+        row = conn.execute(text(statement), params or {}).mappings().first()
+        return None if row is None else dict(row)
+
+    def fetch_all(self, conn: Connection, statement: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+        return [dict(row) for row in conn.execute(text(statement), params or {}).mappings()]
+
 
 def _run_callbacks(callbacks: list[Callable[[], None]]) -> None:
     for callback in list(callbacks):
@@ -76,10 +83,3 @@ def _release_dbapi(conn: Connection) -> None:
             rollback()
     except Exception:
         return
-
-    def fetch_one(self, conn: Connection, statement: str, params: dict[str, Any] | None = None) -> dict[str, Any] | None:
-        row = conn.execute(text(statement), params or {}).mappings().first()
-        return None if row is None else dict(row)
-
-    def fetch_all(self, conn: Connection, statement: str, params: dict[str, Any] | None = None) -> list[dict[str, Any]]:
-        return [dict(row) for row in conn.execute(text(statement), params or {}).mappings()]

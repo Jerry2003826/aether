@@ -5,7 +5,9 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
-    from aether_worker.goal_effect import materialize_goal
+    from aether_worker.goal_effect import execute_task, prepare_task
+
+INTAKE_PAUSE = timedelta(seconds=4)
 
 
 @workflow.defn
@@ -40,15 +42,14 @@ class DurableTaskWorkflow:
             while self._pending:
                 item = self._pending.pop(0)
                 if item.get("project_id"):
-                    await workflow.execute_activity(
-                        materialize_goal,
-                        {
-                            "task_id": task_id,
-                            "project_id": str(item["project_id"]),
-                            "command_id": str(item["command_id"]),
-                        },
-                        start_to_close_timeout=timedelta(seconds=60),
-                    )
+                    activity_input = {
+                        "task_id": task_id,
+                        "project_id": str(item["project_id"]),
+                        "command_id": str(item["command_id"]),
+                    }
+                    await workflow.execute_activity(prepare_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+                    await workflow.sleep(INTAKE_PAUSE)
+                    await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
             if self._closed:
                 break
         return list(self._applied)
