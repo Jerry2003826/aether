@@ -12,6 +12,7 @@ import zipfile
 import pytest
 from sqlalchemy import text
 
+from aether_domain.security import sha256_text
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
 from aether_worker.goal_effect import WorkerEndpoints, _ensure_verification
@@ -33,9 +34,11 @@ def _endpoints(role_urls, root) -> WorkerEndpoints:
     )
 
 
-def _contract(worker: Database, owner: str, project: str, task_id: str, digest: str) -> str:
+def _contract(worker: Database, owner: str, project: str, task_id: str) -> tuple[str, str]:
+    content = '{"criterion_id":"goal_artifact"}'
+    digest = sha256_text(content)
     with worker.transaction(owner_id=owner, project_id=project) as conn:
-        return str(
+        contract_id = str(
             conn.execute(
                 text(
                     "INSERT INTO goal_contracts (project_id, task_id, contract_version, content, contract_sha256, approved_by, approved_at) "
@@ -44,12 +47,13 @@ def _contract(worker: Database, owner: str, project: str, task_id: str, digest: 
                 {
                     "project_id": project,
                     "task_id": task_id,
-                    "content": '{"criterion_id":"goal_artifact"}',
+                    "content": content,
                     "digest": digest,
                     "owner": owner,
                 },
             ).scalar_one()
         )
+    return contract_id, digest
 
 
 def _task(worker: Database, project: str, goal: str) -> str:
@@ -175,8 +179,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
             text("UPDATE artifacts SET task_id = :task_id WHERE project_id = :project_id AND id = :id"),
             {"task_id": task_id, "project_id": project, "id": answer["artifact_id"]},
         )
-    digest = "ab" * 32
-    contract_id = _contract(worker, owner, project, task_id, digest)
+    contract_id, digest = _contract(worker, owner, project, task_id)
     endpoints = _endpoints(role_urls, store.root)
     first = _ensure_verification(
         endpoints,
@@ -200,7 +203,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     path = store.root / project / str(answer["sha256"])[:2] / str(answer["sha256"])
     path.write_bytes(b"corrupt document!")
     fresh_task = _task(worker, project, goal)
-    fresh_contract = _contract(worker, owner, project, fresh_task, "cd" * 32)
+    fresh_contract, fresh_digest = _contract(worker, owner, project, fresh_task)
     corrupt_answer = str(answer["artifact_id"])
     # The corrupt bytes belong to the first answer. A second candidate is stored intact, then we point
     # the corrupt check at the damaged id on its own task so the row cannot be the first PASS.
@@ -218,7 +221,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
         project_id=project,
         task_id=fresh_task,
         contract_id=fresh_contract,
-        contract_sha="cd" * 32,
+        contract_sha=fresh_digest,
         artifact_id=str(damaged["artifact_id"]),
         goal=goal,
     )
@@ -232,7 +235,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     assert failed != first
 
     tombstone_task = _task(worker, project, goal)
-    tombstone_contract = _contract(worker, owner, project, tombstone_task, "ef" * 32)
+    tombstone_contract, tombstone_digest = _contract(worker, owner, project, tombstone_task)
     hidden = store.put(owner_id=owner, project_id=project, data="资料记载：事实：水在标准大气压下于一百摄氏度沸腾。".encode(), media_type="text/plain", classification="task_answer")
     with worker.transaction(owner_id=owner, project_id=project) as conn:
         conn.execute(
@@ -246,7 +249,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
         project_id=project,
         task_id=tombstone_task,
         contract_id=tombstone_contract,
-        contract_sha="ef" * 32,
+        contract_sha=tombstone_digest,
         artifact_id=str(hidden["artifact_id"]),
         goal=goal,
     )
@@ -270,14 +273,14 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
             text("UPDATE artifacts SET task_id = :task_id WHERE project_id = :project_id AND id = :id"),
             {"task_id": other_task, "project_id": project, "id": other["artifact_id"]},
         )
-    other_contract = _contract(worker, owner, project, other_task, "12" * 32)
+    other_contract, other_digest = _contract(worker, owner, project, other_task)
     second = _ensure_verification(
         endpoints,
         owner_id=owner,
         project_id=project,
         task_id=other_task,
         contract_id=other_contract,
-        contract_sha="12" * 32,
+        contract_sha=other_digest,
         artifact_id=str(other["artifact_id"]),
         goal="请回答冰点",
     )

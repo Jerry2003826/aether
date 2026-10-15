@@ -12,6 +12,8 @@ import tarfile
 import threading
 import uuid
 import zipfile
+from collections.abc import Iterator
+from contextlib import contextmanager
 from io import BytesIO
 from pathlib import Path, PurePosixPath
 
@@ -554,44 +556,71 @@ class ArtifactStore:
             raise ArtifactError("path_rejected", "存储路径越出产物根目录")
         return candidate
 
-    def _journal(self, project_id: str, record: dict[str, object]) -> None:
+    @contextmanager
+    def _exclusive_journal(self, project_id: str) -> Iterator[int]:
+        """Lock a stable sidecar so append and tail repair cannot pass each other.
+
+        The lock file stays on one inode. The journal itself is truncated to the
+        valid prefix length and is not replaced, so a crash cannot drop that prefix.
+        """
         directory = self.root / "journal"
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{project_id}.jsonl"
-        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode()
+        lock_fd = os.open(directory / f"{project_id}.lock", os.O_CREAT | os.O_RDWR, 0o644)
         with self._journal_guard:
-            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
             try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                self._write_all(fd, line)
+                fcntl.flock(lock_fd, fcntl.LOCK_EX)
+                fd = os.open(directory / f"{project_id}.jsonl", os.O_CREAT | os.O_RDWR, 0o644)
+                try:
+                    yield fd
+                finally:
+                    os.close(fd)
             finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+                fcntl.flock(lock_fd, fcntl.LOCK_UN)
+                os.close(lock_fd)
+
+    def _journal(self, project_id: str, record: dict[str, object]) -> None:
+        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode()
+        with self._exclusive_journal(project_id) as fd:
+            self._repair_torn_tail(project_id, fd)
+            os.lseek(fd, 0, os.SEEK_END)
+            self._write_all(fd, line)
 
     def _journal_rows(self, project_id: str) -> list[dict[str, object]]:
         path = self.root / "journal" / f"{project_id}.jsonl"
         if not path.exists():
             return []
-        with self._journal_guard:
-            fd = os.open(path, os.O_RDWR)
-            try:
-                fcntl.flock(fd, fcntl.LOCK_EX)
-                raw = self._read_all(fd)
-                if raw and not raw.endswith(b"\n"):
-                    head, _sep, tail = raw.rpartition(b"\n")
-                    self._quarantine_journal_tail(project_id, tail)
-                    kept = head + b"\n" if head else b""
-                    os.lseek(fd, 0, os.SEEK_SET)
-                    os.ftruncate(fd, 0)
-                    if kept:
-                        self._write_all(fd, kept)
-                    else:
-                        os.fsync(fd)
-                    raw = kept
-                return self._parse_journal(raw)
-            finally:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-                os.close(fd)
+        with self._exclusive_journal(project_id) as fd:
+            raw = self._repair_torn_tail(project_id, fd)
+            return self._parse_journal(raw)
+
+    def _repair_torn_tail(self, project_id: str, fd: int) -> bytes:
+        os.lseek(fd, 0, os.SEEK_SET)
+        raw = self._read_all(fd)
+        if not raw or raw.endswith(b"\n"):
+            return raw
+        head, _separator, tail = raw.rpartition(b"\n")
+        kept = head + b"\n" if head else b""
+        self._quarantine_journal_tail(project_id, tail)
+        if kept:
+            self._checkpoint_prefix(project_id, kept)
+        os.ftruncate(fd, len(kept))
+        os.fsync(fd)
+        return kept
+
+    def _checkpoint_prefix(self, project_id: str, kept: bytes) -> None:
+        """Copy the valid prefix before truncating. A failed copy leaves the journal untouched."""
+        directory = self.root / "journal-repair"
+        directory.mkdir(parents=True, exist_ok=True)
+        temporary = directory / f"{uuid.uuid4().hex}.prefix"
+        fd = os.open(temporary, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
+        try:
+            self._write_all(fd, kept)
+        except Exception:
+            os.close(fd)
+            temporary.unlink(missing_ok=True)
+            raise
+        os.close(fd)
+        os.replace(temporary, directory / f"{project_id}.prefix")
 
     def _quarantine_journal_tail(self, project_id: str, tail: bytes) -> None:
         directory = self.root / "journal-quarantine"

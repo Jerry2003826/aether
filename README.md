@@ -118,7 +118,11 @@ Worker 是同一个 Python 源码里的另一个进程，不是第二套调度�
 | `evaluation.create`、`skill.evaluate` | `aether_verifier` 调用 `apply_verifier_commands` |
 | `memory.*` | `aether_worker` 调用 `apply_memory_commands` |
 
-`deliver_pending` 不会领取控制台、记忆或验证命令。`start` 先把任务标成 `RUNNING`，再读取本项目已上传的文本，用明确标记的脚本提供者生成回答，然后由 `aether_verifier` 重新读取磁盘上的候选。只有独立观察的哈希、来源摘录和合同都对得上才是 `PASS`，任务才进入 `SUCCEEDED`；对不上是 `FAILED`，没有可读取的资料是 `NEEDS_REVIEW`。这不是 live 模型。停掉进程再启动时，已经完成的活动不会再执行一次；Temporal 按 `command_id` 去重，回答和验证按任务幂等。编码作业仍走 `coding.create`，由同一个进程调用已有的授权作业写入，不另起调度器。
+`deliver_pending` 不会领取控制台、记忆或验证命令。`start` 先把任务标成 `RUNNING`，再读取本项目已上传的文本，用明确标记的离线脚本提供者摘录资料，然后由 `aether_verifier` 重新读取磁盘上的候选和权威合同。报告分开记录流程是否跑完、字节是否完整、目标是否被摘录覆盖。三项都通过才是 `PASS`，任务才进入 `SUCCEEDED`。字节或合同对不上是 `FAILED`。没有可读取的资料，或者这个离线摘录回答不了目标（例如计算题），是 `NEEDS_REVIEW`，不会标成 `SUCCEEDED`。这不是 live 模型。
+
+`pause`、`resume`、`cancel` 会改变任务状态。接口先写下 `resume_state`，worker 再按允许的迁移写成 `PAUSED`、`RUNNING` 或 `CANCELLED`。暂停之后不会读资料、不会写回答；恢复后才执行。取消不是回滚。相同内容可以共用一条产物记录，每个任务通过 `task_artifacts` 单独引用，不会把第一条任务的 `task_id` 改掉。
+
+停掉进程再启动时，已经完成的活动不会再执行一次；Temporal 按 `command_id` 去重。验证缓存只命中同一次观察：候选、权威合同、验收版本和来源快照都要一致，旧的 PASS 不会盖住后来的损坏或删除。编码作业仍走 `coding.create`，由同一个进程调用已有的授权作业写入，不另起调度器。
 
 把 `ensure_database` 返回的三个角色 URL 设进环境。产物目录必须和 API 的 `AETHER_ARTIFACT_ROOT` 是同一个路径。
 

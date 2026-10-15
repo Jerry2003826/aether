@@ -18,7 +18,7 @@ from aether_storage.db import Database
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
-from aether_worker.goal_effect import WorkerEndpoints, configure, execute_task, prepare_task
+from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task
 from aether_worker.memory import apply_memory_commands
 
 
@@ -91,7 +91,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         client,
         task_queue=resolved.task_queue,
         workflows=[DurableTaskWorkflow],
-        activities=[prepare_task, execute_task],
+        activities=[prepare_task, execute_task, apply_task_control],
     )
     dispatcher = Database(resolved.dispatcher_url)
     database = Database(resolved.worker_url)

@@ -1,7 +1,8 @@
 """Turn an accepted task start into a durable artifact and an independent verification.
 
 The activity is idempotent. A worker restart or a Temporal retry must not add a second
-artifact, contract, or verification row for the same task.
+artifact, contract, or verification row for the same observation. Historical evidence
+stays in place; a new observation gets a new row.
 """
 
 from __future__ import annotations
@@ -19,9 +20,14 @@ from temporalio import activity
 from aether_domain.security import sha256_text
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
-from aether_worker.research import record_verification, scripted_answer
+from aether_worker.research import offline_fact, record_verification, scripted_answer
 
 CRITERION_ID = "goal_artifact"
+VERIFIER_VERSION = "goal-artifact-3"
+TERMINAL_STATUSES = ("SUCCEEDED", "FAILED", "CANCELLED")
+PAUSEABLE_STATUSES = ("QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL")
+NON_TERMINAL_STATUSES = ("DRAFT", "QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "NEEDS_REVIEW")
+STOP_STATUSES = ("SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED", "PAUSED")
 
 
 @dataclass(frozen=True)
@@ -47,6 +53,12 @@ def goal_document(task_id: str, goal: str) -> bytes:
     return json.dumps({"goal": goal, "task_id": task_id}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode()
 
 
+def canonical_json(value: object) -> str:
+    if isinstance(value, str):
+        value = json.loads(value)
+    return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+
 @activity.defn
 async def prepare_task(payload: dict) -> dict[str, str]:
     if ENDPOINTS is None:
@@ -59,6 +71,13 @@ async def execute_task(payload: dict) -> dict[str, str]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
     return execute_task_effect(ENDPOINTS, payload)
+
+
+@activity.defn
+async def apply_task_control(payload: dict) -> dict[str, Any]:
+    if ENDPOINTS is None:
+        raise RuntimeError("worker endpoints are not configured")
+    return apply_task_control_effect(ENDPOINTS, payload)
 
 
 @activity.defn
@@ -75,6 +94,9 @@ def prepare_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
         return {"status": "ignored"}
     owner_id, project_id, task_id, goal = command
     worker = Database(endpoints.worker_url)
+    blocked = _block_execution(worker, owner_id, project_id, task_id)
+    if blocked is not None:
+        return {"status": blocked, "task_id": task_id}
     store = ArtifactStore(endpoints.artifact_root, worker)
     _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
     _ensure_artifact(
@@ -87,29 +109,39 @@ def prepare_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
         data=goal_document(task_id, goal),
         media_type="text/plain",
     )
-    _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="RUNNING", allowed=("QUEUED",))
+    actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="RUNNING", allowed=("QUEUED", "RUNNING"))
+    if actual != "RUNNING":
+        return {"status": actual, "task_id": task_id}
     _event(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, event_key=f"running-{task_id}", event_type="task.running", payload={"status": "RUNNING"})
     return {"status": "prepared", "task_id": task_id}
 
 
 def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> dict[str, str]:
-    command = _start_command(endpoints, payload)
+    command = _execution_context(endpoints, payload)
     if command is None:
         return {"status": "ignored"}
     owner_id, project_id, task_id, goal = command
     worker = Database(endpoints.worker_url)
+    blocked = _block_execution(worker, owner_id, project_id, task_id)
+    if blocked is not None:
+        return {"status": blocked, "task_id": task_id}
     store = ArtifactStore(endpoints.artifact_root, worker)
-    status = _task_status(worker, owner_id, project_id, task_id)
-    if status in {"SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"}:
-        return {"status": status, "task_id": task_id}
     sources = _source_texts(worker, store, owner_id, project_id)
     if not sources:
-        _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
-        return {"status": "NEEDS_REVIEW", "task_id": task_id}
+        actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
+        return {"status": actual, "task_id": task_id}
+    blocked = _block_execution(worker, owner_id, project_id, task_id)
+    if blocked is not None:
+        return {"status": blocked, "task_id": task_id}
     answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+    if answer is None:
+        return {"status": _task_status(worker, owner_id, project_id, task_id), "task_id": task_id}
     if not answer:
-        _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="FAILED", allowed=("QUEUED", "RUNNING", "VERIFYING"))
-        return {"status": "FAILED", "task_id": task_id}
+        actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
+        return {"status": actual, "task_id": task_id}
+    blocked = _block_execution(worker, owner_id, project_id, task_id)
+    if blocked is not None:
+        return {"status": blocked, "task_id": task_id, "artifact_id": answer}
     _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="VERIFYING", allowed=("RUNNING", "VERIFYING"))
     contract_id, contract_sha = _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
     verification_id = _ensure_verification(
@@ -123,9 +155,69 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
         goal=goal,
     )
     verdict = _verdict(endpoints, owner_id, project_id, verification_id)
-    terminal = "SUCCEEDED" if verdict == "PASS" else "FAILED"
-    _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status=terminal, allowed=("VERIFYING", "RUNNING"))
-    return {"status": terminal, "task_id": task_id, "verification_id": verification_id, "artifact_id": answer}
+    if verdict == "PASS":
+        terminal = "SUCCEEDED"
+    elif verdict == "UNVERIFIABLE":
+        terminal = "NEEDS_REVIEW"
+    else:
+        terminal = "FAILED"
+    actual = _commit_terminal(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status=terminal)
+    return {"status": actual, "task_id": task_id, "verification_id": verification_id, "artifact_id": answer}
+
+
+def apply_task_control_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> dict[str, Any]:
+    project_id = str(payload.get("project_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    command_id = str(payload.get("command_id") or "")
+    if not project_id or not task_id or not command_id:
+        return {"status": "ignored", "resumed": False}
+    worker = Database(endpoints.worker_url)
+    command = _command(worker, project_id, command_id)
+    if command is None or str(command["kind"]) not in {"pause", "resume", "cancel"}:
+        return {"status": "ignored", "resumed": False}
+    owner_id, _goal = _owner_and_goal(worker, project_id, task_id)
+    state, _resume = _control_state(worker, owner_id, project_id, task_id)
+    kind = str(command["kind"])
+    if kind == "pause":
+        if state in TERMINAL_STATUSES:
+            return {"status": state, "task_id": task_id, "resumed": False}
+        if state == "PAUSED":
+            return {"status": "PAUSED", "task_id": task_id, "resumed": False}
+        actual = _set_status(
+            worker,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="PAUSED",
+            allowed=PAUSEABLE_STATUSES,
+            resume_state="pause_requested",
+        )
+        return {"status": actual, "task_id": task_id, "resumed": False}
+    if kind == "resume":
+        if state != "PAUSED":
+            return {"status": state, "task_id": task_id, "resumed": False}
+        actual = _set_status(
+            worker,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="RUNNING",
+            allowed=("PAUSED",),
+            clear_resume=True,
+        )
+        return {"status": actual, "task_id": task_id, "resumed": actual == "RUNNING"}
+    if state in TERMINAL_STATUSES:
+        return {"status": state, "task_id": task_id, "resumed": False}
+    actual = _set_status(
+        worker,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        status="CANCELLED",
+        allowed=NON_TERMINAL_STATUSES,
+        resume_state="cancel_requested",
+    )
+    return {"status": actual, "task_id": task_id, "resumed": False}
 
 
 def _start_command(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> tuple[str, str, str, str] | None:
@@ -146,6 +238,25 @@ def _start_command(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> tuple
     return owner_id, project_id, task_id, goal
 
 
+def _execution_context(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> tuple[str, str, str, str] | None:
+    started = _start_command(endpoints, payload)
+    if started is not None:
+        return started
+    project_id = str(payload.get("project_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    command_id = str(payload.get("command_id") or "")
+    if not project_id or not task_id or not command_id:
+        return None
+    worker = Database(endpoints.worker_url)
+    command = _command(worker, project_id, command_id)
+    if command is None or str(command["kind"]) != "resume":
+        return None
+    owner_id, goal = _owner_and_goal(worker, project_id, task_id)
+    if not owner_id or not goal:
+        return None
+    return owner_id, project_id, task_id, goal
+
+
 def materialize_goal_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> dict[str, str]:
     prepared = prepare_task_effect(endpoints, payload)
     if prepared.get("status") != "prepared":
@@ -162,20 +273,39 @@ def _command(database: Database, project_id: str, command_id: str) -> dict[str, 
     return None if row is None else dict(row)
 
 
+def _owner_and_goal(database: Database, project_id: str, task_id: str) -> tuple[str, str]:
+    with database.transaction(project_id=project_id) as conn:
+        goal = conn.execute(
+            text("SELECT original_goal FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).scalar_one()
+        payload = conn.execute(
+            text(
+                "SELECT payload FROM command_outbox WHERE project_id = :project_id AND task_id = :id AND kind = 'start' "
+                "ORDER BY created_at LIMIT 1"
+            ),
+            {"project_id": project_id, "id": task_id},
+        ).scalar()
+    body = payload if isinstance(payload, dict) else json.loads(payload) if payload else {}
+    return str(body.get("owner_id") or ""), str(goal)
+
+
 def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str) -> tuple[str, str]:
+    existing = _load_authoritative_contract(database, owner_id, project_id, task_id)
+    if existing is not None:
+        with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            conn.execute(
+                text(
+                    "UPDATE tasks SET current_contract_id = :contract_id "
+                    "WHERE project_id = :project_id AND id = :task_id AND current_contract_id IS NULL"
+                ),
+                {"contract_id": existing["id"], "project_id": project_id, "task_id": task_id},
+            )
+        return existing["id"], existing["digest"]
     content = {"criterion_id": CRITERION_ID, "goal": goal}
-    raw = json.dumps(content, sort_keys=True, separators=(",", ":"))
+    raw = canonical_json(content)
     digest = sha256_text(raw)
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        existing = conn.execute(
-            text(
-                "SELECT id::text AS id, contract_sha256 FROM goal_contracts "
-                "WHERE project_id = :project_id AND task_id = :task_id ORDER BY contract_version LIMIT 1"
-            ),
-            {"project_id": project_id, "task_id": task_id},
-        ).mappings().first()
-        if existing is not None:
-            return str(existing["id"]), str(existing["contract_sha256"])
         contract_id = conn.execute(
             text(
                 "INSERT INTO goal_contracts (project_id, task_id, contract_version, content, contract_sha256, approved_by, approved_at) "
@@ -183,7 +313,43 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
             ),
             {"project_id": project_id, "task_id": task_id, "content": raw, "digest": digest, "owner": owner_id},
         ).scalar_one()
+        conn.execute(
+            text(
+                "UPDATE tasks SET current_contract_id = :contract_id "
+                "WHERE project_id = :project_id AND id = :task_id AND current_contract_id IS NULL"
+            ),
+            {"contract_id": contract_id, "project_id": project_id, "task_id": task_id},
+        )
     return str(contract_id), digest
+
+
+def _load_authoritative_contract(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, str] | None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        current = conn.execute(
+            text("SELECT current_contract_id::text FROM tasks WHERE project_id = :project_id AND id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar()
+        if current:
+            row = conn.execute(
+                text(
+                    "SELECT id::text AS id, content, contract_sha256 FROM goal_contracts "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND id = :contract_id"
+                ),
+                {"project_id": project_id, "task_id": task_id, "contract_id": current},
+            ).mappings().first()
+        else:
+            row = conn.execute(
+                text(
+                    "SELECT id::text AS id, content, contract_sha256 FROM goal_contracts "
+                    "WHERE project_id = :project_id AND task_id = :task_id "
+                    "ORDER BY contract_version DESC LIMIT 1"
+                ),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().first()
+    if row is None:
+        return None
+    digest = sha256_text(canonical_json(row["content"]))
+    return {"id": str(row["id"]), "digest": digest, "stored_digest": str(row["contract_sha256"])}
 
 
 def _ensure_artifact(
@@ -197,26 +363,94 @@ def _ensure_artifact(
     data: bytes,
     media_type: str,
 ) -> dict[str, str]:
+    existing = _task_artifact(database, owner_id, project_id, task_id, classification)
+    if existing is not None:
+        return existing
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=data, media_type=media_type, classification=classification)
+    _bind_task_artifact(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        artifact_id=str(stored["artifact_id"]),
+        classification=classification,
+    )
+    return {"id": str(stored["artifact_id"]), "sha256": str(stored["sha256"])}
+
+
+def _bind_task_artifact(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    artifact_id: str,
+    classification: str,
+) -> tuple[int, int]:
+    """Link a task to a blob. A second task does not take over artifacts.task_id."""
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        existing = conn.execute(
+        updated = conn.execute(
             text(
-                "SELECT id::text AS id, sha256 FROM artifacts "
-                "WHERE project_id = :project_id AND task_id = :task_id AND classification = :classification AND deleted_at IS NULL"
+                "UPDATE artifacts SET task_id = :task_id "
+                "WHERE project_id = :project_id AND id = :artifact_id AND task_id IS NULL AND deleted_at IS NULL"
+            ),
+            {"task_id": task_id, "project_id": project_id, "artifact_id": artifact_id},
+        ).rowcount
+        inserted = conn.execute(
+            text(
+                "INSERT INTO task_artifacts (project_id, task_id, artifact_id, classification) "
+                "VALUES (:project_id, :task_id, :artifact_id, :classification) "
+                "ON CONFLICT (project_id, task_id, artifact_id, classification) WHERE deleted_at IS NULL "
+                "DO NOTHING RETURNING id::text"
+            ),
+            {
+                "project_id": project_id,
+                "task_id": task_id,
+                "artifact_id": artifact_id,
+                "classification": classification,
+            },
+        ).scalar()
+        linked = conn.execute(
+            text(
+                "SELECT 1 FROM task_artifacts WHERE project_id = :project_id AND task_id = :task_id "
+                "AND artifact_id = :artifact_id AND classification = :classification AND deleted_at IS NULL"
+            ),
+            {
+                "project_id": project_id,
+                "task_id": task_id,
+                "artifact_id": artifact_id,
+                "classification": classification,
+            },
+        ).first()
+    if linked is None:
+        raise RuntimeError("task artifact link was not recorded")
+    return int(updated or 0), 0 if inserted is None else 1
+
+
+def _task_artifact(database: Database, owner_id: str, project_id: str, task_id: str, classification: str) -> dict[str, str] | None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        linked = conn.execute(
+            text(
+                "SELECT a.id::text AS id, a.sha256 FROM task_artifacts AS link "
+                "JOIN artifacts AS a ON a.project_id = link.project_id AND a.id = link.artifact_id "
+                "WHERE link.project_id = :project_id AND link.task_id = :task_id AND link.classification = :classification "
+                "AND link.deleted_at IS NULL AND a.deleted_at IS NULL "
+                "ORDER BY link.created_at, link.id LIMIT 1"
             ),
             {"project_id": project_id, "task_id": task_id, "classification": classification},
         ).mappings().first()
-    if existing is not None:
-        return {"id": str(existing["id"]), "sha256": str(existing["sha256"])}
-    stored = store.put(owner_id=owner_id, project_id=project_id, data=data, media_type=media_type, classification=classification)
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
-            text(
-                "UPDATE artifacts SET task_id = :task_id "
-                "WHERE project_id = :project_id AND id = :id AND task_id IS NULL AND deleted_at IS NULL"
-            ),
-            {"task_id": task_id, "project_id": project_id, "id": stored["artifact_id"]},
-        )
-    return {"id": str(stored["artifact_id"]), "sha256": str(stored["sha256"])}
+        if linked is None:
+            linked = conn.execute(
+                text(
+                    "SELECT id::text AS id, sha256 FROM artifacts "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND classification = :classification AND deleted_at IS NULL "
+                    "ORDER BY created_at, id LIMIT 1"
+                ),
+                {"project_id": project_id, "task_id": task_id, "classification": classification},
+            ).mappings().first()
+    if linked is None:
+        return None
+    return {"id": str(linked["id"]), "sha256": str(linked["sha256"])}
 
 
 def _ensure_verification(
@@ -234,80 +468,217 @@ def _ensure_verification(
     store = ArtifactStore(endpoints.artifact_root, verifier)
     ledger, deleted = _artifact_ledger(verifier, owner_id, project_id, artifact_id)
     observed, readable = _observe_bytes(store, owner_id, project_id, artifact_id)
-    sources = _source_texts(verifier, store, owner_id, project_id)
-    checks_passed = (not deleted) and readable is not None and _answer_uses_source(readable, goal, sources)
-    if ledger is None:
-        ledger = observed
-        checks_passed = False
-    with verifier.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        existing = conn.execute(
-            text(
-                "SELECT id::text FROM verification_results "
-                "WHERE project_id = :project_id AND task_id = :task_id AND criterion_id = :criterion_id "
-                "AND artifact_id = :artifact_id AND contract_id = :contract_id "
-                "AND artifact_sha256 = :artifact_sha AND contract_sha256 = :contract_sha"
-            ),
-            {
-                "project_id": project_id,
-                "task_id": task_id,
-                "criterion_id": CRITERION_ID,
-                "artifact_id": artifact_id,
-                "contract_id": contract_id,
-                "artifact_sha": ledger,
-                "contract_sha": contract_sha,
-            },
-        ).scalar()
-    if existing is not None:
-        return str(existing)
-    report = store.put(
-        owner_id=owner_id,
-        project_id=project_id,
-        data=json.dumps({"criterion_id": CRITERION_ID, "observed_sha256": observed, "artifact_id": artifact_id}, sort_keys=True).encode(),
-        media_type="text/plain",
-        classification="task_verification_report",
+    sources, snapshot = _source_snapshot(verifier, store, owner_id, project_id)
+    authoritative = _load_authoritative_contract(verifier, owner_id, project_id, task_id)
+    contract_ok = (
+        authoritative is not None
+        and authoritative["id"] == contract_id
+        and authoritative["digest"] == contract_sha
+        and authoritative["stored_digest"] == authoritative["digest"]
     )
-    now = datetime.now(UTC)
-    recorded = record_verification(
+    byte_ok = (not deleted) and readable is not None and ledger is not None and observed == ledger
+    goal_state = _goal_state(readable, goal, sources)
+    stored_artifact_sha = ledger or observed
+    if not contract_ok:
+        outcome = "fail"
+        detail = "合同摘要与权威合同不一致"
+    elif not byte_ok:
+        outcome = "fail"
+        detail = "字节完整性未通过"
+    elif goal_state == "unverifiable":
+        outcome = "unverifiable"
+        detail = "字节与合同可以通过，离线脚本不能确认目标完成"
+    elif goal_state != "pass":
+        outcome = "fail"
+        detail = "回答没有覆盖目标"
+    else:
+        outcome = "pass"
+        detail = "工作流检查、字节完整性和目标摘录都通过"
+    if stored_artifact_sha != observed or deleted or not byte_ok:
+        expected = "FAIL"
+    elif outcome == "unverifiable":
+        expected = "UNVERIFIABLE"
+    elif outcome == "fail":
+        expected = "FAIL"
+    else:
+        expected = "PASS"
+    cached = _cached_verification(
         verifier,
         owner_id=owner_id,
         project_id=project_id,
         task_id=task_id,
-        contract_id=contract_id,
         artifact_id=artifact_id,
-        report_artifact_id=str(report["artifact_id"]),
-        criterion_id=CRITERION_ID,
-        artifact_sha256=ledger,
-        observed_sha256=observed,
-        contract_sha256=contract_sha,
-        expires_at=now + timedelta(hours=24),
-        now=now,
-        checks_passed=checks_passed and observed == ledger,
+        contract_id=contract_id,
+        artifact_sha=stored_artifact_sha,
+        contract_sha=contract_sha,
+        observed=observed,
+        snapshot=snapshot,
+        expected=expected,
     )
+    if cached is not None:
+        return cached
+    report = {
+        "criterion_id": CRITERION_ID,
+        "artifact_id": artifact_id,
+        "observed_sha256": observed,
+        "ledger_sha256": ledger,
+        "verifier_version": VERIFIER_VERSION,
+        "model_mode": "scripted",
+        "offline": True,
+        "pipeline": "pass",
+        "byte_integrity": "pass" if byte_ok else "fail",
+        "goal_completion": goal_state,
+        "contract_binding": "pass" if contract_ok else "fail",
+    }
+    stored = store.put(
+        owner_id=owner_id,
+        project_id=project_id,
+        data=json.dumps(report, sort_keys=True).encode(),
+        media_type="text/plain",
+        classification="task_verification_report",
+    )
+    lock_key = int.from_bytes(hashlib.sha256(f"{project_id}:{task_id}:{artifact_id}:{CRITERION_ID}".encode()).digest()[:8], "big", signed=True)
+    with verifier.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_key})
+        cached = _cached_verification_on(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            contract_id=contract_id,
+            artifact_sha=stored_artifact_sha,
+            contract_sha=contract_sha,
+            observed=observed,
+            snapshot=snapshot,
+            expected=expected,
+        )
+        if cached is not None:
+            return cached
+        now = datetime.now(UTC)
+        recorded = record_verification(
+            verifier,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            contract_id=contract_id,
+            artifact_id=artifact_id,
+            report_artifact_id=str(stored["artifact_id"]),
+            criterion_id=CRITERION_ID,
+            artifact_sha256=stored_artifact_sha,
+            observed_sha256=observed,
+            contract_sha256=contract_sha,
+            expires_at=now + timedelta(hours=24),
+            now=now,
+            checks_passed=outcome != "fail",
+            outcome=outcome,
+            detail=detail,
+            source_snapshot_sha256=snapshot,
+            verifier_version=VERIFIER_VERSION,
+            conn=conn,
+        )
     return str(recorded["id"])
 
 
+def _cached_verification(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    artifact_id: str,
+    contract_id: str,
+    artifact_sha: str,
+    contract_sha: str,
+    observed: str,
+    snapshot: str,
+    expected: str,
+) -> str | None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return _cached_verification_on(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            artifact_id=artifact_id,
+            contract_id=contract_id,
+            artifact_sha=artifact_sha,
+            contract_sha=contract_sha,
+            observed=observed,
+            snapshot=snapshot,
+            expected=expected,
+        )
+
+
+def _cached_verification_on(
+    conn: Any,
+    *,
+    project_id: str,
+    task_id: str,
+    artifact_id: str,
+    contract_id: str,
+    artifact_sha: str,
+    contract_sha: str,
+    observed: str,
+    snapshot: str,
+    expected: str,
+) -> str | None:
+    found = conn.execute(
+        text(
+            "SELECT id::text FROM verification_results "
+            "WHERE project_id = :project_id AND task_id = :task_id AND criterion_id = :criterion_id "
+            "AND artifact_id = :artifact_id AND contract_id = :contract_id "
+            "AND artifact_sha256 = :artifact_sha AND contract_sha256 = :contract_sha "
+            "AND observed_sha256 = :observed AND source_snapshot_sha256 = :snapshot "
+            "AND verifier_version = :verifier_version AND verdict = :expected "
+            "ORDER BY created_at, id LIMIT 1"
+        ),
+        {
+            "project_id": project_id,
+            "task_id": task_id,
+            "criterion_id": CRITERION_ID,
+            "artifact_id": artifact_id,
+            "contract_id": contract_id,
+            "artifact_sha": artifact_sha,
+            "contract_sha": contract_sha,
+            "observed": observed,
+            "snapshot": snapshot,
+            "verifier_version": VERIFIER_VERSION,
+            "expected": expected,
+        },
+    ).scalar()
+    return None if found is None else str(found)
+
+
 def _source_texts(database: Database, store: ArtifactStore, owner_id: str, project_id: str) -> list[str]:
+    texts, _snapshot = _source_snapshot(database, store, owner_id, project_id)
+    return texts
+
+
+def _source_snapshot(database: Database, store: ArtifactStore, owner_id: str, project_id: str) -> tuple[list[str], str]:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         rows = conn.execute(
             text(
-                "SELECT id::text AS id FROM artifacts "
+                "SELECT id::text AS id, sha256 FROM artifacts "
                 "WHERE project_id = :project_id AND deleted_at IS NULL AND task_id IS NULL "
                 "AND media_type = 'text/plain' AND classification = 'project_private' "
                 "ORDER BY created_at, id"
             ),
             {"project_id": project_id},
-        ).scalars().all()
+        ).mappings().all()
     texts: list[str] = []
-    for artifact_id in rows:
+    parts: list[str] = []
+    for row in rows:
+        artifact_id = str(row["id"])
         try:
-            data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(artifact_id))
+            data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
         except ArtifactError:
+            parts.append(f"{artifact_id}:unreadable")
             continue
+        parts.append(f"{artifact_id}:{row['sha256']}")
         try:
             texts.append(data.decode("utf-8"))
         except UnicodeError:
             continue
-    return texts
+    return texts, sha256_text("\n".join(parts))
 
 
 def _ensure_answer(
@@ -319,26 +690,28 @@ def _ensure_answer(
     task_id: str,
     goal: str,
     sources: list[str],
-) -> str:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        existing = conn.execute(
-            text(
-                "SELECT id::text FROM artifacts WHERE project_id = :project_id AND task_id = :task_id "
-                "AND classification = 'task_answer' AND deleted_at IS NULL"
-            ),
-            {"project_id": project_id, "task_id": task_id},
-        ).scalar()
+) -> str | None:
+    existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
-        return str(existing)
+        return existing["id"]
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
     output = scripted_answer(source_text="\n".join(sources), goal=goal)
     if not output:
         return ""
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
     stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
-            text("UPDATE artifacts SET task_id = :task_id WHERE project_id = :project_id AND id = :id AND task_id IS NULL"),
-            {"task_id": task_id, "project_id": project_id, "id": stored["artifact_id"]},
-        )
+    if _block_execution(database, owner_id, project_id, task_id) is not None:
+        return None
+    _bind_task_artifact(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        artifact_id=str(stored["artifact_id"]),
+        classification="task_answer",
+    )
     _event(
         database,
         owner_id=owner_id,
@@ -346,24 +719,24 @@ def _ensure_answer(
         task_id=task_id,
         event_key=f"research-{task_id}",
         event_type="research.call",
-        payload={"calls": 1, "model_mode": "scripted"},
+        payload={"calls": 1, "model_mode": "scripted", "offline": True},
     )
     return str(stored["artifact_id"])
 
 
-def _answer_uses_source(data: bytes, goal: str, sources: list[str]) -> bool:
+def _goal_state(data: bytes | None, goal: str, sources: list[str]) -> str:
+    if data is None:
+        return "fail"
     try:
         answer = data.decode("utf-8").strip()
     except UnicodeError:
-        return False
-    if not answer or answer == goal.strip():
-        return False
-    for source in sources:
-        for line in source.splitlines():
-            fact = line.strip()
-            if len(fact) >= 8 and fact not in goal and fact in answer:
-                return True
-    return False
+        return "fail"
+    fact = offline_fact(source_text="\n".join(sources), goal=goal)
+    if not fact:
+        return "unverifiable"
+    if not answer or answer == goal.strip() or fact not in answer:
+        return "fail"
+    return "pass"
 
 
 def _artifact_ledger(database: Database, owner_id: str, project_id: str, artifact_id: str) -> tuple[str | None, bool]:
@@ -386,8 +759,17 @@ def _observe_bytes(store: ArtifactStore, owner_id: str, project_id: str, artifac
 
 
 def _task_status(database: Database, owner_id: str, project_id: str, task_id: str) -> str:
+    state, _resume = _control_state(database, owner_id, project_id, task_id)
+    return state
+
+
+def _control_state(database: Database, owner_id: str, project_id: str, task_id: str) -> tuple[str, str]:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        return str(conn.execute(text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"), {"project_id": project_id, "id": task_id}).scalar_one())
+        row = conn.execute(
+            text("SELECT status, resume_state FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).mappings().one()
+    return str(row["status"]), str(row["resume_state"] or "")
 
 
 def _verdict(endpoints: WorkerEndpoints, owner_id: str, project_id: str, verification_id: str) -> str:
@@ -396,19 +778,119 @@ def _verdict(endpoints: WorkerEndpoints, owner_id: str, project_id: str, verific
         return str(conn.execute(text("SELECT verdict FROM verification_results WHERE id = :id"), {"id": verification_id}).scalar_one())
 
 
-def _set_status(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str, allowed: tuple[str, ...]) -> None:
+def _block_execution(database: Database, owner_id: str, project_id: str, task_id: str) -> str | None:
+    state, resume = _control_state(database, owner_id, project_id, task_id)
+    if resume == "cancel_requested" and state not in TERMINAL_STATUSES:
+        return _set_status(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="CANCELLED",
+            allowed=NON_TERMINAL_STATUSES,
+            resume_state="cancel_requested",
+        )
+    if state in STOP_STATUSES:
+        return state
+    if resume == "pause_requested":
+        return _set_status(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="PAUSED",
+            allowed=PAUSEABLE_STATUSES,
+            resume_state="pause_requested",
+        )
+    return None
+
+
+def _commit_terminal(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str) -> str:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        row = conn.execute(
+            text("SELECT status, resume_state FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
+            {"project_id": project_id, "id": task_id},
+        ).mappings().one()
+        state = str(row["status"])
+        resume = str(row["resume_state"] or "")
+        if state in TERMINAL_STATUSES:
+            return state
+        if resume == "cancel_requested":
+            updated = _update_status(conn, project_id=project_id, task_id=task_id, status="CANCELLED", allowed=NON_TERMINAL_STATUSES, resume_state="cancel_requested")
+            return updated or state
+        if state == "PAUSED" or resume == "pause_requested":
+            if state != "PAUSED":
+                updated = _update_status(conn, project_id=project_id, task_id=task_id, status="PAUSED", allowed=PAUSEABLE_STATUSES, resume_state="pause_requested")
+                return updated or state
+            return state
+        updated = _update_status(conn, project_id=project_id, task_id=task_id, status=status, allowed=("VERIFYING", "RUNNING"))
+        if updated is not None:
+            return updated
+        current = conn.execute(
+            text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).scalar_one()
+    return str(current)
+
+
+def _set_status(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    status: str,
+    allowed: tuple[str, ...],
+    resume_state: str | None = None,
+    clear_resume: bool = False,
+) -> str:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        updated = _update_status(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            status=status,
+            allowed=allowed,
+            resume_state=resume_state,
+            clear_resume=clear_resume,
+        )
+        if updated is not None:
+            return updated
+        current = conn.execute(
+            text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).scalar_one()
+    return str(current)
+
+
+def _update_status(
+    conn: Any,
+    *,
+    project_id: str,
+    task_id: str,
+    status: str,
+    allowed: tuple[str, ...],
+    resume_state: str | None = None,
+    clear_resume: bool = False,
+) -> str | None:
     names = [f"allowed_{index}" for index in range(len(allowed))]
     clause = ", ".join(f":{name}" for name in names)
+    extra = ""
     params: dict[str, object] = {"status": status, "project_id": project_id, "id": task_id}
     params.update(dict(zip(names, allowed, strict=True)))
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
-            text(
-                "UPDATE tasks SET status = :status, version = version + 1, projection_updated_at = now() "
-                f"WHERE project_id = :project_id AND id = :id AND status IN ({clause})"
-            ),
-            params,
-        )
+    if clear_resume:
+        extra = ", resume_state = NULL"
+    elif resume_state is not None:
+        extra = ", resume_state = :resume_state"
+        params["resume_state"] = resume_state
+    updated = conn.execute(
+        text(
+            "UPDATE tasks SET status = :status, version = version + 1, projection_updated_at = now() "
+            f"{extra} WHERE project_id = :project_id AND id = :id AND status IN ({clause}) RETURNING status"
+        ),
+        params,
+    ).scalar()
+    return None if updated is None else str(updated)
 
 
 def _event(database: Database, *, owner_id: str, project_id: str, task_id: str, event_key: str, event_type: str, payload: dict[str, Any]) -> None:

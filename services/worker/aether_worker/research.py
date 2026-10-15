@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime
 from typing import Any
 
@@ -34,18 +35,71 @@ def read_local_text(data: bytes) -> str:
         raise ValueError("local_text_rejected") from exc
 
 
-def scripted_answer(*, source_text: str, goal: str) -> str:
-    """Deterministic stand-in. It is not a live model and it does not return the goal unchanged."""
+_EXCERPT_MARKERS = ("资料", "摘录", "根据")
+
+
+def _outside_excerpt(goal: str) -> bool:
+    """The offline provider only quotes a source line. It does not calculate."""
+    if "计算" in goal:
+        return True
+    return re.search(r"\d+\s*[×xX*]\s*\d+", goal) is not None
+
+
+def _excerpt_request(goal: str) -> bool:
+    return any(marker in goal for marker in _EXCERPT_MARKERS)
+
+
+def _tokens(text: str) -> set[str]:
+    found = {word.lower() for word in re.findall(r"[A-Za-z0-9]{2,}", text)}
+    chars: list[str] = []
+
+    def flush() -> None:
+        if len(chars) >= 2:
+            found.update(chars[index] + chars[index + 1] for index in range(len(chars) - 1))
+        chars.clear()
+
+    for character in text:
+        if "\u4e00" <= character <= "\u9fff":
+            chars.append(character)
+        else:
+            flush()
+    flush()
+    return found
+
+
+def offline_fact(*, source_text: str, goal: str) -> str:
+    """Pick one source line an offline excerpt may quote.
+
+    This is not a live model. A goal it cannot address, including arithmetic,
+    returns an empty string so the task stays unverified.
+    """
     goal_text = goal.strip()
+    lines: list[str] = []
     for line in source_text.splitlines():
         fact = line.strip()
         if len(fact) < 8 or fact == goal_text or fact in goal_text:
             continue
-        answer = f"资料记载：{fact}"
-        if answer.strip() == goal_text:
-            continue
-        return answer
+        lines.append(fact)
+    if not lines or _outside_excerpt(goal_text):
+        return ""
+    ranked = sorted((len(_tokens(goal_text) & _tokens(fact)), index, fact) for index, fact in enumerate(lines))
+    best_score, _index, best = max(ranked, key=lambda item: (item[0], -item[1]))
+    if best_score > 0:
+        return best
+    if len(lines) == 1 and _excerpt_request(goal_text):
+        return lines[0]
     return ""
+
+
+def scripted_answer(*, source_text: str, goal: str) -> str:
+    """Offline excerpt stand-in. It is not a live model and it does not return the goal unchanged."""
+    fact = offline_fact(source_text=source_text, goal=goal)
+    if not fact:
+        return ""
+    answer = f"资料记载：{fact}"
+    if answer.strip() == goal.strip():
+        return ""
+    return answer
 
 
 def scripted_research(*, store: ArtifactStore, gateway: Any, token: str, owner_id: str, project_id: str, artifact_id: str) -> dict[str, Any]:
@@ -112,26 +166,37 @@ def record_verification(
     now: datetime,
     actor_verdict: str | None = None,
     checks_passed: bool = True,
+    outcome: str | None = None,
+    detail: str | None = None,
+    source_snapshot_sha256: str | None = None,
+    verifier_version: str | None = None,
+    conn: Any = None,
 ) -> dict[str, str]:
     if expires_at <= now or artifact_sha256 != observed_sha256:
         verdict = "FAIL"
         reason = "候选已过期或哈希不一致"
-    elif not checks_passed:
+    elif outcome == "unverifiable":
+        verdict = "UNVERIFIABLE"
+        reason = detail or "离线脚本不能确认目标已完成"
+    elif outcome == "fail" or not checks_passed:
         verdict = "FAIL"
-        reason = "独立检查未通过"
+        reason = detail or "独立检查未通过"
     else:
         verdict = "PASS"
-        reason = "哈希一致且候选未过期"
+        reason = detail or "哈希一致且候选未过期"
     if actor_verdict is not None and actor_verdict != verdict:
         reason = f"{reason}；已忽略 actor 给出的 {actor_verdict}"
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        identity = conn.execute(text("SELECT current_user")).scalar_one()
-        verification_id = conn.execute(
+
+    def _insert(active: Any) -> tuple[Any, Any]:
+        identity = active.execute(text("SELECT current_user")).scalar_one()
+        verification_id = active.execute(
             text(
                 "INSERT INTO verification_results (project_id, task_id, contract_id, artifact_id, criterion_id, verdict, "
-                "artifact_sha256, contract_sha256, verifier_identity, report_artifact_id, reason, checked_at) "
+                "artifact_sha256, contract_sha256, verifier_identity, report_artifact_id, reason, checked_at, "
+                "observed_sha256, source_snapshot_sha256, verifier_version) "
                 "VALUES (:project_id, :task_id, :contract_id, :artifact_id, :criterion_id, :verdict, :artifact_sha256, "
-                ":contract_sha256, :identity, :report_artifact_id, :reason, now()) RETURNING id::text"
+                ":contract_sha256, :identity, :report_artifact_id, :reason, now(), :observed_sha256, "
+                ":source_snapshot_sha256, :verifier_version) RETURNING id::text"
             ),
             {
                 "project_id": project_id,
@@ -145,6 +210,16 @@ def record_verification(
                 "identity": identity,
                 "report_artifact_id": report_artifact_id,
                 "reason": reason,
+                "observed_sha256": observed_sha256,
+                "source_snapshot_sha256": source_snapshot_sha256,
+                "verifier_version": verifier_version,
             },
         ).scalar_one()
+        return identity, verification_id
+
+    if conn is None:
+        with database.transaction(owner_id=owner_id, project_id=project_id) as owned:
+            identity, verification_id = _insert(owned)
+    else:
+        identity, verification_id = _insert(conn)
     return {"id": str(verification_id), "verdict": verdict, "reason": reason, "verifier": str(identity)}

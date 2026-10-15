@@ -243,6 +243,118 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
         secret_path.unlink(missing_ok=True)
 
 
+def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_path: Path) -> None:
+    address = _temporal_address()
+    api_port = _port()
+    queue = f"aether-control-{uuid.uuid4()}"
+    artifact_root = tmp_path / "artifacts"
+    secret_path = ROOT / "secrets" / f"audit-control-{uuid.uuid4().hex}.json"
+    secret = issue_bootstrap_secret(secret_path)
+    env = os.environ.copy()
+    env.update(
+        {
+            "AETHER_DATABASE_URL": role_urls["aether_api"],
+            "AETHER_WORKER_DATABASE_URL": role_urls["aether_worker"],
+            "AETHER_VERIFIER_DATABASE_URL": role_urls["aether_verifier"],
+            "AETHER_DISPATCHER_DATABASE_URL": role_urls["aether_dispatcher"],
+            "AETHER_TEMPORAL_ADDRESS": address,
+            "AETHER_ARTIFACT_ROOT": str(artifact_root),
+            "AETHER_TASK_QUEUE": queue,
+            "AETHER_INTAKE_PAUSE_SECONDS": "4",
+            "AETHER_BIND_HOST": "127.0.0.1",
+            "AETHER_API_PORT": str(api_port),
+            "AETHER_BOOTSTRAP_PATH": str(secret_path),
+            "AETHER_ORIGINS": ORIGIN_VALUE,
+            "AETHER_COOKIE_SECURE": "",
+        }
+    )
+    api_logs: list[str] = []
+    worker_logs: list[str] = []
+    api = _start([sys.executable, "-m", "aether_api.main"], env, api_logs)
+    worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
+    try:
+        _wait_http(f"http://127.0.0.1:{api_port}/health/live")
+        _wait_line(worker_logs, "aether-worker-ready", worker)
+        with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
+            bootstrap = http.post(
+                "/v1/auth/bootstrap",
+                headers={"Origin": ORIGIN_VALUE},
+                json={"bootstrap_secret": secret, "display_name": "所有者", "passphrase": PASSPHRASE},
+            )
+            assert bootstrap.status_code == 201, bootstrap.text
+            csrf = bootstrap.json()["csrf_token"]
+            project = http.post("/v1/projects", headers=_headers(csrf, "ctrl-project"), json={"name": "控制项目"})
+            assert project.status_code == 201, project.text
+            project_id = project.json()["id"]
+            fact = "事实：水在标准大气压下于一百摄氏度沸腾"
+            uploaded = http.post(
+                f"/v1/projects/{project_id}/artifacts",
+                headers=_headers(csrf, "ctrl-doc"),
+                files={"file": ("note.txt", f"{fact}\n".encode(), "text/plain")},
+            )
+            assert uploaded.status_code == 201, uploaded.text
+            goal = "请根据已上传资料回答沸点"
+            created = http.post(f"/v1/projects/{project_id}/tasks", headers=_headers(csrf, "ctrl-task"), json={"goal": goal})
+            assert created.status_code == 202, created.text
+            task_id = created.json()["resource_id"]
+            _wait_status(http, project_id, task_id, "RUNNING", worker, worker_logs)
+            paused = http.post(
+                f"/v1/projects/{project_id}/tasks/{task_id}/commands",
+                headers=_headers(csrf, "ctrl-pause"),
+                json={"command_id": str(uuid.uuid4()), "kind": "pause"},
+            )
+            assert paused.status_code == 202, paused.text
+            held = _wait_status(http, project_id, task_id, "PAUSED", worker, worker_logs)
+            events = http.get(f"/v1/projects/{project_id}/tasks/{task_id}/events")
+            assert events.status_code == 200, events.text
+            assert events.text.count("research.call") == 0
+            for artifact_id in held["artifact_ids"]:
+                downloaded = http.get(f"/v1/projects/{project_id}/artifacts/{artifact_id}")
+                assert downloaded.status_code == 200, downloaded.text
+                assert not downloaded.content.decode().startswith("资料记载：")
+            resumed = http.post(
+                f"/v1/projects/{project_id}/tasks/{task_id}/commands",
+                headers=_headers(csrf, "ctrl-resume"),
+                json={"command_id": str(uuid.uuid4()), "kind": "resume"},
+            )
+            assert resumed.status_code == 202, resumed.text
+            finished = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
+            assert finished["status"] == "SUCCEEDED"
+            assert finished["research_calls"] == 1
+            cancelled_task = http.post(
+                f"/v1/projects/{project_id}/tasks",
+                headers=_headers(csrf, "ctrl-cancel-task"),
+                json={"goal": goal},
+            )
+            assert cancelled_task.status_code == 202, cancelled_task.text
+            cancel_id = cancelled_task.json()["resource_id"]
+            _wait_status(http, project_id, cancel_id, "RUNNING", worker, worker_logs)
+            cancelled = http.post(
+                f"/v1/projects/{project_id}/tasks/{cancel_id}/commands",
+                headers=_headers(csrf, "ctrl-cancel"),
+                json={"command_id": str(uuid.uuid4()), "kind": "cancel"},
+            )
+            assert cancelled.status_code == 202, cancelled.text
+            _wait_status(http, project_id, cancel_id, "CANCELLED", worker, worker_logs)
+            cancel_events = http.get(f"/v1/projects/{project_id}/tasks/{cancel_id}/events")
+            assert cancel_events.text.count("research.call") == 0
+            _stop(worker)
+            worker = None
+            worker_logs.clear()
+            worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
+            _wait_line(worker_logs, "aether-worker-ready", worker)
+            still = _wait_status(http, project_id, cancel_id, "CANCELLED", worker, worker_logs)
+            assert still["status"] == "CANCELLED"
+            replay = http.get(f"/v1/projects/{project_id}/tasks/{cancel_id}/events")
+            assert replay.text.count("research.call") == 0
+            stable = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
+            assert stable["research_calls"] == 1
+    finally:
+        _stop(worker)
+        _stop(api)
+        secret_path.unlink(missing_ok=True)
+
+
 def _wait_status(http: httpx.Client, project_id: str, task_id: str, status: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> dict:
     deadline = time.time() + 30
     last = ""

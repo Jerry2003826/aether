@@ -12,8 +12,8 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parents[3]
 SQL_DIR = ROOT / "migrations" / "sql"
 ROLES = ("aether_api", "aether_worker", "aether_verifier", "aether_dispatcher")
-ALEMBIC_HEAD = "0008"
-_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006", "0007")
+ALEMBIC_HEAD = "0009"
+_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008")
 
 
 def _execute_script(conn: psycopg.Connection, path: Path) -> None:
@@ -89,6 +89,7 @@ def ensure_database(admin_url: str, database: str = "aether", *, rotate_password
         grants = (SQL_DIR / "0003_grants.sql").read_text(encoding="utf-8")
         conn.execute(grants)
         _execute_script(conn, SQL_DIR / "0005_runtime_patches.sql")
+        _execute_script(conn, SQL_DIR / "0009_task_references.sql")
         _stamp_alembic_head(conn)
         host = admin.get("host") or "127.0.0.1"
         port = admin.get("port") or 5432

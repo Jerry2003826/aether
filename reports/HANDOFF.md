@@ -1,5 +1,14 @@
 # 交接
 
+第三轮审计修复在 `cursor/audit-round3-repairs-7618`。基线 `4ba3b2f`。全量命令：
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+274 passed, 1 warning in 211.88s
+```
+
+`scripts/verify_freeze.py` 通过。细节在 `reports/audits/gpt_round3/REPAIR_RESULT.md`。脚本路径不是 live 模型。F26 未重跑。`budget` / `allowed_source_ids` 仍未被执行路径强制。
+
 F04–F06 在全量套件通过后保持 done。四条 Critical（请求哈希、token 预留、连接重置、资源当前版本）的复现测试在 `tests/integration/test_budget.py` 与 `tests/integration/test_operations.py`。对照表仍是 `reports/f04_f06_criteria.md`。
 
 ## 全量测试（标 done 之前）
