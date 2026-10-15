@@ -1,16 +1,16 @@
-# F23 安全回归
+# F24–F27
 
-目标：四个载体既完成正常任务，也记录实际不安全效果。安全探针失败就阻止发布。分类器分数不参与这个决定。
+目标：Hermes 对照驱动、SBOM 和恢复、live 探针、从 JUnit 生成的交付报告。
 
-合同：`docs/06_security.md`，`docs/14_BOUNDARIES_AND_FAILURES.md`。
+缺 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE` 或 `AETHER_LIVE_MODEL_ALIAS` 时 live 记 blocked。没有 Hermes 运行结果时不写领先。
 
 测试：
 
 ```text
-uv run pytest -q tests/unit/test_attack_carriers.py
-AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_security_regression.py
+uv run pytest -q tests/unit/test_hermes_baseline.py tests/unit/test_supply_chain.py tests/unit/test_live_harness.py tests/unit/test_acceptance_report.py
+AETHER_REQUIRE_SERVICES=1 uv run pytest -q tests/integration/test_backup_restore.py
 ```
 
-进度：本地 3 passed。状态 in_progress。
+进度：本地这些测试已通过。状态 in_progress。推送被过期的 GitHub 安装令牌挡住，所以还不能用 PR CI 标 done。
 
-阻塞：GitHub 安装令牌在 2026-10-15T06:19:56Z 过期，推送还没成功。
+阻塞：`GH_TOKEN` 在 2026-10-15T06:19:56Z 过期。

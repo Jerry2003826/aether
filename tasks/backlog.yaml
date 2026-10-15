@@ -540,8 +540,11 @@ tickets:
   - 基线安装/CLI探针真实执行；缺key标live not_run
   - 相同模型/权限/预算与fresh/frozen learned环境；无法匹配差异显式列出
   - 开发集与最终holdout分离，raw结果/unknown费用/置信区间可重算；无数据不声称领先
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/worker/aether_worker/hermes_baseline.py
+  - tests/unit/test_hermes_baseline.py
+  - reports/f24_criteria.md
 - id: F25
   stage: G6
   scope: core
@@ -558,8 +561,12 @@ tickets:
   - 使用实际构建产物生成SBOM；漏洞库时效与离线/在线模式可见
   - 固定依赖和完整许可文件；不得用README宽松标签替代依赖审计
   - 恢复DB+artifact后先停止外部dispatch并对账；不down -v删数据
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/worker/aether_worker/supply.py
+  - tests/unit/test_supply_chain.py
+  - tests/integration/test_backup_restore.py
+  - reports/f25_criteria.md
 - id: F26
   stage: G6
   scope: live
@@ -577,8 +584,11 @@ tickets:
   - 真实用户配置model API通过tools/schema/usage协议探针
   - 研究完整hybrid+引用验收；编码独立测试和恢复通过
   - 无API key/Linux资源如实blocked；脚本模型不替代本项
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/worker/aether_worker/live_harness.py
+  - tests/unit/test_live_harness.py
+  - reports/f26_criteria.md
 - id: F27
   stage: G6
   scope: core
@@ -594,5 +604,8 @@ tickets:
   - 报告从JUnit/JSON实际记录生成，不手填全绿
   - 工程/live/CodeGraph/研究结论分开，未运行项完整列出
   - 启动不依赖archive/外部记忆/AG-UI；下一步清楚，不宣布未完成live可用
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/worker/aether_worker/acceptance_report.py
+  - tests/unit/test_acceptance_report.py
+  - reports/f27_criteria.md
