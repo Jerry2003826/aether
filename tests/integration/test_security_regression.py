@@ -59,6 +59,14 @@ def test_probes_block_release_even_when_the_classifier_score_is_high(client, rol
     owner_id, project_id, csrf = _owner(client, "security-probes")
     worker = Database(role_urls["aether_worker"])
     api = Database(role_urls["aether_api"])
+    try:
+        _security_probes(client, role_urls, tmp_path, owner_id, project_id, csrf, worker, api)
+    finally:
+        worker.engine.dispose()
+        api.engine.dispose()
+
+
+def _security_probes(client, role_urls, tmp_path, owner_id, project_id, csrf, worker, api) -> None:
     probes: list[dict] = []
 
     def ssrf(url: str, addresses: list[str]) -> None:
@@ -164,6 +172,16 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
     if not docker_available():
         raise AssertionError("runner restart probe needs docker")
     owner_id, project_id, _csrf = _owner(client, "security-faults")
+    worker = Database(role_urls["aether_worker"])
+    dispatcher = Database(role_urls["aether_dispatcher"])
+    try:
+        _fault_matrix(client, api_db, role_urls, tmp_path, owner_id, project_id, _csrf, worker, dispatcher)
+    finally:
+        worker.engine.dispose()
+        dispatcher.engine.dispose()
+
+
+def _fault_matrix(client, api_db, role_urls, tmp_path, owner_id, project_id, _csrf, worker, dispatcher) -> None:
     created = enqueue_task(api_db, owner_id=owner_id, project_id=project_id, goal="未投递", command_key="fault-pending")
     with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
         task_status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": created["task_id"]}).scalar_one()
@@ -187,15 +205,15 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
         "evidence": {"failed": failed["failed"], "task": down_task, "command": down_command},
     }
 
-    budget_task = insert_task(Database(role_urls["aether_worker"]), owner_id, project_id, "费用")
-    budget = BudgetLedger(Database(role_urls["aether_worker"]))
+    budget_task = insert_task(worker, owner_id, project_id, "费用")
+    budget = BudgetLedger(worker)
     budget.open_account(owner_id=owner_id, project_id=project_id, task_id=budget_task, limit_micro_usd=100, token_limit=10, max_requests=4, verification_reserve_fraction=0)
     assert budget.reserve(owner_id=owner_id, project_id=project_id, task_id=budget_task, request_key="once", amount=30, role="actor") is True
     assert budget.reserve(owner_id=owner_id, project_id=project_id, task_id=budget_task, request_key="once", amount=30, role="actor") is True
     held_once = budget.snapshot(owner_id=owner_id, project_id=project_id, task_id=budget_task)["held_micro_usd"] == 30
     budget.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=budget_task, request_key="once")
     snap = budget.snapshot(owner_id=owner_id, project_id=project_id, task_id=budget_task)
-    with Database(role_urls["aether_worker"]).transaction(owner_id=owner_id, project_id=project_id) as conn:
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         actual = conn.execute(text("SELECT actual_micro_usd FROM model_requests WHERE task_id = :id"), {"id": budget_task}).scalar_one()
     ledger = {
         "name": "timeout_holds_budget",
@@ -251,7 +269,7 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
     assert visible.status_code == 202, visible.text
     first_events = client.get(f"/v1/projects/{project_id}/tasks/{visible.json()['resource_id']}/events")
     event_id = next(line.removeprefix("id: ") for line in first_events.text.splitlines() if line.startswith("id: "))
-    with Database(role_urls["aether_worker"]).transaction(owner_id=owner_id, project_id=project_id) as conn:
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(text("UPDATE command_outbox SET status = 'DELIVERED' WHERE command_key = 'fault-delivered'"))
     again = asyncio.run(deliver_pending(dispatcher, _Down(), task_queue="aether-fault-2"))  # type: ignore[arg-type]
     with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -273,8 +291,8 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
     fresh.command({"command_id": "replayed"})
     history = {"name": "workflow_history_is_per_instance", "blocked": fresh.applied() == ["replayed"] and workflow.applied() == ["same"], "evidence": fresh.applied()}
 
-    approval_task = insert_task(Database(role_urls["aether_worker"]), owner_id, project_id, "哈希")
-    with Database(role_urls["aether_worker"]).transaction(owner_id=owner_id, project_id=project_id) as conn:
+    approval_task = insert_task(worker, owner_id, project_id, "哈希")
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         approval_id = conn.execute(
             text(
                 "INSERT INTO approvals (project_id, task_id, intent_digest, requested_payload, decision, owner_id, expires_at) "
@@ -283,7 +301,7 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
             {"project_id": project_id, "task_id": approval_task, "digest": SHA, "owner": owner_id},
         ).scalar_one()
     try:
-        OperationLedger(Database(role_urls["aether_worker"])).decide(
+        OperationLedger(worker).decide(
             owner_id=owner_id,
             project_id=project_id,
             task_id=approval_task,
@@ -294,7 +312,7 @@ def test_fault_matrix_checks_effects(client, api_db, role_urls, tmp_path) -> Non
         approval_blocked = False
     except OperationError:
         approval_blocked = True
-    with Database(role_urls["aether_worker"]).transaction(owner_id=owner_id, project_id=project_id) as conn:
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         approval_decision = conn.execute(text("SELECT decision FROM approvals WHERE id = :id"), {"id": approval_id}).scalar_one()
     matrix = [
         queued,

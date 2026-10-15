@@ -482,7 +482,9 @@ trusted test suite只读且独立；actor无法写测试定义、评测标签或
 
 ## 8. 身份、审计与删除
 
-V1单owner启动：仅loopback绑定，通过本机一次性enrollment建立登录；无默认公开密码。使用HttpOnly+SameSite cookie，state-changing请求检查CSRF/Origin；不在URL/localStorage存长期admin token。非loopback发布需要TLS和正式密钥配置，缺失则拒绝启动。
+V1单owner启动：仅loopback绑定，通过本机一次性enrollment建立登录；无默认公开密码。使用HttpOnly+SameSite cookie，state-changing请求检查CSRF/Origin；不在URL/localStorage存长期admin token。非loopback发布需要TLS和正式密钥配置，缺失则拒绝启动。数据库有 `one_owner_v1`，第二次创建所有者会失败。
+
+`/v1/admin/*` 依赖这个单所有者不变量：任何已登录会话都属于那一个所有者，所以这些路由没有单独的角色检查。一旦支持多用户，必须先核对调用者是所有者，不能只凭登录态放行。
 
 服务身份与用户会话分离。所有project请求服务端查访问权限，不能信header里的project_id。对所有list/detail/SSE/artifact/search/feedback/skill入口做越权测试。
 
@@ -622,6 +624,9 @@ API前缀`/v1`，JSON字段snake_case，时间UTC RFC3339；UI按Australia/Melbo
 | /v1/admin/connectors | GET/POST | owner-only registry和连接器配置；密钥仅写不可回显 |
 | /v1/admin/connectors/{connector_id}/probe | POST | 非副作用能力测试，不能自动扩大scope |
 | /v1/admin/models/probe | POST | model/tool/structured output能力与价格配置检查 |
+| /v1/projects/{project_id}/coding-jobs | POST | 排队一个编码作业，状态是 QUEUED，不是通过 |
+
+`/v1/admin/*` 依赖 V1 只有一个所有者。已登录会话就是该所有者，这些路由因此没有第二层角色检查。支持多用户时必须先核对所有者角色，不能只凭登录态放行。第二次创建所有者会被拒绝。
 
 `contracts/openapi.yaml`提供上述资源与认证路由的设计合同；实现时由真实FastAPI生成OpenAPI并做契约差异测试。不得只实现少数示例就宣布API完成。`apps/web`通过生成的typed client调用真实API。
 
@@ -712,6 +717,12 @@ index、profile、UI projection都是可重建派生数据；每次查询记录�
 **offline demo**：完整API、PostgreSQL、Temporal、真实本地文件/HTML工具、独立verifier、真实UI；只有模型换成显式ScriptedProvider。本地fixture站点在专用测试网络定点允许。ML权重不存在时可以测试lexical-only，完整hybrid gate仍标blocked，不能用随机向量冒充真实embedding。
 
 **live local**：owner配置模型key和price table后启用真实推理；编码使用隔离runner，研究来源通过白名单。默认不开公网、不自动收费、不发送真实外部消息。
+
+Live 探针只认这三个环境变量，缺任何一个就记 `blocked`，不用脚本模型代替：
+
+- `AETHER_LIVE_MODEL_KEY`：供应商 API key。
+- `AETHER_LIVE_MODEL_BASE`：OpenAI 兼容 API 根地址，例如 `https://api.example/v1`。
+- `AETHER_LIVE_MODEL_ALIAS`：请求里的模型名。
 
 **release**：镜像与依赖均固定、启用认证/TLS、runtime用户非superuser、完成备份恢复/网络隔离/真实模型测试。个人部署，不声明公开多租户安全。
 
