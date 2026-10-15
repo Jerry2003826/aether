@@ -11,9 +11,43 @@ head `4f1ca09` 的重跑结果已原样保存，退出码 0。Docker 在场，ke
 - 第一次编码失败是探针自己诱导的。提示要求模型提交 `return a - b`，独立测试再按 `add(1, 2) == 3` 判失败。模型看到了这个测试输出并另交了一份源码。这不是模型自己先做对任务、再被独立测试打回。
 - 混合检索是三条固定短文上的冒烟：BM25 加 `config/retrieval/fixture.json` 里已测量的向量，再 RRF。`chunk-apple` 排在第一。这不是检索质量基准，也不是规格里的完整研究演示（导入真实中英资料，按来源版本和引用位置写比较报告）。
 
-因此 F26 仍是 blocked，`live_ready` 保持 false。规格把 `live_ready` 定义成产品工程加上 F26 通过；F26 没有通过，所以不能勾 live。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+因此已经跑过的探针还不是完整 F26。`live_ready` 保持 false。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
 
-选中的供应商是 DeepSeek。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志。
+完整验收另有入口，监督者还没跑，所以 F26 继续 blocked。结果文件不要提前造。
+
+监督者机器需要：
+
+- Linux，并且已经有 Docker 和 uv。
+- 仓库根目录的控制面锁：下面的 `uv run --locked --no-build` 会用它。不要另装一份 pip 包。
+- OpenHands 不需要单独的容器镜像。在 `environments/openhands` 里执行 `uv sync --frozen`，装上钉住的 `openhands-sdk`、`openhands-tools`、`openhands-workspace`、`openhands-agent-server`，版本都是 1.54.0。
+- 在 `environments/ml` 里执行 `uv sync --frozen`。编码器是这里的 `FlagEmbedding`。第一次会下载 `BAAI/bge-m3`，revision `5617a9f61b028005a4858fdac845db406aefb181`。
+- `docker pull python:3.12-alpine`。独立测试和网络隔离都用这个镜像。
+
+```sh
+cd environments/openhands && uv sync --frozen
+cd ../ml && uv sync --frozen
+docker pull python:3.12-alpine
+cd ../..
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY=...
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 仍不是 live V1，F26 要等这份结果被核对后才能改状态。
+
+硬上限是 8 次 chat completion、累计 20000 token、单次输出最多 512 token。20000 token 即使按每百万 token 10 美元计也是 0.20 美元，低于 1 美元。供应商没有返回费用时 `cost_status` 是 `unknown`，不估一个账单。到顶就停，不能记成通过。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志，也不进 OpenHands 进程。job 只拿本机网关的 token。
+
+这一次做四件事：
+
+- 协议：一次 `tools` / `schema` / `usage` 探针，模型别名必须是 `deepseek-chat`。
+- 编码：`evals/f26_snapshot` 里的 `add` 本来就是 `return a - b`。独立测试先在新目录里观察到 `add(1, 2)=-1`。每次尝试都从快照重新复制，失败目录的哈希不能当成通过。OpenHands SDK 进程自己把补丁写进 `billing.py`，父进程不替它写。通过必须来自另一次只读容器：`python:3.12-alpine`，`--network none --read-only --cap-drop ALL --pids-limit 32`。没有 Docker 或镜像拉不下来，这项是 not_run。
+- 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
+- Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
+
+## 已经跑过的短探针
+
+下面是 `scripts/run_f26_live.py`，不是上面的完整验收。结果已经在 `reports/f26_live_result.json`。供应商仍是 DeepSeek。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志。
 
 ```sh
 export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
@@ -30,7 +64,7 @@ python scripts/run_f26_live.py --out reports/f26_live_result.json
 uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json
 ```
 
-监督者机器上的命令用上面这一条，这样 BM25 依赖在锁文件里。裸 `python3` 只有在该解释器已经能导入 `bm25s` 时才能做混合检索。
+短探针用上面这条 `uv run`。裸 `python3` 只有在该解释器已经能导入 `bm25s` 时才能做混合检索。
 
 探针最多 8 次 `POST /chat/completions`，每次 `max_tokens` 128，累计 token 达到 4000 就停。费用字段只有供应商返回时才写入；没有就记 `cost_status=unknown`，不估一个价钱。结果里的密钥会换成 `[REDACTED]`。
 
@@ -57,3 +91,12 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 | 入口在缺变量时把 blocked 写进指定文件 | `tests/unit/test_live_harness.py::test_script_writes_blocked_result_without_calling_out` |
 | 混合检索同时用 BM25 和已测量向量，目标条目排在 RRF 第一 | `tests/unit/test_live_harness.py::test_hybrid_context_uses_bm25_and_measured_vectors` |
 | 没有 docker 可执行文件时隔离检查是 not_run，命令行不含 key | `tests/unit/test_live_harness.py::test_missing_docker_is_not_run` |
+| 授权快照在任何补丁之前就让独立检查失败，提示不要求写成加法 | `tests/unit/test_f26_acceptance.py::test_authorized_snapshot_fails_before_any_patch` |
+| 失败目录不会被复用，补丁由 job 写入，provider key 不进 job | `tests/unit/test_f26_acceptance.py::test_failed_acceptance_is_not_reused_and_key_stays_out_of_the_job` |
+| 父进程不会把模型返回的文本自己写成补丁 | `tests/unit/test_f26_acceptance.py::test_harness_does_not_apply_the_model_text_itself` |
+| 没有 Docker 时不发起编码调用，记 not_run | `tests/unit/test_f26_acceptance.py::test_missing_docker_does_not_spend_a_coding_call` |
+| fixture 向量不能当成现场编码器 | `tests/unit/test_f26_acceptance.py::test_fixture_vectors_are_not_a_live_encoder` |
+| 网关丢掉多余字段，并拒绝别的模型名 | `tests/unit/test_f26_acceptance.py::test_gateway_drops_extra_fields_and_rejects_other_models` |
+| 执行器错误里的 key 被换成 `[REDACTED]` | `tests/unit/test_f26_acceptance.py::test_secret_in_an_executor_error_is_redacted` |
+| 缺 key 时完整验收是 blocked | `tests/unit/test_f26_acceptance.py::test_missing_key_is_blocked` |
+| 入口拒绝别的输出路径，并把 blocked 写进指定文件 | `tests/unit/test_f26_acceptance.py::test_script_writes_blocked_result_without_calling_out` |

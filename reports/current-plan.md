@@ -1,7 +1,18 @@
-# F00–F25 与 F27 已 done；F26 仍 blocked
+# F26 仍 blocked，等待完整验收结果
 
-head `4f1ca09` 的 DeepSeek 重跑已原样写入 `reports/f26_live_result.json`，退出码 0。协议、引用、诱导后的编码修复和 Docker 隔离都有分开的记录。
+已记录的 `reports/f26_live_result.json` 是三条短文冒烟，第一次编码失败也是提示诱导的。不能据此标 done。
 
-第一次失败是提示要求 `return a - b`。混合检索是三条短文冒烟，不是完整研究验收，也不是 OpenHands 编码恢复。因此不标 F26 done，`live_ready` 保持 false。
+完整入口：
 
-Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+```sh
+cd environments/openhands && uv sync --frozen
+cd ../ml && uv sync --frozen
+docker pull python:3.12-alpine
+cd ../..
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY=...
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+上限 8 次调用、20000 token、单次输出 512。不需要另拉 OpenHands 镜像。`live_ready` 保持 false。Hermes 四组对照和 CodeGraph 仍是 not_run。监督者还没跑，所以没有 `reports/f26_acceptance_result.json`。
