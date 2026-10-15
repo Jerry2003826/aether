@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F14",
+  "current_task": "F17",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Fix the reopened F14 grader and F16 cache gap, then continue F17 only after PR CI and SonarCloud are green.",
+  "next_action": "Implement F17 with the official MCP Python SDK.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
-  "last_test_result": "PR #1 CI run 38682012230: unit 32 passed; integration 103 passed, 2 warnings in 70.39s. SonarCloud quality gate OK.",
+  "last_test_result": "PR #1 CI run 38683576919: unit 32 passed; integration 112 passed, 2 warnings in 70.42s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -84,8 +84,8 @@
     "openhands_live_model": "not_run"
   },
   "f14": {
-    "status": "in_progress",
-    "ci_run": "38678232085"
+    "status": "done",
+    "ci_run": "38683576919"
   },
   "f15": {
     "status": "done",
@@ -94,8 +94,8 @@
     "ci_run": "38681057899"
   },
   "f16": {
-    "status": "in_progress",
+    "status": "done",
     "physical_delete": false,
-    "ci_run": "38682012230"
+    "ci_run": "38683576919"
   }
 }

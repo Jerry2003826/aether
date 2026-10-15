@@ -49,5 +49,6 @@ P1 覆盖：
 - F14 done。PR #1 CI run `38678232085`：unit `32 passed`，integration `100 passed, 2 warnings in 45.73s`。SonarCloud quality gate OK。评分在沙箱里只跑绑定套件。对照表 `reports/f14_criteria.md`。
 - F15 done。PR #1 CI run `38681057899`：unit `32 passed`，integration `102 passed, 2 warnings in 52.97s`。SonarCloud quality gate OK，可靠性、安全、可维护性都是 1。CodeGraph 1.6.2 的 CLI 在 `--network none` 容器里跑，包哈希已核对。产品开关仍然关闭，所以 `codegraph_enabled` 仍是 not_run。对照表 `reports/f15_criteria.md`。
 - F16 done。PR #1 CI run `38682012230`：unit `32 passed`，integration `103 passed, 2 warnings in 70.39s`。SonarCloud quality gate OK。删除是 tombstone：visibility epoch 增加，BM25 generation 退休，已删 chunk 的向量被清空，推荐特征快照记为失效。晚到的向量和记忆文本写不回去。结果写明备份和 Temporal 历史还在。对照表 `reports/f16_criteria.md`。
-- F14 和 F16 重新打开。评分器用 `python -I`，pytest 导入之后才把候选目录加到 `sys.path` 末尾。隔离结果只认评分器写出的第一行。删除后的搜索缓存按当前 visibility epoch 读取，旧条目不再返回已删内容。CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。
-- 下一步：这次 CI 和 SonarCloud 变绿后再把 F14、F16 标回 done，然后做 F17。live 模型、Hermes 仍是 not_run。
+- F14 done。PR #1 CI run `38683576919`：unit `32 passed`，integration `112 passed, 2 warnings in 70.42s`。SonarCloud quality gate OK。评分器用 `python -I`，先导入 pytest，再把 `/work/src` 加到 `sys.path` 末尾。顶层 `pytest.py` 和 `sitecustomize.py` 直接失败。隔离结果只认评分器写出的第一行。
+- F16 done。同一 CI run。搜索缓存同时绑定 visibility epoch 和索引代，删除后不再返回已删内容。
+- CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。下一步：F17 官方 MCP SDK。live 模型、Hermes 仍是 not_run。
