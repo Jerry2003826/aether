@@ -191,8 +191,12 @@ tickets:
   - UI连接真实API/DB/Workflow，无固定假成功数据
   - SSE断线按sequence补齐；pending command与投影水位可见
   - 审批操作服务端鉴权，事件/产物接口无跨project泄漏
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/api/aether_api/control.py
+  - apps/web/app/page.tsx
+  - tests/integration/test_control.py
+  - reports/f08_criteria.md
 - id: F09
   stage: G2
   scope: core

@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F08",
+  "current_task": "F09",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F08 minimal real UI and replayable events.",
+  "next_action": "Implement F09 vertical loop and kernel failure checks.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "Before P1: 67 passed, 2 warnings in 12.57s, EXIT:0. After P1: 72 passed, 2 warnings in 15.23s, EXIT:0. After dispatcher: 74 passed, 2 warnings in 14.91s, EXIT:0.",
+  "last_test_result": "F08 full suite: 83 passed, 2 warnings in 16.57s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -51,5 +51,8 @@
   "f07": {
     "status": "done",
     "dispatcher_delivery": "temporal_signal"
+  },
+  "f08": {
+    "status": "done"
   }
 }

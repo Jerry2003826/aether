@@ -33,6 +33,8 @@ GRANT SELECT, INSERT, UPDATE ON idempotency_keys TO aether_api;
 GRANT SELECT, INSERT, UPDATE ON artifacts TO aether_api;
 GRANT SELECT, INSERT, UPDATE ON tasks TO aether_api;
 GRANT SELECT, INSERT ON command_outbox TO aether_api;
+GRANT INSERT ON task_events TO aether_api;
+GRANT UPDATE ON approvals TO aether_api;
 
 GRANT SELECT ON
   goal_contracts, task_nodes, node_dependencies, task_events, capability_grants,

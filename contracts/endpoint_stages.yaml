@@ -34,38 +34,38 @@ paths:
   - get
   - post
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/tasks/{task_id}
   methods:
   - get
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/tasks/{task_id}/contract
   methods:
   - get
   - put
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/tasks/{task_id}/commands
   methods:
   - post
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/tasks/{task_id}/events
   methods:
   - get
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/approvals
   methods:
   - get
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/approvals/{approval_id}/decision
   methods:
   - post
   implemented_by: F08
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/artifacts/{artifact_id}
   methods:
   - get
