@@ -101,6 +101,7 @@ def rank_candidates(
         "items": reasons,
         "probabilities": probabilities,
         "collaborative_filtering": False,
+        "profile_version": int(profile["profile_version"]),
     }
 
 

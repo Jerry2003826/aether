@@ -32,7 +32,7 @@ _TEMPLATES = {
 
 
 def register_control_routes(app: FastAPI, settings: Settings) -> None:
-    @app.get("/v1/projects/{project_id}/tasks")
+    @app.get("/v1/projects/{project_id}/tasks", operation_id="listTasks")
     def list_tasks(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -55,7 +55,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             next_cursor = _encode_cursor(items[-1]["created_at"], items[-1]["id"])
         return {"items": [_public_task(item) for item in items], "next_cursor": next_cursor}
 
-    @app.post("/v1/projects/{project_id}/tasks", status_code=202)
+    @app.post("/v1/projects/{project_id}/tasks", status_code=202, operation_id="createTask")
     def create_task(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -76,7 +76,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
         return JSONResponse(status_code=202, content=accepted)
 
-    @app.get("/v1/projects/{project_id}/tasks/{task_id}")
+    @app.get("/v1/projects/{project_id}/tasks/{task_id}", operation_id="getTask")
     def get_task(project_id: str, task_id: str, request: Request) -> dict[str, Any]:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -85,7 +85,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             snapshot = _snapshot(conn, project_id, task_id)
         return _public_task(snapshot)
 
-    @app.get("/v1/projects/{project_id}/tasks/{task_id}/contract")
+    @app.get("/v1/projects/{project_id}/tasks/{task_id}/contract", operation_id="getContract")
     def get_contract(project_id: str, task_id: str, request: Request) -> dict[str, Any]:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -99,7 +99,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             raise ApiError(404, "not_found", "还没有合同草案")
         return draft
 
-    @app.put("/v1/projects/{project_id}/tasks/{task_id}/contract")
+    @app.put("/v1/projects/{project_id}/tasks/{task_id}/contract", operation_id="reviseContract")
     def revise_contract(project_id: str, task_id: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -118,7 +118,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             raise ApiError(409, "version_conflict", "合同版本已变化")
         return draft
 
-    @app.post("/v1/projects/{project_id}/tasks/{task_id}/commands", status_code=202)
+    @app.post("/v1/projects/{project_id}/tasks/{task_id}/commands", status_code=202, operation_id="submitTaskCommand")
     def submit_command(project_id: str, task_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -151,7 +151,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
         return JSONResponse(status_code=202, content=accepted)
 
-    @app.get("/v1/projects/{project_id}/tasks/{task_id}/events")
+    @app.get("/v1/projects/{project_id}/tasks/{task_id}/events", operation_id="streamTaskEvents")
     def stream_events(project_id: str, task_id: str, request: Request) -> StreamingResponse:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -190,7 +190,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         body = _render_events(project_id, task_id, rows, [str(item) for item in pending], watermark)
         return StreamingResponse(iter([body]), media_type="text/event-stream")
 
-    @app.get("/v1/projects/{project_id}/approvals")
+    @app.get("/v1/projects/{project_id}/approvals", operation_id="listApprovals")
     def list_approvals(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -212,7 +212,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         next_cursor = _encode_cursor(rows[-1]["created_at"], rows[-1]["id"]) if len(items) == limit else None
         return {"items": items, "next_cursor": next_cursor}
 
-    @app.post("/v1/projects/{project_id}/approvals/{approval_id}/decision", status_code=202)
+    @app.post("/v1/projects/{project_id}/approvals/{approval_id}/decision", status_code=202, operation_id="decideApproval")
     def decide_approval(project_id: str, approval_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -320,13 +320,13 @@ def _claim_idempotency(conn, *, owner: str, project_id: str, route: str, key: st
     return dict(existing)
 
 
-def _store_idempotency(conn, *, owner: str, project_id: str, route: str, key: str, body: dict[str, Any]) -> None:
+def _store_idempotency(conn, *, owner: str, project_id: str, route: str, key: str, body: dict[str, Any], status: int = 202) -> None:
     conn.execute(
         text(
-            "UPDATE idempotency_keys SET response_status = 202, response_body = CAST(:body AS jsonb) "
+            "UPDATE idempotency_keys SET response_status = :status, response_body = CAST(:body AS jsonb) "
             "WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key"
         ),
-        {"owner": owner, "project_id": project_id, "route": route, "key": key, "body": json.dumps(body)},
+        {"owner": owner, "project_id": project_id, "route": route, "key": key, "body": json.dumps(body), "status": status},
     )
 
 

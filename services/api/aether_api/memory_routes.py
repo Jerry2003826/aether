@@ -17,7 +17,7 @@ from aether_domain.security import sha256_text
 from aether_worker.memory import ACTIONS, CATEGORIES, KINDS, MemoryError, classify_memory
 
 def register_memory_routes(app: FastAPI, settings: Settings) -> None:
-    @app.get("/v1/projects/{project_id}/memories")
+    @app.get("/v1/projects/{project_id}/memories", operation_id="listMemories")
     def list_memories(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         owner = _owner(app, request)
         _owned(app, owner, project_id)
@@ -39,7 +39,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
         next_cursor = _encode_cursor(rows[-1]["created_at"], rows[-1]["id"]) if len(items) == limit else None
         return {"items": items, "next_cursor": next_cursor}
 
-    @app.post("/v1/projects/{project_id}/memories", status_code=202)
+    @app.post("/v1/projects/{project_id}/memories", status_code=202, operation_id="createMemory")
     def create_memory(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -63,7 +63,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
         return JSONResponse(status_code=202, content=accepted)
 
-    @app.patch("/v1/projects/{project_id}/memories/{memory_id}", status_code=202)
+    @app.patch("/v1/projects/{project_id}/memories/{memory_id}", status_code=202, operation_id="updateMemory")
     def patch_memory(project_id: str, memory_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
@@ -100,7 +100,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
         return JSONResponse(status_code=202, content=accepted)
 
-    @app.delete("/v1/projects/{project_id}/memories/{memory_id}", status_code=202)
+    @app.delete("/v1/projects/{project_id}/memories/{memory_id}", status_code=202, operation_id="deleteMemory")
     def delete_memory(project_id: str, memory_id: str, request: Request) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)

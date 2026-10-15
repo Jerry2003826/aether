@@ -35,6 +35,7 @@ GRANT SELECT, INSERT, UPDATE ON tasks TO aether_api;
 GRANT SELECT, INSERT ON command_outbox TO aether_api;
 GRANT INSERT ON task_events TO aether_api;
 GRANT UPDATE ON approvals TO aether_api;
+GRANT INSERT ON profile_snapshots, recommendation_impressions TO aether_api;
 
 GRANT SELECT ON
   goal_contracts, task_nodes, node_dependencies, task_events, capability_grants,
@@ -58,6 +59,7 @@ TO aether_worker;
 GRANT SELECT, INSERT ON audit_events TO aether_worker;
 GRANT SELECT ON verification_results, evaluation_runs, projects TO aether_worker;
 GRANT INSERT ON evaluation_runs TO aether_verifier;
+GRANT UPDATE ON command_outbox TO aether_verifier;
 GRANT UPDATE (visibility_epoch) ON projects TO aether_worker;
 
 -- Verifier appends evidence. Dispatcher only moves outbox rows.

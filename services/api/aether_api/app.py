@@ -9,11 +9,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from fastapi import FastAPI, Request, UploadFile
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from aether_api.auth_service import AuthService
+from aether_api.console_routes import register_console_routes
 from aether_api.control import register_control_routes
 from aether_api.memory_routes import register_memory_routes
 from aether_api.errors import ApiError
@@ -30,6 +32,13 @@ COOKIE = "aether_session"
 def create_app(settings: Settings | None = None) -> FastAPI:
     resolved = settings or Settings.from_env()
     app = FastAPI(title="AETHER", version="1.4.0")
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=sorted(resolved.origins),
+        allow_credentials=True,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        allow_headers=["Content-Type", "X-CSRF-Token", "Idempotency-Key", "If-Match", "Last-Event-ID"],
+    )
     app.state.settings = resolved
     app.state.database = Database(resolved.database_url) if resolved.database_url else None
     app.state.auth = AuthService(app.state.database, session_hours=resolved.session_hours, idle_minutes=resolved.idle_minutes) if app.state.database else None
@@ -44,15 +53,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def api_error(request: Request, exc: ApiError) -> JSONResponse:
         return JSONResponse(status_code=exc.status, content=_error(request, exc.code, exc.message, exc.retryable, exc.details))
 
-    @app.get("/health/live")
+    @app.get("/health/live", operation_id="liveness")
     def live() -> dict[str, Any]:
         return {"status": "ok", "dependencies": {}}
 
-    @app.get("/health/ready")
+    @app.get("/health/ready", operation_id="readiness")
     def ready() -> JSONResponse:
         return ready_payload()
 
-    @app.post("/v1/auth/bootstrap", status_code=201)
+    @app.post("/v1/auth/bootstrap", status_code=201, operation_id="bootstrapOwner")
     def bootstrap(request: Request, body: dict[str, Any]) -> JSONResponse:
         _require_loopback(request, resolved)
         _require_origin(request, resolved)
@@ -62,7 +71,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         session = app.state.auth.bootstrap(resolved.bootstrap_path, str(body["bootstrap_secret"]), str(body["display_name"]), str(body["passphrase"]))
         return _session_response(session, resolved, status=201)
 
-    @app.post("/v1/auth/session")
+    @app.post("/v1/auth/session", operation_id="login")
     def login(request: Request, body: dict[str, Any]) -> JSONResponse:
         _require_origin(request, resolved)
         _require_fields(body, "passphrase")
@@ -81,12 +90,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         app.state.login_throttle.release(host)
         return _session_response(session, resolved, status=200)
 
-    @app.get("/v1/auth/session")
+    @app.get("/v1/auth/session", operation_id="getSession")
     def get_session(request: Request) -> JSONResponse:
         session = _service(app).current(_cookie(request))
         return _session_response(session, resolved, status=200)
 
-    @app.delete("/v1/auth/session", status_code=204)
+    @app.delete("/v1/auth/session", status_code=204, operation_id="logout")
     def logout(request: Request) -> Response:
         _require_origin(request, resolved)
         _service(app).logout(_cookie(request), request.headers.get("x-csrf-token"))
@@ -94,7 +103,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         response.delete_cookie(COOKIE, path="/")
         return response
 
-    @app.get("/v1/projects")
+    @app.get("/v1/projects", operation_id="listProjects")
     def list_projects(request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
         if limit < 1 or limit > 100:
             raise ApiError(422, "invalid_limit", "limit 必须在 1 到 100 之间")
@@ -116,7 +125,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             next_cursor = _encode_cursor(rows[-1]["created_at"], rows[-1]["id"])
         return {"items": items, "next_cursor": next_cursor}
 
-    @app.post("/v1/projects", status_code=201)
+    @app.post("/v1/projects", status_code=201, operation_id="createProject")
     def create_project(request: Request, body: dict[str, Any]) -> JSONResponse:
         _require_origin(request, resolved)
         owner = _service(app).require_csrf(_cookie(request), request.headers.get("x-csrf-token"))
@@ -168,7 +177,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             )
         return JSONResponse(status_code=201, content=project)
 
-    @app.post("/v1/projects/{project_id}/artifacts", status_code=201)
+    @app.post("/v1/projects/{project_id}/artifacts", status_code=201, operation_id="uploadArtifact")
     async def upload_artifact(project_id: str, request: Request, file: UploadFile) -> JSONResponse:
         _require_origin(request, resolved)
         owner = _service(app).require_csrf(_cookie(request), request.headers.get("x-csrf-token"))
@@ -211,7 +220,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ApiError(status, exc.code, exc.message) from exc
         return JSONResponse(status_code=201, content=stored)
 
-    @app.get("/v1/projects/{project_id}/artifacts/{artifact_id}")
+    @app.get("/v1/projects/{project_id}/artifacts/{artifact_id}", operation_id="getArtifact")
     def download_artifact(project_id: str, artifact_id: str, request: Request) -> Response:
         owner = _service(app).authenticate(_cookie(request))
         _require_owned_project(app.state.database, owner["owner_id"], project_id)
@@ -221,7 +230,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ApiError(404, exc.code, exc.message) from exc
         return Response(content=data, media_type=media_type)
 
-    @app.delete("/v1/projects/{project_id}/artifacts/{artifact_id}", status_code=204)
+    @app.delete("/v1/projects/{project_id}/artifacts/{artifact_id}", status_code=204, operation_id="deleteArtifact")
     def delete_artifact(project_id: str, artifact_id: str, request: Request) -> Response:
         _require_origin(request, resolved)
         owner = _service(app).require_csrf(_cookie(request), request.headers.get("x-csrf-token"))
@@ -234,6 +243,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     register_control_routes(app, resolved)
     register_memory_routes(app, resolved)
+    register_console_routes(app, resolved)
     return app
 
 

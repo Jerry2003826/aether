@@ -120,5 +120,8 @@
   "f21": {
     "status": "done",
     "ci_run": "38687896639"
+  },
+  "f22": {
+    "status": "in_progress"
   }
 }

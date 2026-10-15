@@ -77,7 +77,7 @@ paths:
   - get
   - post
   implemented_by: F10
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/memories
   methods:
   - get
@@ -89,26 +89,26 @@ paths:
   - get
   - post
   implemented_by: F20
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/watches
   methods:
   - get
   - post
   implemented_by: F18
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/evaluations
   methods:
   - get
   - post
   implemented_by: F24
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/sources/{source_id}
   methods:
   - get
   - patch
   - delete
   implemented_by: F10
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/memories/{memory_id}
   methods:
   - patch
@@ -120,59 +120,59 @@ paths:
   - patch
   - delete
   implemented_by: F18
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/ingestions
   methods:
   - get
   - post
   implemented_by: F10
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/search
   methods:
   - post
   implemented_by: F11
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/recommendations
   methods:
   - get
   implemented_by: F19
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/feedback
   methods:
   - post
   implemented_by: F19
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/skills/{skill_id}/evaluate
   methods:
   - post
   implemented_by: F21
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/skills/{skill_id}/deployments
   methods:
   - post
   implemented_by: F21
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/costs
   methods:
   - get
   implemented_by: F05
-  status: not_implemented
+  status: implemented
 - path: /v1/admin/connectors
   methods:
   - get
   - post
   implemented_by: F17
-  status: not_implemented
+  status: implemented
 - path: /v1/admin/connectors/{connector_id}/probe
   methods:
   - post
   implemented_by: F17
-  status: not_implemented
+  status: implemented
 - path: /v1/admin/models/probe
   methods:
   - post
   implemented_by: F05
-  status: not_implemented
+  status: implemented
 - path: /v1/projects/{project_id}/artifacts
   methods:
   - post

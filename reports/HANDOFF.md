@@ -58,4 +58,5 @@ P1 覆盖：
 - F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
 - F21 done。PR #1 CI run `38686730319`：unit `40 passed in 7.73s`，integration `118 passed, 1 warning in 75.07s`。SonarCloud quality gate OK。对照表 `reports/f21_criteria.md`。
 - F20、F21 done。PR #1 CI run `38687896639`：unit `40 passed in 7.43s`，integration `123 passed, 1 warning in 72.10s`。SonarCloud quality gate OK。密钥整段替换。脚本整目录哈希后在容器里用 `python -I` 执行。回滚中途失败时指针和 canary 状态都不提交。对照表 `reports/f20_criteria.md`、`reports/f21_criteria.md`。
-- 下一步：F22 控制台和其余 API。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F22 进行中。49 个 OpenAPI 操作已挂上路由。来源、跟踪、技能、评测、连接器走命令落库。控制台页面读这些 API。本地浏览器用例覆盖长文本、键盘、窄屏、断线和原始 HTML。还没标 done。
+- 下一步：等这次 PR CI 和 Sonar 通过后标 F22 done，然后继续 F23。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

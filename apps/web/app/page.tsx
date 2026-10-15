@@ -37,6 +37,9 @@ export default async function HomePage() {
   return (
     <main>
       <h1>AETHER 控制台</h1>
+      <p>
+        <a href="/console">进入工作台</a>
+      </p>
       <p>时区：Australia/Melbourne。任务、审批和费用只来自实时 API，没有示例数据。</p>
       <p>API：{apiBase}</p>
       {health.live === null ? (

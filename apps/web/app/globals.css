@@ -1,0 +1,71 @@
+:root {
+  color: #1c1915;
+  background: #f6f3ec;
+  font-family: "Source Sans 3", "Noto Sans SC", sans-serif;
+}
+
+body {
+  margin: 0;
+}
+
+main {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 24px 16px 48px;
+}
+
+nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 16px 0;
+}
+
+button,
+input,
+textarea {
+  font: inherit;
+}
+
+button {
+  background: #1c1915;
+  color: #f6f3ec;
+  border: 0;
+  border-radius: 6px;
+  padding: 8px 12px;
+}
+
+button[aria-current="page"] {
+  outline: 3px solid #9a3412;
+}
+
+label {
+  display: block;
+  margin: 12px 0;
+}
+
+input,
+textarea {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  margin-top: 4px;
+}
+
+.panel {
+  background: #fff;
+  border: 1px solid #d6d0c4;
+  border-radius: 8px;
+  padding: 16px;
+  margin-top: 16px;
+}
+
+@media (max-width: 640px) {
+  main {
+    padding: 16px 12px 32px;
+  }
+
+  nav {
+    flex-direction: column;
+  }
+}

@@ -495,8 +495,14 @@ tickets:
   - 真实OpenAPI diff，无占位返回/生产mock
   - 任务/知识/记忆/代码/审批/跟踪/Discover/Skills/成本都走真实API
   - 键盘/错误/加载/断线/中文长文本E2E，原始HTML不直接执行
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/api/aether_api/console_routes.py
+  - services/worker/aether_worker/console_commands.py
+  - apps/web/app/console/page.tsx
+  - tests/integration/test_console_api.py
+  - tests/integration/test_console_browser.py
+  - reports/f22_criteria.md
 - id: F23
   stage: G6
   scope: core
