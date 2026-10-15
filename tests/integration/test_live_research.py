@@ -21,7 +21,7 @@ from tests.integration.test_artifacts import _project
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾"
 SECRET = "秘密句子不应进入模型上下文"
 GOAL = "请根据已上传资料回答沸点"
-KEY = "sk-local-fake-not-a-provider-key"
+KEY = "local-upstream-token"
 
 
 class Upstream(BaseHTTPRequestHandler):

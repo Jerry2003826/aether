@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -32,7 +33,7 @@ RESULT_PATH = ROOT / ALLOWED_OUT
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾"
 GOAL = "请根据已上传资料回答沸点。回答时请引用资料原句。"
 ORIGIN = "http://127.0.0.1:3000"
-PASSPHRASE = "correct horse battery"
+PASSPHRASE = secrets.token_urlsafe(18)
 REQUIRED = (
     "AETHER_DATABASE_URL",
     "AETHER_WORKER_DATABASE_URL",
