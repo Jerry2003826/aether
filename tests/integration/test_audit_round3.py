@@ -34,6 +34,7 @@ def ctx(client, api_db, role_urls):
         worker_url=role_urls['aether_worker'], verifier_url=role_urls['aether_verifier'],
         dispatcher_url=role_urls['aether_dispatcher'], artifact_root=root,
         temporal_address='127.0.0.1:9', task_queue='round3-direct-functions',
+        research_provider='scripted',
     )
     return owner, project, worker, store, endpoints, client, headers
 

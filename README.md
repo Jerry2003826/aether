@@ -136,7 +136,9 @@ export AETHER_TASK_QUEUE=aether-tasks
 uv run --locked --no-build python -m aether_worker
 ```
 
-`AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。
+`AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。控制信号可以提前结束这次等待。`4ba3b2f` 之前的历史没有这条补丁标记，回放时仍走原来的 sleep。
+
+研究路径默认调用 live 模型。三个变量和短探针相同：`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`、`AETHER_LIVE_MODEL_KEY`。缺任何一个，任务进入 `NEEDS_REVIEW`，原因是没有配置供应商，不会改用脚本回答。离线测试要显式设置 `AETHER_RESEARCH_PROVIDER=scripted`。调用前按任务预算预留 token、次数、费用和墙钟；超限则任务失败，`resume_state` 为 `budget_exhausted`，并且不会发出这次请求。`allowed_source_ids` 省略时读取项目里未绑定的文本；空列表表示没有来源；列表里有不存在或不可读的 id 时整次任务进入 `NEEDS_REVIEW`，不会改读其他资料。
 
 进程打出 `aether-worker-ready` 后开始轮询。`SIGTERM` 或 `SIGINT` 让当前这一轮结束后退出。队列默认 `aether-tasks`，测试可以改 `AETHER_TASK_QUEUE`。
 
@@ -192,6 +194,24 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 
 `--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 为 0，`failed` 为 1，`blocked` 为 2，`incomplete` 为 3。硬上限是 8 次补全、累计 20000 token、单次输出最多 512 token。供应商没有返回费用时 `cost_status` 为 `unknown`。验收步骤、引用规则和已记录结果见 [`reports/f26_criteria.md`](reports/f26_criteria.md)。
 
+### `scripts/run_live_task_check.py`
+
+同一组模型变量还可以跑一条真实研究任务。它走公开 HTTP 和 `python -m aether_worker`，提供者是 live。缺变量时退出码是 2，结果是 `blocked`，不会假装成功。key 不进命令行，不进结果文件。
+
+```sh
+export AETHER_DATABASE_URL='postgresql://aether_api:…@127.0.0.1:5432/aether'
+export AETHER_WORKER_DATABASE_URL='postgresql://aether_worker:…@127.0.0.1:5432/aether'
+export AETHER_VERIFIER_DATABASE_URL='postgresql://aether_verifier:…@127.0.0.1:5432/aether'
+export AETHER_DISPATCHER_DATABASE_URL='postgresql://aether_dispatcher:…@127.0.0.1:5432/aether'
+export AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+```
+
+`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。上传接口返回 `artifact_id`。失败时结果里有 `step`、`error_type` 和去掉密钥后的 `error_message`。监督者在 head `7eb911b` 上用真实 key 跑过一次：退出码 0，`status=probed`，任务 `SUCCEEDED`，1 次 `research.call`，1 次验证，`cost_status=unknown`。原样结果在 [`reports/live_task_check.json`](reports/live_task_check.json)，文件 sha256 是 `085b8b3224c305fd5ad0fece2069e939237d7ed04a8fc262862d61943fb8fc91`。结果里的 `live_ready` 是 `false`。这次检查不改交付矩阵里的 `live_ready`。
+
 ## 当前状态
 
 F00–F27 的 `status` 都是 `done`。`readiness`：
@@ -206,7 +226,7 @@ F00–F27 的 `status` 都是 `done`。`readiness`：
 
 `f27` 对象里仍留着该任务关闭时写入的 `live_ready: false` 和 `codegraph_enabled: false`。当前结论看上表的 `readiness`。
 
-F26 在 `cb22fbc` 上由 `scripts/run_f26_acceptance.py` 跑通，退出码 0，`status=probed`。协议、现场 BGE 混合检索、OpenHands 补丁和 Linux 隔离都通过。比较报告 488 token。`semantic_support` 仍是 `not_judged`：引用写齐不等于已经判断比较内容成立。`cost_status` 仍是 `unknown`。结果文件 [`reports/f26_acceptance_result.json`](reports/f26_acceptance_result.json) 里的 `live_ready` 仍是 `false`，脚本不自证；交付矩阵按产品工程加 F26 记为 `passed`。
+F26 最近一次完整验收在 head `d694f89`，退出码 0，`status=probed`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁和 Linux 隔离都通过。3 次调用，合计 1303 token。比较报告 sha256 是 `710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe`，completion 484 token。`semantic_support` 仍是 `not_judged`：引用写齐不等于已经判断比较内容成立。`cost_status` 仍是 `unknown`。原样结果在 [`reports/f26_acceptance_result.json`](reports/f26_acceptance_result.json)，文件 sha256 是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。文件里的 `live_ready` 仍是 `false`，脚本不自证；交付矩阵按产品工程加 F26 记为 `passed`。更早的 `cb22fbc` 那次也是退出码 0，比较报告当时是 488 token。同一头上的 `scripts/run_live_task_check.py` 在创建任务之前失败：它读取上传响应的 `id`，接口返回的是 `artifact_id`，模型没有被调用。脚本现在读取 `artifact_id`。修好之后，监督者在 head `7eb911b` 上用真实 key 跑通一次研究任务，见上面的现场检查记录。费用仍是 unknown。这次成功不改 `live_ready`。
 
 CodeGraph 已启用。所有者打开的是已安装锁 [`config/codegraph.lock.json`](config/codegraph.lock.json)（`product_enabled: true`，CLI `@colbymchenry/codegraph@1.6.2`）。[`config/codegraph.example.yaml`](config/codegraph.example.yaml) 和 `config/feature_matrix.yaml` 仍然关闭，新检出不会自动打开。证据在 [`reports/f15_product_result.json`](reports/f15_product_result.json)：`status` 为 `passed`，索引 162 个文件、2674 个节点、7081 条边，库 8892416 字节，冷索引约 2.00 秒，状态 `complete`。调用关系与 AST 一致，改快照后查询返回 `stale_snapshot`，容器带 `--network none`，遥测关闭。复现命令见 [`reports/f15_criteria.md`](reports/f15_criteria.md)：
 

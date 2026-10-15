@@ -1,0 +1,10 @@
+{
+  "status": "probed",
+  "live_ready": false,
+  "provider": "live",
+  "task_status": "SUCCEEDED",
+  "requested_alias": "deepseek-chat",
+  "research_calls": 1,
+  "verification_count": 1,
+  "cost_status": "unknown"
+}

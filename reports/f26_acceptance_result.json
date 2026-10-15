@@ -2,8 +2,8 @@
   "status": "probed",
   "live_ready": false,
   "scripted_substitute": false,
-  "git_commit": "cb22fbc59a274f9e4a9189f8a26ab5ca350f6343",
-  "started_at": "2026-10-15T09:31:09.290134+00:00",
+  "git_commit": "d694f89d8a841f42bffba4457ad42336d447f98b",
+  "started_at": "2026-10-15T18:45:37.793088+00:00",
   "model_alias": "deepseek-chat",
   "model_base": "https://api.deepseek.com/v1",
   "caps": {
@@ -16,10 +16,10 @@
   "calls_detail": [
     {
       "id": "call-1",
-      "upstream_id": "97f05cea-4642-48ba-a2f8-72ea6e7084d8",
+      "upstream_id": "aad14069-e6fe-4d1a-947f-7c4f0f31cda3",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 1495,
+      "latency_ms": 1695,
       "request_sha256": "d430229a21d5c40df396402b33d7fecd787edd6ff9b2fb99345b4646c21900fc",
       "completion_sha256": null,
       "prompt_tokens": 299,
@@ -35,10 +35,10 @@
     },
     {
       "id": "call-2",
-      "upstream_id": "183d24f1-c756-4e98-821e-19e1fd265389",
+      "upstream_id": "891b3df9-2ccb-4986-8973-77ef8307ec1a",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 1376,
+      "latency_ms": 1233,
       "request_sha256": "347bcf83ef33cb482f2fc8216ce8b61612dcea393757d837b011d54d6bfb6997",
       "completion_sha256": "0f61b1f74f852a38ec8221882ce0be69808cdaf930d9048bdfe07df5545d32e9",
       "prompt_tokens": 87,
@@ -56,15 +56,15 @@
     },
     {
       "id": "call-3",
-      "upstream_id": "09039ca0-3a04-45b1-bbfa-62e5e3d0b7b5",
+      "upstream_id": "7d50c162-dedf-44ac-8e0a-626cf6473033",
       "http_status": 200,
       "model": "deepseek-chat",
-      "latency_ms": 2847,
+      "latency_ms": 3002,
       "request_sha256": "723ea56ba04d081dd50461b91ab18ec63eca7987fde47e8416c3957d22c360cc",
-      "completion_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+      "completion_sha256": "710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe",
       "prompt_tokens": 360,
-      "completion_tokens": 488,
-      "total_tokens": 848,
+      "completion_tokens": 484,
+      "total_tokens": 844,
       "cost_micro_usd": null,
       "cost_status": "unknown",
       "dropped_fields": [
@@ -78,8 +78,8 @@
   ],
   "usage": {
     "prompt_tokens": 746,
-    "completion_tokens": 561,
-    "total_tokens": 1307,
+    "completion_tokens": 557,
+    "total_tokens": 1303,
     "cost_micro_usd": null,
     "cost_status": "unknown"
   },
@@ -212,8 +212,8 @@
         "end_offset": 41
       }
     ],
-    "report": "相同之处：两条都说明在标准大气压下水的沸点是 100 摄氏度。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。两条也都没有声称这个沸点在高原上仍然相同。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。\n\n不同之处：容器不同，src-zh 是玻璃烧杯，src-en 是钢烧杯。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。加热工具不同，src-zh 用酒精灯，src-en 用电热板。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。",
-    "report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "report": "相同之处：两条都说明在标准大气压下水的沸点为 100 摄氏度（src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283）；两条都说明笔记没有声称该沸点在高原上仍然相同（src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283）。\n\n不同之处：容器不同，src-zh 记为玻璃烧杯，src-en 记为钢制烧杯（src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283）；加热方式不同，src-zh 记为酒精灯，src-en 记为电热板（src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283）。",
+    "report_sha256": "710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe",
     "citations_cover_sources": true
   },
   "linux_isolation": {

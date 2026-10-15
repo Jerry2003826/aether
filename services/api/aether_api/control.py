@@ -63,14 +63,24 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         goal = body.get("goal") if isinstance(body, dict) else None
         if not isinstance(goal, str) or not goal.strip() or len(goal) > 16000 or set(body) - {"goal", "budget", "allowed_source_ids"}:
             raise ApiError(422, "invalid_task", "任务目标不合法")
-        payload_hash = sha256_text(json.dumps({"goal": goal}, sort_keys=True, separators=(",", ":")))
+        budget = _budget_spec(body.get("budget")) if "budget" in body else None
+        allowed_source_ids = _source_ids(body.get("allowed_source_ids")) if "allowed_source_ids" in body else None
+        payload_hash = sha256_text(json.dumps({"goal": goal, "budget": budget, "allowed_source_ids": allowed_source_ids}, sort_keys=True, separators=(",", ":")))
         route = f"POST /v1/projects/{project_id}/tasks"
         command_id = str(uuid.uuid4())
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
             existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=payload_hash)
             if existing is not None:
                 return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
-            created = insert_start_command(conn, project_id=project_id, goal=goal.strip(), command_key=command_id, owner_id=owner)
+            created = insert_start_command(
+                conn,
+                project_id=project_id,
+                goal=goal.strip(),
+                command_key=command_id,
+                owner_id=owner,
+                budget=budget,
+                allowed_source_ids=allowed_source_ids,
+            )
             _append_event(conn, project_id=project_id, task_id=created["task_id"], event_type="task.accepted", payload={"goal": goal.strip(), "status": "QUEUED"})
             accepted = _accepted(request, command_id, created["task_id"])
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
@@ -536,6 +546,46 @@ def _decision_body(body: dict[str, Any]) -> tuple[str, str]:
     if set(body) - {"decision", "expected_intent_hash", "reason"}:
         raise ApiError(422, "invalid_decision", "审批决定不合法")
     return decision, digest
+
+
+def _budget_spec(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) - {"max_cost_micro_usd", "max_tokens", "max_model_requests", "active_seconds", "verification_reserve_fraction"}:
+        raise ApiError(422, "invalid_budget", "任务预算不合法")
+    spec = {
+        "max_cost_micro_usd": 2_000_000,
+        "max_tokens": 100_000,
+        "max_model_requests": 48,
+        "active_seconds": 1800,
+        "verification_reserve_fraction": 0.2,
+    }
+    spec.update(value)
+    if any(isinstance(spec[name], bool) or not isinstance(spec[name], int) for name in ("max_cost_micro_usd", "max_tokens", "max_model_requests", "active_seconds")):
+        raise ApiError(422, "invalid_budget", "任务预算不合法")
+    fraction = spec["verification_reserve_fraction"]
+    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
+        raise ApiError(422, "invalid_budget", "任务预算不合法")
+    spec["verification_reserve_fraction"] = float(fraction)
+    if spec["max_cost_micro_usd"] < 0 or spec["max_tokens"] < 1 or spec["max_model_requests"] < 1 or spec["active_seconds"] < 1:
+        raise ApiError(422, "invalid_budget", "任务预算不合法")
+    if not 0 <= spec["verification_reserve_fraction"] < 1:
+        raise ApiError(422, "invalid_budget", "任务预算不合法")
+    return spec
+
+
+def _source_ids(value: Any) -> list[str]:
+    if not isinstance(value, list):
+        raise ApiError(422, "invalid_sources", "允许的来源不合法")
+    parsed: list[str] = []
+    for item in value:
+        if not isinstance(item, str):
+            raise ApiError(422, "invalid_sources", "允许的来源不合法")
+        try:
+            parsed.append(str(uuid.UUID(item)))
+        except ValueError as exc:
+            raise ApiError(422, "invalid_sources", "允许的来源不合法") from exc
+    if len(parsed) != len(set(parsed)):
+        raise ApiError(422, "invalid_sources", "允许的来源不合法")
+    return parsed
 
 
 def _accepted(request: Request, command_id: str, resource_id: str) -> dict[str, str]:

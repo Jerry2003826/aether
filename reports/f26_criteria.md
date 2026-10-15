@@ -43,7 +43,9 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 - 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`version=1` 和 `offset=0-92` 与空格写法是同一字段，数字不同仍然失败。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
 - Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
 
-head `dac5c49` 的完整验收退出码是 1，原样留在 `reports/f26_acceptance_dac5c49.json`。协议、OpenHands 补丁和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，报告最后停在 `src-en`。两条引用在截断之前已经写全。失败原因是检查器当时只认空格。检查器改完后，监督者在 head `cb22fbc` 重跑，退出码 0。原样结果在 `reports/f26_acceptance_result.json`。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token。四项都通过。
+head `dac5c49` 的完整验收退出码是 1，原样留在 `reports/f26_acceptance_dac5c49.json`。协议、OpenHands 补丁和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，报告最后停在 `src-en`。两条引用在截断之前已经写全。失败原因是检查器当时只认空格。检查器改完后，监督者在 head `cb22fbc` 重跑，退出码 0。那次比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token。四项都通过。
+
+当前 `reports/f26_acceptance_result.json` 是后来在 head `d694f89` 上的重跑，文件 sha256 是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。退出码 0，`status=probed`。协议、现场 BGE、OpenHands 1.54.0 和 Linux 隔离都通过。3 次调用，合计 1303 token。比较报告 sha256 是 `710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe`，completion 484 token。`semantic_support` 仍是 `not_judged`，`cost_status` 仍是 `unknown`。
 
 按 `docs/11_delivery.md`，`live_ready` 是产品工程加 F26。产品工程此前已经 passed，这次 F26 的验收项也通过，所以交付矩阵里的 `live_ready` 改为 passed。下面几项照实保留，不算通过：
 

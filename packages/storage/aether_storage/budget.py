@@ -21,12 +21,14 @@ class BudgetLedger:
     def __init__(self, database: Database) -> None:
         self.database = database
 
-    def open_account(self, *, owner_id: str, project_id: str, task_id: str, limit_micro_usd: int, token_limit: int, max_requests: int, verification_reserve_fraction: float = 0.2) -> None:
+    def open_account(self, *, owner_id: str, project_id: str, task_id: str, limit_micro_usd: int, token_limit: int, max_requests: int, verification_reserve_fraction: float = 0.2, active_seconds: int = 1800) -> None:
+        if active_seconds < 1:
+            raise BudgetError("invalid_amount")
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             conn.execute(
                 text(
-                    "INSERT INTO budget_accounts (project_id, task_id, limit_micro_usd, token_limit, max_requests, verification_reserve_fraction) "
-                    "VALUES (:project_id, :task_id, :limit_micro_usd, :token_limit, :max_requests, :fraction)"
+                    "INSERT INTO budget_accounts (project_id, task_id, limit_micro_usd, token_limit, max_requests, verification_reserve_fraction, active_seconds) "
+                    "VALUES (:project_id, :task_id, :limit_micro_usd, :token_limit, :max_requests, :fraction, :active_seconds)"
                 ),
                 {
                     "project_id": project_id,
@@ -35,10 +37,11 @@ class BudgetLedger:
                     "token_limit": token_limit,
                     "max_requests": max_requests,
                     "fraction": verification_reserve_fraction,
+                    "active_seconds": active_seconds,
                 },
             )
 
-    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None) -> bool:
+    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None, model_alias: str | None = None) -> bool:
         if amount < 0 or tokens < 0:
             raise BudgetError("invalid_amount")
         digest = sha256_text(json.dumps({
@@ -49,6 +52,7 @@ class BudgetLedger:
             "role": role,
             "tokens": tokens,
             "verification": verification,
+            "model_alias": model_alias or role,
             "request": request or {},
         }, sort_keys=True, separators=(",", ":")))
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -79,7 +83,7 @@ class BudgetLedger:
                 conn.execute(
                     text(
                         "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
-                        "VALUES (:project_id, :task_id, :request_key, :digest, :role, :role, :amount, 'reserved', CAST(:detail AS jsonb))"
+                        "VALUES (:project_id, :task_id, :request_key, :digest, :role, :model_alias, :amount, 'reserved', CAST(:detail AS jsonb))"
                     ),
                     {
                         "project_id": project_id,
@@ -87,6 +91,7 @@ class BudgetLedger:
                         "request_key": request_key,
                         "digest": digest,
                         "role": role,
+                        "model_alias": model_alias or role,
                         "amount": amount,
                         "detail": json.dumps({"reserved_tokens": tokens}),
                     },

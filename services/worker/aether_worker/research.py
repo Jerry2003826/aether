@@ -91,6 +91,23 @@ def offline_fact(*, source_text: str, goal: str) -> str:
     return ""
 
 
+def research_prompt(*, goal: str, sources: list[str]) -> str:
+    """Ground a live model in the allowed sources. Disallowed text must not be added here."""
+    blocks = [f"[资料{index}]\n{source.strip()}" for index, source in enumerate(sources, start=1)]
+    return "只根据下列资料回答目标。回答必须包含你所依据的资料原句，不要使用资料之外的事实。\n" f"目标：{goal.strip()}\n\n" + "\n\n".join(blocks)
+
+
+def cites_fact(answer: str, fact: str) -> bool:
+    """The answer quotes the full source line or a contiguous span of at least 12 characters."""
+    if len(fact) < 8 or not answer:
+        return False
+    if fact in answer:
+        return True
+    if len(fact) < 12:
+        return False
+    return any(fact[start : start + 12] in answer for start in range(0, len(fact) - 11))
+
+
 def scripted_answer(*, source_text: str, goal: str) -> str:
     """Offline excerpt stand-in. It is not a live model and it does not return the goal unchanged."""
     fact = offline_fact(source_text=source_text, goal=goal)

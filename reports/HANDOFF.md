@@ -1,5 +1,39 @@
 # 交接
 
+研究任务默认走 live 模型，分支 `cursor/live-research-provider-7618`，基线 `e1cc9e5`。本机没有 key，没有请求 key，也没有写入 GitHub secrets。PR #8 待审，不要合并。现场检查修复的 CI 绿头是 `185c527`。
+
+`77551b4` 的 pull_request CI `38789787068` 里，`test_live_task_check_script_calls_the_fake_upstream` 退出码 3，`reason=api_or_worker_did_not_start`。API 其实已经在听。worker 立刻退出：产物目录是仓库里的 `data/live-task-check`，CI 检出在 `/home/runner` 下，`assert_storage_root` 拒绝宿主 home。当时结果里没有退出码和日志。脚本现在把产物目录放到 `mkdtemp`，启动失败会写下进程退出码和日志尾部。测试把 `HOME` 设成检出目录，所以再退回仓库 `data/` 会失败。假上游这条路径在 head `185c527` 的 CI 上通过：push `38793383253`（integration `116623417400`，pack-and-unit `116623417026`），pull_request `38793387951`（integration `116623434421`，pack-and-unit `116623433993`），SonarCloud 通过。没有把失败改成 `blocked`，也没有放宽断言。
+
+监督者在 head `d694f89` 上跑了 F26，退出码 0，结果已按原字节写入 `reports/f26_acceptance_result.json`（文件 sha256 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`）。同一头上的 `scripts/run_live_task_check.py` 退出码 1，原因是上传响应没有 `id`，只有 `artifact_id`。任务没有创建，模型没有被调用。脚本现在读取 `artifact_id`，异常结果记下 `step`、`error_type` 和去掉密钥后的 `error_message`。监督者在 head `7eb911b` 上用真实 key 跑了 `scripts/run_live_task_check.py`，退出码 0。`status=probed`，任务 `SUCCEEDED`，1 次 `research.call`，1 次验证，`cost_status=unknown`。原样结果在 `reports/live_task_check.json`，文件 sha256 是 `085b8b3224c305fd5ad0fece2069e939237d7ed04a8fc262862d61943fb8fc91`。文件里的 `live_ready` 是 false。这条脚本不改交付矩阵里的 `live_ready`。key 不在文件里。默认提供者仍是 live，`AETHER_INTAKE_PAUSE_SECONDS` 默认仍是 0。没有新的 Critical：测试不是固定返回，生产路径没有为了这个用例打开的测试钩子。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/integration/test_live_task_script.py tests/integration/test_live_research.py tests/unit/test_live_task_check.py
+14 passed, 2 warnings in 16.07s
+```
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit/test_live_task_check.py tests/integration/test_live_task_script.py
+4 passed in 5.61s
+scripts/verify_freeze.py passed
+```
+
+监督者在自己的机器上跑：
+
+```sh
+export AETHER_DATABASE_URL='postgresql://aether_api:…@127.0.0.1:5432/aether'
+export AETHER_WORKER_DATABASE_URL='postgresql://aether_worker:…@127.0.0.1:5432/aether'
+export AETHER_VERIFIER_DATABASE_URL='postgresql://aether_verifier:…@127.0.0.1:5432/aether'
+export AETHER_DISPATCHER_DATABASE_URL='postgresql://aether_dispatcher:…@127.0.0.1:5432/aether'
+export AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+本地全量：`288 passed`。CI 用本地假的 OpenAI 兼容上游，不代表 live 成功。
+
 第三轮审计修复在 `cursor/audit-round3-repairs-7618`。基线 `4ba3b2f`。全量命令：
 
 ```text
@@ -75,7 +109,7 @@ P1 覆盖：
 - 第一次编码失败是探针提示要求 `return a - b`，不是模型自己先完成任务再被测试打回。混合检索是三条短文冒烟，不是检索质量基准，也不是规格里的完整研究演示。编码也没有走授权仓库快照和 OpenHands。所以按 `docs/11_delivery.md`，F26 不能标 done。`live_ready` 要等 F26 通过，因此保持 false。
 - `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
 - 漏洞库仍是 offline not_run。`dac5c49` 那次失败原样留在 `reports/f26_acceptance_dac5c49.json`。CodeGraph 产品启用和 Hermes 四组对照的当前结论见下面两条，不以这一条旧交接为准。
-- F26 done。监督者在 head `cb22fbc` 上重跑 `scripts/run_f26_acceptance.py`，退出码 0，`status=probed`。原样结果在 `reports/f26_acceptance_result.json`。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token，正文写完。协议、现场 BGE 混合检索、OpenHands 补丁和 Linux 隔离都通过。key 不在文件里。`semantic_support` 是 `not_judged`，`cost_status` 是 `unknown`。按 `docs/11_delivery.md`，产品工程已经通过，F26 现在通过，所以 `live_ready` 是 passed。结果 JSON 里的 `live_ready` 仍是 false，脚本不自己改交付结论。
+- F26 done。监督者在 head `d694f89` 上重跑 `scripts/run_f26_acceptance.py`，退出码 0，`status=probed`。原样结果在 `reports/f26_acceptance_result.json`，文件 sha256 是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。比较报告 sha256 是 `710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe`，completion 484 token。合计 3 次调用、1303 token。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁和 Linux 隔离都通过。key 不在文件里。`semantic_support` 是 `not_judged`，`cost_status` 是 `unknown`。按 `docs/11_delivery.md`，产品工程已经通过，F26 现在通过，所以 `live_ready` 是 passed。结果 JSON 里的 `live_ready` 仍是 false，脚本不自己改交付结论。此前 `cb22fbc` 那次也是退出码 0。
 - CodeGraph 产品开关已由所有者打开。示例和功能矩阵仍是关闭。在 commit `2047af0` 上跑了 `uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json`，退出码 0。索引 162 个文件、2674 个节点、7081 条边，库 8892416 字节，冷索引约 2.00 秒，状态 complete，版本 1.6.2。`build_report` 调用 `_counts`，调用方和被调用方与 AST 一致，没有多余边。`f26_acceptance.py` 对 `redact_secret` 的导入也被图谱记到。改快照文件后查询返回 `stale_snapshot`。索引前的文本搜索只命中快照内文件，原因是 `graph_unavailable`。容器带 `--network none`，遥测关闭。因此 `readiness.codegraph_enabled` 改为 passed。
 - Hermes 四组探测已经跑过一次。监督者在 head `fcceba5` 上用 live key 跑了 `scripts/run_hermes_compare.py`，DeepSeek，`AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`，请求别名 `deepseek-chat`。原样结果在 `reports/hermes_compare_result.json`，sha256 `92149c0dd84fd60829d8a64e9bf59fb83ca52bbe3e102a25aa3399280fe7d3b2`。`hermes_identity` 是 verified，提交 `297552a9d646119871391d202509822cd86330df`，版本 v0.22.1。四组各 1 条 `DEV-COMPARE-SUM`，都答对。6 次计量调用，费用全部 unknown。`status=probed`。每组 n=1，Wilson 95% 区间是 0.20654329147389294–1.0（约 0.21–1.0），不足以判断领先。`comparative_evidence` 仍是 not_run，`superior` 仍是 null。请求的 model 是 `deepseek-chat`，上游返回的 model 是 `deepseek-flash`。key 不在文件里。`semantic_support` 仍是 not_judged。
 

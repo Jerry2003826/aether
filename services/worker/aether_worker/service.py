@@ -64,6 +64,15 @@ def _intake_pause_seconds() -> float:
     return value
 
 
+def _research_provider() -> str:
+    raw = os.environ.get("AETHER_RESEARCH_PROVIDER", "live").strip().lower()
+    if raw in {"", "live"}:
+        return "live"
+    if raw == "scripted":
+        return "scripted"
+    raise SystemExit("AETHER_RESEARCH_PROVIDER 只能是 live 或 scripted")
+
+
 def endpoints_from_env() -> WorkerEndpoints:
     missing = [
         name
@@ -80,6 +89,10 @@ def endpoints_from_env() -> WorkerEndpoints:
         temporal_address=os.environ["AETHER_TEMPORAL_ADDRESS"],
         task_queue=os.environ.get("AETHER_TASK_QUEUE", "aether-tasks"),
         intake_pause_seconds=_intake_pause_seconds(),
+        research_provider=_research_provider(),
+        live_model_base=os.environ.get("AETHER_LIVE_MODEL_BASE", "").strip(),
+        live_model_alias=os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip(),
+        live_model_key=os.environ.get("AETHER_LIVE_MODEL_KEY", ""),
     )
 
 

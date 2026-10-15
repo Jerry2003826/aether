@@ -21,6 +21,22 @@ def _is_timeout(exc: BaseException) -> bool:
     return "timeout" in text or "timed out" in text
 
 
+def _cost_micro_usd(response: Any) -> int | None:
+    hidden = getattr(response, "_hidden_params", None) or {}
+    cost = hidden.get("response_cost") if isinstance(hidden, dict) else None
+    if cost is None:
+        cost = getattr(response, "response_cost", None)
+    if cost is None:
+        return None
+    try:
+        value = float(cost)
+    except (TypeError, ValueError):
+        return None
+    if value < 0:
+        return None
+    return int(round(value * 1_000_000))
+
+
 def _redact(value: str, secret: str) -> str:
     if not secret:
         return value
@@ -66,14 +82,16 @@ class ModelGateway:
             raise GatewayDenied("alias_denied")
         project_id = scope["project_id"]
         self.audit.append(f"model project={project_id} alias={alias}")
+        call = {"max_tokens": int(body["max_tokens"])} if body.get("max_tokens") else {}
         try:
             response = litellm.completion(
-                model="openai/local-fake",
+                model=f"openai/{alias}",
                 api_base=self.upstream_base,
                 api_key=self.provider_key,
                 messages=[{"role": "user", "content": str(body.get("prompt") or "")}],
                 timeout=self.timeout,
                 num_retries=0,
+                **call,
             )
         except Exception as exc:
             self.audit.append(f"model project={project_id} alias={alias} outcome=failed")
@@ -81,34 +99,45 @@ class ModelGateway:
                 return {
                     "project_id": project_id,
                     "task_id": scope.get("task_id"),
+                    "requested_alias": alias,
+                    "upstream_model": None,
                     "output": None,
                     "usage_status": "unknown",
                     "input_tokens": None,
                     "output_tokens": None,
                     "actual_cost_micro_usd": None,
+                    "cost_status": "unknown",
                 }
             raise GatewayDenied("upstream_error") from exc
         output = _redact(response.choices[0].message.content or "", self.provider_key)
+        upstream_model = _redact(str(getattr(response, "model", "") or ""), self.provider_key)
+        cost = _cost_micro_usd(response)
         usage = getattr(response, "usage", None)
         if usage is None or usage.prompt_tokens is None or usage.completion_tokens is None:
             result = {
                 "project_id": project_id,
                 "task_id": scope.get("task_id"),
+                "requested_alias": alias,
+                "upstream_model": upstream_model or None,
                 "output": output,
                 "usage_status": "unknown",
                 "input_tokens": None,
                 "output_tokens": None,
                 "actual_cost_micro_usd": None,
+                "cost_status": "unknown",
             }
         else:
             result = {
                 "project_id": project_id,
                 "task_id": scope.get("task_id"),
+                "requested_alias": alias,
+                "upstream_model": upstream_model or None,
                 "output": output,
                 "usage_status": "known",
                 "input_tokens": usage.prompt_tokens,
                 "output_tokens": usage.completion_tokens,
-                "actual_cost_micro_usd": None,
+                "actual_cost_micro_usd": cost,
+                "cost_status": "known" if cost is not None else "unknown",
             }
         self.audit.append(f"model project={project_id} alias={alias} outcome={result['usage_status']}")
         encoded = json.dumps(result)
