@@ -63,6 +63,7 @@ P1 覆盖：
 - F25 done。同一对 CI。恢复在同一事务里写回 `tables.json`，并把 `PENDING`/`DELIVERING` 改成 `STOPPED`。产物先复制到临时目录再改名。漏洞库仍是 offline not_run。
 - F26 仍是 blocked，不是 done。`live_ready` 是 false。监督者在 head `5ab4fef` 上用 DeepSeek（`https://api.deepseek.com/v1`，`deepseek-chat`，Python 3.13.5）跑了 `python3 scripts/run_f26_live.py --out reports/f26_live_result.json`，退出码 0。结果在 `reports/f26_live_result.json`。key 不在文件里。
 - 这次探针通过了 `protocol.tools`、`protocol.schema`、`protocol.usage`、`research.citation`、`coding.independent_test`。两次调用，719 token，费用 `unknown`。`coding.recovery` 是 not_run，因为第一次编码就过了，没有再花恢复调用。
-- 规格要求研究的完整 hybrid 加引用，以及编码的独立测试和恢复，还要求 Linux 隔离证据。`hybrid_retrieval` 和 `linux_isolation` 是 not_run。`docs/11_delivery.md` 写明 not_run 不是通过。所以 F26 不能标 done，`live_ready` 不能改成 true。
+- 规格要求研究的完整 hybrid 加引用，以及编码的独立测试和恢复，还要求 Linux 隔离证据。已记录的结果里 `hybrid_retrieval`、`linux_isolation`、`coding.recovery` 是 not_run。`docs/11_delivery.md` 写明 not_run 不是通过。所以 F26 不能标 done，`live_ready` 不能改成 true。
+- 下一次监督者运行仍用同一条命令，但要用仓库虚拟环境，才会做 BM25、已测量向量的混合检索，并强制走编码修复。Linux 上有 Docker 且有 `python:3.12-alpine` 时才做隔离检查；否则该项 not_run。命令：`uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json`。环境变量仍是 `AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`、`AETHER_LIVE_MODEL_ALIAS=deepseek-chat`、`AETHER_LIVE_MODEL_KEY`。最多 8 次调用、累计 4000 token。不需要锁文件以外的 pip 包。
 - `packages/storage/aether_storage/db.py` 的 `NullPool` 写在 `docs/06_security.md`：不用连接池是为了避免 RLS 会话串项目，代价是每次事务重新连接。
 - 仍是 not_run：F26 hybrid 检索、F26 Linux 隔离、F26 编码恢复、Hermes 四组对照、CodeGraph 产品启用。漏洞库仍是 offline not_run。

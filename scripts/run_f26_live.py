@@ -29,7 +29,7 @@ def main(argv: list[str] | None = None) -> int:
     RESULT_PATH.parent.mkdir(parents=True, exist_ok=True)
     RESULT_PATH.write_text(text, encoding="utf-8")
     sys.stdout.write(text)
-    return {"probed": 0, "failed": 1, "blocked": 2}[report["status"]]
+    return {"probed": 0, "failed": 1, "blocked": 2, "incomplete": 3}[report["status"]]
 
 
 if __name__ == "__main__":

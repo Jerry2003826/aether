@@ -5,7 +5,17 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from aether_worker.live_harness import LIVE_ALIAS, LIVE_BASE, LIVE_KEY, MAX_OUTPUT_TOKENS, run_live_probe
+from aether_worker.live_harness import (
+    GOLD_ID,
+    LIVE_ALIAS,
+    LIVE_BASE,
+    LIVE_KEY,
+    MAX_OUTPUT_TOKENS,
+    _hybrid_context,
+    _isolation_command,
+    _linux_isolation,
+    run_live_probe,
+)
 
 
 def test_missing_live_key_is_blocked_and_not_a_pass(monkeypatch) -> None:
@@ -68,14 +78,30 @@ def _completion(name: str, arguments: dict[str, object], *, prompt: int = 11, co
     return json.dumps(body).encode()
 
 
+def _no_docker(_secret: str) -> dict[str, str | None]:
+    return {"status": "not_run", "reason": "docker_missing"}
+
+
+def _pass_docker(_secret: str) -> dict[str, str | None]:
+    return {"status": "pass", "reason": None}
+
+
 def _ok(handler: BaseHTTPRequestHandler, body: bytes) -> None:
     request = json.loads(body)
     assert request["max_tokens"] == MAX_OUTPUT_TOKENS
+    content = request["messages"][0]["content"]
     tool = request["tools"][0]["function"]["name"]
     if tool == "cite_finding":
-        payload = _completion("cite_finding", {"claim": "标准大气压下水的沸点是100摄氏度", "citation_id": "SRC-1"})
+        assert "chunk-apple" in content
+        payload = _completion(
+            "cite_finding",
+            {"claim": "苹果派的烘烤温度是一百八十度", "citation_id": "chunk-apple", "start_offset": 0, "end_offset": 14},
+        )
+    elif "return a - b" in content:
+        payload = _completion("submit_function", {"source": "def add(a, b):\n    return a - b\n"})
     else:
-        payload = _completion("submit_function", {"source": "def add(a, b):\n    return a + b\n"}, prompt=9, completion=6)
+        assert "独立测试没有通过" in content
+        payload = _completion("submit_function", {"source": "def add(a, b):\n    return a + b\n"})
     handler.send_response(200)
     handler.send_header("Content-Type", "application/json")
     handler.send_header("Content-Length", str(len(payload)))
@@ -83,24 +109,42 @@ def _ok(handler: BaseHTTPRequestHandler, body: bytes) -> None:
     handler.wfile.write(payload)
 
 
+def test_hybrid_context_uses_bm25_and_measured_vectors() -> None:
+    found = _hybrid_context()
+    assert found["status"] == "pass"
+    assert found["gold_id"] == GOLD_ID
+    assert found["rrf"][0] == GOLD_ID
+    assert GOLD_ID in found["bm25"]
+    assert GOLD_ID in found["dense"]
+
+
+def test_missing_docker_is_not_run(monkeypatch) -> None:
+    monkeypatch.setattr("aether_worker.live_harness.shutil.which", lambda _name: None)
+    found = _linux_isolation("sk-live-SUPERSECRET")
+    assert found["status"] == "not_run"
+    assert found["reason"] == "docker_missing"
+    assert "sk-live-SUPERSECRET" not in json.dumps(found)
+    assert all("sk-live-SUPERSECRET" not in part for part in _isolation_command())
+
+
 def test_fake_server_success_records_checks_without_the_key(monkeypatch) -> None:
     server, thread = _serve(_ok)
     try:
         _env(monkeypatch, server)
-        report = run_live_probe(timeout=2)
+        report = run_live_probe(timeout=2, isolate=_pass_docker)
     finally:
         _stop(server, thread)
     encoded = json.dumps(report)
     assert "sk-live-SUPERSECRET" not in encoded
     assert report["status"] == "probed"
     assert report["live_ready"] is False
-    assert report["calls"] == 2
+    assert report["calls"] == 3
     assert report["research"] == "pass"
     assert report["coding"] == "pass"
-    assert report["hybrid_retrieval"] == "not_run"
-    assert report["linux_isolation"] == "not_run"
-    assert report["usage"]["prompt_tokens"] == 20
-    assert report["usage"]["completion_tokens"] == 13
+    assert report["hybrid_retrieval"] == "pass"
+    assert report["linux_isolation"] == "pass"
+    assert report["usage"]["prompt_tokens"] == 33
+    assert report["usage"]["completion_tokens"] == 21
     assert report["usage"]["cost_status"] == "unknown"
     by_id = {row["id"]: row for row in report["checks"]}
     assert by_id["protocol.tools"]["status"] == "pass"
@@ -108,9 +152,10 @@ def test_fake_server_success_records_checks_without_the_key(monkeypatch) -> None
     assert by_id["protocol.usage"]["status"] == "pass"
     assert by_id["research.citation"]["status"] == "pass"
     assert by_id["coding.independent_test"]["status"] == "pass"
-    assert by_id["coding.recovery"]["status"] == "not_run"
+    assert by_id["coding.recovery"]["status"] == "pass"
+    assert by_id["hybrid_retrieval"]["status"] == "pass"
     assert by_id["protocol.tools"]["latency_ms"] is not None
-    assert len(server.calls) == 2
+    assert len(server.calls) == 3
 
 
 def test_fake_server_auth_failure_is_not_a_pass(monkeypatch) -> None:
@@ -124,12 +169,13 @@ def test_fake_server_auth_failure_is_not_a_pass(monkeypatch) -> None:
     server, thread = _serve(respond)
     try:
         _env(monkeypatch, server)
-        report = run_live_probe(timeout=2)
+        report = run_live_probe(timeout=2, isolate=_no_docker)
     finally:
         _stop(server, thread)
     assert report["status"] == "failed"
     assert report["live_ready"] is False
     assert report["research"] == "not_run"
+    assert report["linux_isolation"] == "not_run"
     assert report["calls"] == 1
     assert "http_401" in report["error"]
     assert "sk-live-SUPERSECRET" not in json.dumps(report)
@@ -144,7 +190,7 @@ def test_fake_server_timeout_fails_closed(monkeypatch) -> None:
     server, thread = _serve(respond)
     try:
         _env(monkeypatch, server)
-        report = run_live_probe(timeout=0.2)
+        report = run_live_probe(timeout=0.2, isolate=_no_docker)
     finally:
         _stop(server, thread)
     assert report["status"] == "failed"
@@ -166,7 +212,7 @@ def test_error_text_redacts_the_key(monkeypatch) -> None:
     server, thread = _serve(respond)
     try:
         _env(monkeypatch, server, key)
-        report = run_live_probe(timeout=2)
+        report = run_live_probe(timeout=2, isolate=_no_docker)
     finally:
         _stop(server, thread)
     encoded = json.dumps(report)
@@ -175,7 +221,7 @@ def test_error_text_redacts_the_key(monkeypatch) -> None:
     assert report["status"] == "failed"
 
 
-def test_script_writes_blocked_result_without_calling_out(monkeypatch) -> None:
+def test_script_writes_blocked_result_without_calling_out(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.delenv(LIVE_KEY, raising=False)
     monkeypatch.delenv(LIVE_BASE, raising=False)
     monkeypatch.delenv(LIVE_ALIAS, raising=False)
@@ -184,12 +230,10 @@ def test_script_writes_blocked_result_without_calling_out(monkeypatch) -> None:
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    destination = Path("reports/f26_live_result.json")
-    try:
-        code = module.main(["--out", "reports/f26_live_result.json"])
-        written = json.loads(destination.read_text(encoding="utf-8"))
-    finally:
-        destination.unlink(missing_ok=True)
+    destination = tmp_path / "f26_live_result.json"
+    module.RESULT_PATH = destination
+    code = module.main(["--out", "reports/f26_live_result.json"])
+    written = json.loads(destination.read_text(encoding="utf-8"))
     assert code == 2
     assert written["status"] == "blocked"
     assert written["live_ready"] is False

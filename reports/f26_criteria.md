@@ -23,9 +23,22 @@ python scripts/run_f26_live.py --out reports/f26_live_result.json
 uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json
 ```
 
-探针最多 3 次 `POST /chat/completions`，每次 `max_tokens` 128，累计 token 达到 2000 就停。费用字段只有供应商返回时才写入；没有就记 `cost_status=unknown`，不估一个价钱。结果里的密钥会换成 `[REDACTED]`。
+监督者机器上的命令用上面这一条，这样 BM25 依赖在锁文件里。裸 `python3` 只有在该解释器已经能导入 `bm25s` 时才能做混合检索。
 
-这次探针做的是协议、引用和研究用的工具调用，以及一个独立的 `add` 函数形状检查。混合检索和 Linux 隔离仍是 `not_run`。编码第一次不合格时才会再花一次调用做恢复，并且不能把失败源码的哈希当成通过。
+探针最多 8 次 `POST /chat/completions`，每次 `max_tokens` 128，累计 token 达到 4000 就停。费用字段只有供应商返回时才写入；没有就记 `cost_status=unknown`，不估一个价钱。结果里的密钥会换成 `[REDACTED]`。
+
+同一次运行还做三件剩下的事：
+
+- 混合检索：对固定的三条例目做 BM25，并用 `config/retrieval/fixture.json` 里已测量的 BGE-M3 向量做稠密排序，再 RRF。模型只能根据检索结果引用 `chunk-apple` 和对应 offset。编码器失败时这项是 not_run，不编造向量。
+- 编码恢复：第一次要求 `return a - b`，独立测试按 `add(1, 2) == 3` 判失败，然后必须再提交一份不同哈希的 `return a + b`。
+- Linux 隔离：仅当当前是 Linux 且 `docker info` 成功时，用 `python:3.12-alpine` 跑 `--network none --read-only --cap-drop ALL`，确认容器里没有 key、公网连不上。没有 Docker 或镜像拉不下来就记 not_run 和原因，不假装通过。
+
+`status=probed` 才表示这些检查都通过。有 not_run 时退出码是 3（`incomplete`），`live_ready` 仍是 false。F26 继续 blocked，直到新的结果文件交回来。
+
+系统前提：
+
+- Python 3.11 及以上。混合检索需要本仓库锁文件里的依赖，用下面的 `uv run`。不要另装一份 pip 包。
+- Docker 只为隔离检查。镜像是 `python:3.12-alpine`。守护进程没起、或不在 Linux 上，这项保持 not_run。
 
 | 验收 | 测试 |
 |---|---|
@@ -35,3 +48,5 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 | 超时失败，不继续花调用 | `tests/unit/test_live_harness.py::test_fake_server_timeout_fails_closed` |
 | 错误文本里的 key 被换成 `[REDACTED]` | `tests/unit/test_live_harness.py::test_error_text_redacts_the_key` |
 | 入口在缺变量时把 blocked 写进指定文件 | `tests/unit/test_live_harness.py::test_script_writes_blocked_result_without_calling_out` |
+| 混合检索同时用 BM25 和已测量向量，目标条目排在 RRF 第一 | `tests/unit/test_live_harness.py::test_hybrid_context_uses_bm25_and_measured_vectors` |
+| 没有 docker 可执行文件时隔离检查是 not_run，命令行不含 key | `tests/unit/test_live_harness.py::test_missing_docker_is_not_run` |

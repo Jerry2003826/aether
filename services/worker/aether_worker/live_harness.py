@@ -1,7 +1,8 @@
 """Live model probe. Missing configuration is blocked, never a scripted pass.
 
-The probe makes at most three short chat-completions calls. It does not run
-hybrid retrieval or a Linux runner; those stay not_run.
+At most eight short chat-completions calls. Hybrid retrieval uses the measured
+BGE-M3 vectors and a fresh BM25 index. Linux isolation runs only when Docker
+answers; otherwise that check stays not_run.
 """
 
 from __future__ import annotations
@@ -9,24 +10,50 @@ from __future__ import annotations
 import ast
 import hashlib
 import json
+import math
 import os
+import shutil
+import subprocess
+import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
+
+from aether_worker.retrieval import RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
 LIVE_BASE = "AETHER_LIVE_MODEL_BASE"
 LIVE_ALIAS = "AETHER_LIVE_MODEL_ALIAS"
 NOT_RUN = "not_run"
-MAX_CALLS = 3
+MAX_CALLS = 8
 MAX_OUTPUT_TOKENS = 128
-MAX_TOTAL_TOKENS = 2000
+MAX_TOTAL_TOKENS = 4000
 RESEARCH_TOOL = "cite_finding"
 CODING_TOOL = "submit_function"
-SOURCE_ID = "SRC-1"
-PASSAGE = "来源 SRC-1：标准大气压下水的沸点是100摄氏度。"
+QUERY = "苹果派"
+GOLD_ID = "chunk-apple"
+CLAIM_MARK = "一百八十"
+CORPUS = (
+    {"id": "chunk-apple", "text": "苹果派的烘烤温度是一百八十度"},
+    {"id": "chunk-rail", "text": "The railway timetable lists the midnight express to York"},
+    {"id": "chunk-code", "text": "assert left != right && flag == true"},
+)
+ISOLATION_IMAGE = "python:3.12-alpine"
+ISOLATION_SCRIPT = (
+    "import os,socket\n"
+    "print('key', 'AETHER_LIVE_MODEL_KEY' in os.environ)\n"
+    "sock=socket.socket()\n"
+    "sock.settimeout(2)\n"
+    "try:\n"
+    " sock.connect(('1.1.1.1', 443))\n"
+    " print('net open')\n"
+    "except OSError as exc:\n"
+    " print('net', exc.errno)\n"
+)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -66,8 +93,12 @@ def _blocked(missing: list[str]) -> dict[str, Any]:
         "scripted_substitute": False,
         "checks": [],
         "calls": 0,
-        "caps": {"max_calls": MAX_CALLS, "max_output_tokens": MAX_OUTPUT_TOKENS, "max_total_tokens": MAX_TOTAL_TOKENS},
+        "caps": _caps(),
     }
+
+
+def _caps() -> dict[str, int]:
+    return {"max_calls": MAX_CALLS, "max_output_tokens": MAX_OUTPUT_TOKENS, "max_total_tokens": MAX_TOTAL_TOKENS}
 
 
 def _usage(payload: dict[str, Any]) -> dict[str, Any]:
@@ -122,7 +153,91 @@ def _tool_spec(name: str, properties: dict[str, Any], required: list[str]) -> di
     }
 
 
-def _research_body(model: str) -> dict[str, Any]:
+def _cosine(left: list[float], right: list[float]) -> float:
+    dot = sum(a * b for a, b in zip(left, right, strict=True))
+    left_norm = math.sqrt(sum(value * value for value in left))
+    right_norm = math.sqrt(sum(value * value for value in right))
+    if left_norm == 0 or right_norm == 0:
+        return 0.0
+    return dot / (left_norm * right_norm)
+
+
+def _passages() -> list[dict[str, Any]]:
+    return [
+        {"id": item["id"], "text": item["text"], "start_offset": 0, "end_offset": len(item["text"])}
+        for item in CORPUS
+    ]
+
+
+def _hybrid_context() -> dict[str, Any]:
+    """BM25 plus measured dense vectors. A missing encoder stays not_run."""
+    passages = _passages()
+    try:
+        vectors = {item["id"]: encode_texts([item["text"]])[0] for item in passages}
+        query_vector = encode_texts([QUERY])[0]
+    except RetrievalError as exc:
+        return {"status": NOT_RUN, "reason": str(exc), "passages": [], "gold_id": GOLD_ID}
+    dense_ids = [
+        item["id"]
+        for item in sorted(passages, key=lambda item: (-_cosine(query_vector, vectors[item["id"]]), item["id"]))
+    ]
+    with tempfile.TemporaryDirectory() as temporary:
+        index = Path(temporary) / "bm25"
+        _index_bm25([item["text"] for item in passages], index)
+        bm25_ids = _lexical_ids(index, [item["id"] for item in passages], QUERY)
+    fused = rrf([bm25_ids, dense_ids])
+    ok = bool(bm25_ids) and bool(dense_ids) and GOLD_ID in bm25_ids and GOLD_ID in dense_ids and bool(fused) and fused[0] == GOLD_ID
+    return {
+        "status": "pass" if ok else "fail",
+        "reason": None if ok else "gold_not_first",
+        "gold_id": GOLD_ID,
+        "passages": passages,
+        "bm25": bm25_ids,
+        "dense": dense_ids,
+        "rrf": fused,
+    }
+
+
+def _context_lines(passages: list[dict[str, Any]]) -> str:
+    lines = []
+    for item in passages:
+        lines.append(f"{item['id']} offset {item['start_offset']}-{item['end_offset']}: {item['text']}")
+    return "\n".join(lines)
+
+
+def _research_body(model: str, passages: list[dict[str, Any]]) -> dict[str, Any]:
+    listed = _context_lines(passages)
+    return {
+        "model": model,
+        "max_tokens": MAX_OUTPUT_TOKENS,
+        "temperature": 0,
+        "tool_choice": {"type": "function", "function": {"name": RESEARCH_TOOL}},
+        "tools": [
+            _tool_spec(
+                RESEARCH_TOOL,
+                {
+                    "claim": {"type": "string"},
+                    "citation_id": {"type": "string"},
+                    "start_offset": {"type": "integer"},
+                    "end_offset": {"type": "integer"},
+                },
+                ["claim", "citation_id", "start_offset", "end_offset"],
+            )
+        ],
+        "messages": [
+            {
+                "role": "user",
+                "content": (
+                    "只根据下列混合检索结果调用 cite_finding。不要使用结果以外的知识。"
+                    "citation_id、start_offset、end_offset 必须与选中条目一致。claim 只写该条目里的事实。\n"
+                    + listed
+                ),
+            }
+        ],
+    }
+
+
+def _protocol_body(model: str) -> dict[str, Any]:
     return {
         "model": model,
         "max_tokens": MAX_OUTPUT_TOKENS,
@@ -135,35 +250,71 @@ def _research_body(model: str) -> dict[str, Any]:
                 ["claim", "citation_id"],
             )
         ],
-        "messages": [
-            {
-                "role": "user",
-                "content": f"{PASSAGE} 只根据来源调用 {RESEARCH_TOOL}。citation_id 填来源编号，claim 只写来源里的事实。",
-            }
-        ],
+        "messages": [{"role": "user", "content": f"调用 {RESEARCH_TOOL}。claim 写 pong，citation_id 写 none。"}],
     }
 
 
-def _coding_body(model: str, *, failure: str | None) -> dict[str, Any]:
-    repair = f" 上次失败：{failure}。不要复用上次的源码。" if failure else ""
+def _coding_body(model: str, *, repair: str | None) -> dict[str, Any]:
+    if repair is None:
+        instruction = f"只调用 {CODING_TOOL}。source 是 def add(a, b):，函数体只有 return a - b。不要 import。"
+    else:
+        instruction = (
+            f"只调用 {CODING_TOOL}。独立测试没有通过：{repair}。"
+            "请提交新的 source，函数仍是 def add(a, b):，函数体只有 return a + b。不要复用上次源码，不要 import。"
+        )
     return {
         "model": model,
         "max_tokens": MAX_OUTPUT_TOKENS,
         "temperature": 0,
         "tool_choice": {"type": "function", "function": {"name": CODING_TOOL}},
-        "tools": [
-            _tool_spec(CODING_TOOL, {"source": {"type": "string"}}, ["source"]),
-        ],
-        "messages": [
-            {
-                "role": "user",
-                "content": (
-                    f"只调用 {CODING_TOOL}。source 是 Python 函数 def add(a, b):，函数体只有 return a + b。不要 import。"
-                    + repair
-                ),
-            }
-        ],
+        "tools": [_tool_spec(CODING_TOOL, {"source": {"type": "string"}}, ["source"])],
+        "messages": [{"role": "user", "content": instruction}],
     }
+
+
+def _isolation_command() -> list[str]:
+    return [
+        "docker",
+        "run",
+        "--rm",
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--pids-limit",
+        "32",
+        ISOLATION_IMAGE,
+        "python",
+        "-c",
+        ISOLATION_SCRIPT,
+    ]
+
+
+def _linux_isolation(secret: str) -> dict[str, Any]:
+    if sys.platform != "linux":
+        return {"status": NOT_RUN, "reason": "not_linux"}
+    if shutil.which("docker") is None:
+        return {"status": NOT_RUN, "reason": "docker_missing"}
+    info = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
+    if info.returncode != 0:
+        return {"status": NOT_RUN, "reason": "docker_unavailable"}
+    command = _isolation_command()
+    if secret and any(secret in part for part in command):
+        return {"status": "fail", "reason": "secret_in_command"}
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"status": NOT_RUN, "reason": redact_secret(type(exc).__name__, secret)}
+    output = redact_secret((completed.stdout or "") + (completed.stderr or ""), secret)
+    if completed.returncode != 0:
+        reason = "image_unavailable" if "Unable to find image" in output or "pull access denied" in output else "container_failed"
+        return {"status": NOT_RUN if reason == "image_unavailable" else "fail", "reason": reason}
+    secret_absent = "key False" in completed.stdout
+    network_blocked = "net open" not in completed.stdout and "net " in completed.stdout
+    if secret_absent and network_blocked:
+        return {"status": "pass", "reason": None, "secret_present": False, "network": "blocked"}
+    return {"status": "fail", "reason": "isolation_incomplete"}
 
 
 def _post(url: str, body: dict[str, Any], key: str, timeout: float) -> tuple[int, dict[str, Any], int]:
@@ -268,7 +419,38 @@ def _sum_usage(checks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def run_live_probe(*, timeout: float = 30.0) -> dict[str, Any]:
+def _source_of(name: str | None, arguments: dict[str, Any] | None) -> str | None:
+    if name != CODING_TOOL or arguments is None:
+        return None
+    source = arguments.get("source")
+    return source if isinstance(source, str) else None
+
+
+def _overall(checks: list[dict[str, Any]], error: str | None) -> str:
+    required = (
+        "protocol.tools",
+        "protocol.schema",
+        "protocol.usage",
+        "research.citation",
+        "coding.independent_test",
+        "coding.recovery",
+        "hybrid_retrieval",
+        "linux_isolation",
+    )
+    by_id = {row["id"]: row["status"] for row in checks}
+    if error is not None or any(by_id.get(item) == "fail" for item in required):
+        return "failed"
+    if any(by_id.get(item) != "pass" for item in required):
+        return "incomplete"
+    return "probed"
+
+
+def run_live_probe(
+    *,
+    timeout: float = 30.0,
+    retrieve: Any = None,
+    isolate: Any = None,
+) -> dict[str, Any]:
     missing = [name for name in required_environment() if not os.environ.get(name)]
     if missing:
         return _blocked(missing)
@@ -281,7 +463,12 @@ def run_live_probe(*, timeout: float = 30.0) -> dict[str, Any]:
         report["status"] = "failed"
         report["error"] = redact_secret(str(exc), key)
         return _redact_tree(report, key)
-    checks: list[dict[str, Any]] = []
+    hybrid = (retrieve or _hybrid_context)()
+    isolation = (isolate or _linux_isolation)(key)
+    checks: list[dict[str, Any]] = [
+        _check("hybrid_retrieval", hybrid["status"], None, None, hybrid.get("reason")),
+        _check("linux_isolation", isolation["status"], None, None, isolation.get("reason")),
+    ]
     call_usage: list[dict[str, Any]] = []
     calls = 0
     spent_tokens = 0
@@ -303,75 +490,88 @@ def run_live_probe(*, timeout: float = 30.0) -> dict[str, Any]:
         if not allow():
             raise RuntimeError("call_cap")
         calls += 1
-        status, payload, latency = _post(url, _research_body(alias), key, timeout)
+        if hybrid["status"] == "pass":
+            body = _research_body(alias, hybrid["passages"])
+        else:
+            body = _protocol_body(alias)
+        status, payload, latency = _post(url, body, key, timeout)
         usage = _usage(payload)
         spend(usage)
         name, arguments = _tool_call(payload)
         tools_ok = status == 200 and name == RESEARCH_TOOL and arguments is not None
-        schema_ok = tools_ok and isinstance(arguments.get("claim"), str) and isinstance(arguments.get("citation_id"), str)
+        if hybrid["status"] == "pass":
+            gold = next(item for item in hybrid["passages"] if item["id"] == hybrid["gold_id"])
+            schema_ok = (
+                tools_ok
+                and isinstance(arguments.get("claim"), str)
+                and isinstance(arguments.get("citation_id"), str)
+                and isinstance(arguments.get("start_offset"), int)
+                and isinstance(arguments.get("end_offset"), int)
+            )
+            citation_ok = (
+                schema_ok
+                and arguments["citation_id"] == hybrid["gold_id"]
+                and arguments["start_offset"] == gold["start_offset"]
+                and arguments["end_offset"] == gold["end_offset"]
+                and CLAIM_MARK in arguments["claim"]
+            )
+            research_status = "pass" if citation_ok else "fail"
+            citation_reason = None if citation_ok else "citation_mismatch"
+        else:
+            schema_ok = tools_ok and isinstance(arguments.get("claim"), str) and isinstance(arguments.get("citation_id"), str)
+            citation_ok = False
+            research_status = NOT_RUN
+            citation_reason = "hybrid_not_run"
         usage_ok = usage["prompt_tokens"] is not None and usage["completion_tokens"] is not None
-        citation_ok = schema_ok and arguments["citation_id"] == SOURCE_ID and "100" in arguments["claim"]
         checks.append(_check("protocol.tools", "pass" if tools_ok else "fail", latency, usage, None if tools_ok else "tool_call_missing"))
         checks.append(_check("protocol.schema", "pass" if schema_ok else "fail", latency, usage, None if schema_ok else "schema_mismatch"))
         checks.append(_check("protocol.usage", "pass" if usage_ok else "fail", latency, usage, None if usage_ok else "usage_missing"))
-        checks.append(_check("research.citation", "pass" if citation_ok else "fail", latency, usage, None if citation_ok else "citation_mismatch"))
-        research_status = "pass" if citation_ok else "fail"
+        checks.append(_check("research.citation", "pass" if citation_ok else research_status, latency, usage, citation_reason))
         if allow():
             calls += 1
-            status, payload, latency = _post(url, _coding_body(alias, failure=None), key, timeout)
+            _status, payload, latency = _post(url, _coding_body(alias, repair=None), key, timeout)
             usage = _usage(payload)
             spend(usage)
             name, arguments = _tool_call(payload)
-            source = arguments.get("source") if name == CODING_TOOL and arguments else None
-            ok, reason = _add_source_ok(source) if isinstance(source, str) else (False, "tool_call_missing")
+            source = _source_of(name, arguments)
+            _first_ok, first_reason = _add_source_ok(source) if isinstance(source, str) else (False, "tool_call_missing")
             rejected = hashlib.sha256(source.encode()).hexdigest() if isinstance(source, str) else None
-            if not ok and allow():
+            repair_reason = first_reason if first_reason != "ok" else "probe_requires_repair"
+            if not allow():
+                checks.append(_check("coding.independent_test", NOT_RUN, None, None, "cap"))
+                checks.append(_check("coding.recovery", NOT_RUN, None, None, "cap"))
+            else:
                 calls += 1
-                status, payload, latency = _post(url, _coding_body(alias, failure=reason), key, timeout)
+                _status, payload, latency = _post(url, _coding_body(alias, repair=repair_reason), key, timeout)
                 usage = _usage(payload)
                 spend(usage)
                 name, arguments = _tool_call(payload)
-                source = arguments.get("source") if name == CODING_TOOL and arguments else None
-                repaired, repair_reason = _add_source_ok(source) if isinstance(source, str) else (False, "tool_call_missing")
-                accepted = hashlib.sha256(source.encode()).hexdigest() if isinstance(source, str) else None
+                repaired_source = _source_of(name, arguments)
+                repaired, repair_grade = _add_source_ok(repaired_source) if isinstance(repaired_source, str) else (False, "tool_call_missing")
+                accepted = hashlib.sha256(repaired_source.encode()).hexdigest() if isinstance(repaired_source, str) else None
                 recovery_ok = repaired and accepted is not None and accepted != rejected
-                checks.append(_check("coding.independent_test", "pass" if recovery_ok else "fail", latency, usage, None if recovery_ok else repair_reason))
-                checks.append(
-                    _check(
-                        "coding.recovery",
-                        "pass" if recovery_ok else "fail",
-                        latency,
-                        usage,
-                        None if recovery_ok else "reused_or_failed",
-                    )
-                )
+                checks.append(_check("coding.independent_test", "pass" if repaired else "fail", latency, usage, None if repaired else repair_grade))
+                checks.append(_check("coding.recovery", "pass" if recovery_ok else "fail", latency, usage, None if recovery_ok else "reused_or_failed"))
                 coding_status = "pass" if recovery_ok else "fail"
-            else:
-                checks.append(_check("coding.independent_test", "pass" if ok else "fail", latency, usage, None if ok else reason))
-                checks.append(_check("coding.recovery", NOT_RUN, None, None, "first_attempt_passed" if ok else "cap"))
-                coding_status = "pass" if ok else "fail"
         else:
             checks.append(_check("coding.independent_test", NOT_RUN, None, None, "cap"))
-            coding_status = NOT_RUN
+            checks.append(_check("coding.recovery", NOT_RUN, None, None, "cap"))
     except RuntimeError as exc:
         error = redact_secret(str(exc), key)
-        if research_status == NOT_RUN:
+        if not any(row["id"] == "protocol.tools" for row in checks):
             checks.append(_check("protocol.tools", "fail", None, None, error))
-    required = ("protocol.tools", "protocol.schema", "protocol.usage", "research.citation", "coding.independent_test")
-    by_id = {row["id"]: row["status"] for row in checks}
-    probed = all(by_id.get(item) == "pass" for item in required) and error is None
     report = {
-        "status": "probed" if probed else "failed",
+        "status": _overall(checks, error),
         "live_ready": False,
         "missing": [],
         "model_alias": alias,
         "research": research_status,
         "coding": coding_status,
-        "hybrid_retrieval": NOT_RUN,
-        "linux_isolation": NOT_RUN,
+        "hybrid_retrieval": hybrid["status"],
+        "linux_isolation": isolation["status"],
         "scripted_substitute": False,
         "calls": calls,
-        "caps": {"max_calls": MAX_CALLS, "max_output_tokens": MAX_OUTPUT_TOKENS, "max_total_tokens": MAX_TOTAL_TOKENS},
+        "caps": _caps(),
         "usage": _sum_usage(call_usage),
         "checks": checks,
         "error": error,
