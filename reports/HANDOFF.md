@@ -54,4 +54,5 @@ P1 覆盖：
 - CodeGraph 产品开关仍然关闭，`codegraph_enabled` 仍是 not_run。
 - F17 done。PR #1 CI run `38684944139`：unit `34 passed in 8.20s`，integration `113 passed, 1 warning in 70.30s`。SonarCloud quality gate OK。进程崩溃后调用返回 unknown，后续调用不再挂起。服务器起不来是 `connect_failed`。
 - F18 done。同一 CI run。未批准不建 Temporal schedule。水位不变不写通知。重复 trigger 只有一条站内通知。停止后不再派发。默认不发外部消息。
-- 下一步：F19 可解释推荐。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F19 in_progress。曝光和反馈有编号。重复 event_key 不计入第二次。探索默认关闭；打开时最优候选概率是 `(1-0.05)+0.05/N`。隐藏和删除会从下一轮候选消失。清空画像后仍可按内容特征重建。不称协同过滤。对照表 `reports/f19_criteria.md`。还没标 done。
+- live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

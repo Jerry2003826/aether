@@ -409,7 +409,10 @@ tickets:
   - 无变更不总结；重复trigger不重复通知
   - 停止watch阻止后续dispatch；默认不发送外部消息
   status: done
-  evidence: []
+  evidence:
+  - services/worker/aether_worker/watches.py
+  - tests/integration/test_watches.py
+  - reports/f18_criteria.md
 - id: F19
   stage: G5
   scope: core
@@ -425,7 +428,7 @@ tickets:
   - 曝光和反馈有ID，重复事件不重复计入
   - 默认探索off；开启时记录正确候选概率与policy版本
   - 隐藏/删除立即影响候选，清空画像后可重建；不冒称协同过滤
-  status: not_started
+  status: in_progress
   evidence: []
 - id: F20
   stage: G5
