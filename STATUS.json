@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F14",
+  "current_task": "F15",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,13 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F15 CodeGraph from the measured 1.6.2 CLI. Keep product enablement off until the owner turns it on.",
+  "next_action": "Wait for PR CI and SonarCloud on the F15 CodeGraph adapter. Keep product enablement off.",
   "last_executed_commands": [
-    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
+    "uv run --locked --no-build pytest -q tests/integration/test_codegraph.py",
+    "uv run --locked --no-build pytest -q tests/unit",
+    "uv run --locked --no-build python scripts/verify_freeze.py"
   ],
-  "last_test_result": "PR #1 CI run 38678232085: unit 32 passed; integration 100 passed, 2 warnings in 45.73s. SonarCloud quality gate OK.",
+  "last_test_result": "Local F15 probe: test_codegraph.py 2 passed in 9.62s; unit 32 passed. Last green PR CI is still F14 run 38678232085. This F15 push is not marked done.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -86,5 +88,10 @@
   "f14": {
     "status": "done",
     "ci_run": "38678232085"
+  },
+  "f15": {
+    "status": "in_progress",
+    "release": "1.6.2",
+    "product_enabled": false
   }
 }

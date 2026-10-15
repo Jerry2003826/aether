@@ -65,6 +65,9 @@ jobs:
           python-version: "3.13"
       - name: Resolve control-plane lock
         run: uv sync --locked --no-build
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
       - name: Install Playwright Chromium
         run: uv run --locked --no-build playwright install --with-deps chromium
       - name: Integration tests and doctor

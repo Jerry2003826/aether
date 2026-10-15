@@ -272,12 +272,12 @@
     {
       "repository": "colbymchenry/codegraph",
       "role": "selected_optional",
-      "version": null,
+      "version": "1.6.2",
       "commit_sha": null,
       "artifact_sha256": null,
       "license_files": [],
-      "platforms_tested": [],
-      "probe_log": null
+      "platforms_tested": ["linux/amd64"],
+      "probe_log": "config/codegraph.lock.json"
     },
     {
       "repository": "NousResearch/hermes-agent",

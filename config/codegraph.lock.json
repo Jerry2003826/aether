@@ -1,0 +1,15 @@
+{
+  "package": "@colbymchenry/codegraph",
+  "version": "1.6.2",
+  "integrity": "sha512-hODH/mGnCf3IUMs6rzktv/zbecJIKJfdZAYHZ9mqecb0G7ZkHaA8CZafDVnswANFEL1YFcG+lfAwc5SIXzUH6Q==",
+  "platform_package": "@colbymchenry/codegraph-linux-x64",
+  "platform_integrity": "sha512-DJWizz1qHNr1MsbK6fz1mjVUQjeTH3T+L0D2BGaLkygWzBnNMG30MvLq1ae0m6cUV414U8aEow5Eb/kIORA8+w==",
+  "product_enabled": false,
+  "max_files": 25000,
+  "max_context_chars": 24000,
+  "max_wall_seconds": 180,
+  "telemetry_env": {
+    "CODEGRAPH_TELEMETRY": "0",
+    "DO_NOT_TRACK": "1"
+  }
+}
