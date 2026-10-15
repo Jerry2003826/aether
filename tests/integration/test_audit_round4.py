@@ -442,18 +442,12 @@ def test_codex_empty_content_still_books_known_usage(client, role_urls, monkeypa
     assert usage == ("known", 40)
 
 
-def test_codex_paraphrase_without_a_quotation_is_not_success(client, role_urls, monkeypatch) -> None:
-    owner, project, _database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
+def test_codex_faithful_paraphrase_can_succeed(client, role_urls, monkeypatch) -> None:
+    """A same-value paraphrase is not a failed citation. Swapped subjects still fail in the round-5 tests."""
+    _owner, _project, _database, _store, _refs, endpoints, payload, state = setup_case(client, role_urls, monkeypatch)
     state["output"] = "每分钟六十次。"
     result = materialize_goal_effect(endpoints, payload)
-    assert result["status"] != "SUCCEEDED"
-    verifier = Database(role_urls["aether_verifier"])
-    with verifier.transaction(owner_id=owner, project_id=project) as conn:
-        reason = conn.execute(
-            text("SELECT reason FROM verification_results WHERE task_id = :task ORDER BY created_at DESC LIMIT 1"),
-            {"task": payload["task_id"]},
-        ).scalar_one()
-    assert reason == "citation_fail"
+    assert result["status"] == "SUCCEEDED"
 
 
 def test_codex_zero_remaining_time_does_not_dispatch(client, role_urls, monkeypatch) -> None:

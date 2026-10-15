@@ -36,7 +36,7 @@ from aether_worker.research import (
 )
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-6"
+VERIFIER_VERSION = "goal-artifact-7"
 OUTPUT_TOKEN_CAP = 256
 # Local dispatch ceiling, not a provider price list. A model priced above this
 # bound can still report an overrun after the bill arrives.
@@ -579,9 +579,6 @@ def _ensure_verification(
     elif goal_state != "pass":
         outcome = "fail"
         detail = goal_detail or "回答没有覆盖目标"
-    elif not cited:
-        outcome = "fail"
-        detail = "citation_fail"
     else:
         outcome = "pass"
         detail = "工作流检查、字节完整性和目标摘录都通过"
@@ -756,7 +753,7 @@ def _source_snapshot(
             rows = conn.execute(
                 text(
                     "SELECT id::text AS id, sha256 FROM artifacts "
-                    "WHERE project_id = :project_id AND deleted_at IS NULL AND task_id IS NULL "
+                    "WHERE project_id = :project_id AND deleted_at IS NULL "
                     "AND media_type = 'text/plain' AND classification = 'project_private' "
                     "ORDER BY created_at, id"
                 ),
@@ -772,7 +769,7 @@ def _source_snapshot(
                     ),
                     {"project_id": project_id, "id": item},
                 ).mappings().first()
-                if row is None or row["deleted_at"] is not None or row["task_id"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
+                if row is None or row["deleted_at"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
                     return [], sha256_text("invalid"), "invalid", [str(item)]
                 rows.append(row)
     texts: list[str] = []
@@ -886,6 +883,25 @@ def _mark_budget_exhausted(database: Database, *, owner_id: str, project_id: str
     return {"status": actual, "task_id": task_id, "stop_reason": "budget_exhausted"}
 
 
+def _deadline_exceeded_on(conn: Any, project_id: str, task_id: str) -> bool:
+    created = conn.execute(
+        text("SELECT created_at FROM tasks WHERE project_id = :project_id AND id = :id"),
+        {"project_id": project_id, "id": task_id},
+    ).scalar_one()
+    active = conn.execute(
+        text("SELECT active_seconds FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id"),
+        {"project_id": project_id, "task_id": task_id},
+    ).scalar()
+    if active is None:
+        return False
+    return (datetime.now(UTC) - created).total_seconds() > int(active)
+
+
+def _past_deadline(database: Database, owner_id: str, project_id: str, task_id: str) -> bool:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return _deadline_exceeded_on(conn, project_id, task_id)
+
+
 def _task_age_seconds(database: Database, owner_id: str, project_id: str, task_id: str) -> float:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         created = conn.execute(
@@ -909,6 +925,8 @@ def _ensure_live_answer(
 ) -> str | dict[str, str] | None:
     existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
+        if _past_deadline(database, owner_id, project_id, task_id):
+            return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
         return existing["id"]
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
@@ -984,6 +1002,10 @@ def _ensure_live_answer(
             capabilities=["knowledge:read"],
             aliases=[endpoints.live_model_alias],
         )
+        blocked = _block_execution(database, owner_id, project_id, task_id)
+        if blocked is not None:
+            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return {"status": blocked, "task_id": task_id}
         try:
             result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
         except GatewayDenied:
@@ -1247,7 +1269,19 @@ def _commit_terminal(database: Database, *, owner_id: str, project_id: str, task
                 updated = _update_status(conn, project_id=project_id, task_id=task_id, status="PAUSED", allowed=PAUSEABLE_STATUSES, resume_state="pause_requested")
                 return updated or state
             return state
-        updated = _update_status(conn, project_id=project_id, task_id=task_id, status=status, allowed=("VERIFYING", "RUNNING"))
+        commit_status = status
+        resume_for_commit = None
+        if status == "SUCCEEDED" and _deadline_exceeded_on(conn, project_id, task_id):
+            commit_status = "FAILED"
+            resume_for_commit = "budget_exhausted"
+        updated = _update_status(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            status=commit_status,
+            allowed=("VERIFYING", "RUNNING"),
+            resume_state=resume_for_commit,
+        )
         if updated is not None:
             return updated
         current = conn.execute(

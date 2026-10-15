@@ -176,6 +176,39 @@ class BudgetLedger:
             if updated != 1:
                 raise BudgetError("not_reserved")
 
+    def release_unsent(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
+        """Drop a reservation that never left this process."""
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if request is None:
+                return
+            detail = _detail(request["usage_detail"])
+            reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            detail["dispatch_state"] = "cancelled_before_dispatch"
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = 'cancelled_before_dispatch', actual_micro_usd = NULL, usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+            )
+            conn.execute(
+                text(
+                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :amount, tokens_held = tokens_held - :tokens, version = version + 1 WHERE id = :id"
+                ),
+                {"amount": int(request["reserved_micro_usd"]), "tokens": reserved_tokens, "id": account["id"]},
+            )
+
     def prepare_model_call(
         self,
         *,
@@ -232,6 +265,39 @@ class BudgetLedger:
                     return {"action": "conflict"}
                 if detail.get("dispatch_state") == "response_recorded":
                     return {"action": "reuse", "book_result": str(detail.get("book_result") or "replayed"), "response": detail}
+                if existing["usage_status"] == "cancelled_before_dispatch":
+                    fraction = float(account["verification_reserve_fraction"])
+                    ceiling = int(account["limit_micro_usd"] * (1 - fraction))
+                    token_ceiling = int(account["token_limit"] * (1 - fraction))
+                    if output_cap < 1 or amount < 1 or tokens < 1:
+                        return {"action": "denied"}
+                    if account["spent_micro_usd"] + account["held_micro_usd"] + amount > ceiling:
+                        return {"action": "denied"}
+                    if account["tokens_used"] + account["tokens_held"] + tokens > token_ceiling:
+                        return {"action": "denied"}
+                    detail.update(
+                        {
+                            "reserved_tokens": tokens,
+                            "dispatch_state": "dispatched",
+                            "prompt_sha256": prompt_sha256,
+                            "output_cap": output_cap,
+                            "source_snapshot_sha256": source_snapshot_sha256,
+                        }
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE model_requests SET usage_status = 'reserved', reserved_micro_usd = :amount, usage_detail = CAST(:detail AS jsonb) "
+                            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                        ),
+                        {"amount": amount, "detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+                    )
+                    conn.execute(
+                        text(
+                            "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, version = version + 1 WHERE id = :id"
+                        ),
+                        {"amount": amount, "tokens": tokens, "id": account["id"]},
+                    )
+                    return {"action": "send"}
                 if existing["usage_status"] == "reserved":
                     conn.execute(
                         text(
@@ -380,6 +446,14 @@ class BudgetLedger:
                     },
                 )
             elif tokens_fit:
+                conn.execute(
+                    text(
+                        "UPDATE budget_accounts SET tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, "
+                        "version = version + 1 WHERE id = :id"
+                    ),
+                    {"reserved_tokens": reserved_tokens, "tokens": reported_tokens, "id": account["id"]},
+                )
+            elif reported_tokens is not None:
                 conn.execute(
                     text(
                         "UPDATE budget_accounts SET tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, "
