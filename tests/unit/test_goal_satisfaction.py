@@ -1,6 +1,6 @@
 """Goal completion is stricter than a short citation overlap."""
 
-from aether_worker.research import estimate_tokens, fact_satisfied, goal_completion_state, required_facts
+from aether_worker.research import estimate_tokens, fact_satisfied, goal_completion_detail, goal_completion_state, required_facts
 
 
 def test_tokenizer_counts_a_long_prompt_without_a_provider_report() -> None:
@@ -26,6 +26,31 @@ def test_a_different_number_is_not_the_same_fact() -> None:
     goal = "根据资料回答接口每分钟的请求限额。"
     answer = f"引用：{fact}\n最终答案：接口每分钟允许六百次请求。"
     assert goal_completion_state(answer=answer, goal=goal, source_text=fact) != "pass"
+
+
+BOILING_GOAL = "请根据已上传资料回答沸点。回答时请引用资料原句。"
+BOILING_FACT = "事实：水在标准大气压下于一百摄氏度沸腾"
+BOILING_ANSWER = "根据资料1原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为一百摄氏度。"
+
+
+def test_citation_label_is_not_an_unsupported_number() -> None:
+    assert goal_completion_state(answer=BOILING_ANSWER, goal=BOILING_GOAL, source_text=BOILING_FACT) == "pass"
+    assert goal_completion_detail(answer=BOILING_ANSWER, goal=BOILING_GOAL, source_text=BOILING_FACT) == ""
+    for label in ("资料1", "来源2", "source 3", "[4]", "【5】"):
+        answer = f"根据{label}原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为一百摄氏度。"
+        assert goal_completion_state(answer=answer, goal=BOILING_GOAL, source_text=BOILING_FACT) == "pass", label
+
+
+def test_invented_boiling_point_is_still_rejected() -> None:
+    for answer in (
+        "根据资料1原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为九十摄氏度。",
+        "沸点为90度。",
+        "根据资料，沸点为一百二十摄氏度。",
+    ):
+        detail = goal_completion_detail(answer=answer, goal=BOILING_GOAL, source_text=BOILING_FACT)
+        assert goal_completion_state(answer=answer, goal=BOILING_GOAL, source_text=BOILING_FACT) != "pass"
+        assert detail.startswith("unsupported_number:")
+        assert "一百" not in detail or "九十" in detail or "90" in detail or "一百二十" in detail
 
 
 def test_two_overlapping_lines_are_both_required() -> None:

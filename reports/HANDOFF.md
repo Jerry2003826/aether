@@ -2,6 +2,8 @@
 
 第四轮审计修复在 `cursor/audit-round4-repairs-7618`，基线 `07cc2ae`。本机没有 key。`live_ready` 没有因为这次改动而变化。细节在 `reports/audits/gpt_round4/REPAIR_RESULT.md`。
 
+`c32e4d3` 上的真实研究任务被误判失败：回答里的「资料1」被当成资料中没有的数字。引用标签不再参与这个检查。回答若把沸点写成九十度或别的数字，仍然失败，原因会写成 `unsupported_number:'…'`。请再跑一次 live task check。F26 在那次已经通过。
+
 研究调用行为变了：短引用不再单独判成功，显式来源损坏会停，预算按将发出的文本估算。监督者若要重跑，用原来的命令：
 
 ```sh

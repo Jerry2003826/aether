@@ -24,7 +24,16 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
-from aether_worker.research import cites_fact, estimate_tokens, goal_completion_state, record_verification, required_facts, research_prompt, scripted_answer
+from aether_worker.research import (
+    cites_fact,
+    estimate_tokens,
+    goal_completion_detail,
+    goal_completion_state,
+    record_verification,
+    required_facts,
+    research_prompt,
+    scripted_answer,
+)
 
 CRITERION_ID = "goal_artifact"
 VERIFIER_VERSION = "goal-artifact-5"
@@ -542,8 +551,10 @@ def _ensure_verification(
     byte_ok = (not deleted) and readable is not None and ledger is not None and observed == ledger
     if source_state == "invalid":
         goal_state = "fail"
+        goal_detail = "allowed_source_unreadable:" + ",".join(_missing)
     else:
         goal_state = _goal_state(readable, goal, sources)
+        goal_detail = _goal_detail(readable, goal, sources)
     answer_text = ""
     if readable is not None:
         try:
@@ -566,7 +577,7 @@ def _ensure_verification(
         detail = "回答没有引用所依据的资料原句"
     elif goal_state != "pass":
         outcome = "fail"
-        detail = "回答没有覆盖目标"
+        detail = goal_detail or "回答没有覆盖目标"
     else:
         outcome = "pass"
         detail = "工作流检查、字节完整性和目标摘录都通过"
@@ -604,6 +615,7 @@ def _ensure_verification(
         "pipeline": "pass",
         "byte_integrity": "pass" if byte_ok else "fail",
         "goal_completion": goal_state,
+        "goal_failure": goal_detail,
         "citation": "pass" if cited else "fail",
         "contract_binding": "pass" if contract_ok else "fail",
     }
@@ -1097,14 +1109,33 @@ def _ensure_answer(
     return str(stored["artifact_id"])
 
 
+def _answer_text(data: bytes | None) -> str:
+    if data is None:
+        return ""
+    try:
+        return data.decode("utf-8").strip()
+    except UnicodeError:
+        return ""
+
+
 def _goal_state(data: bytes | None, goal: str, sources: list[str]) -> str:
     if data is None:
         return "fail"
     try:
-        answer = data.decode("utf-8").strip()
+        data.decode("utf-8")
     except UnicodeError:
         return "fail"
-    return goal_completion_state(answer=answer, goal=goal, source_text="\n".join(sources))
+    return goal_completion_state(answer=_answer_text(data), goal=goal, source_text="\n".join(sources))
+
+
+def _goal_detail(data: bytes | None, goal: str, sources: list[str]) -> str:
+    if data is None:
+        return "empty_answer"
+    try:
+        data.decode("utf-8")
+    except UnicodeError:
+        return "unreadable_answer"
+    return goal_completion_detail(answer=_answer_text(data), goal=goal, source_text="\n".join(sources))
 
 
 def _artifact_ledger(database: Database, owner_id: str, project_id: str, artifact_id: str) -> tuple[str | None, bool]:
