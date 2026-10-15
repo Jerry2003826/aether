@@ -27,6 +27,8 @@ _KINDS = (
     "coding.create",
 )
 _VERIFIER_KINDS = ("evaluation.create", "skill.evaluate")
+CONSOLE_KINDS = _KINDS
+VERIFIER_KINDS = _VERIFIER_KINDS
 _FORBIDDEN_SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
 
 

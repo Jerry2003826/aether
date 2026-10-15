@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import fcntl
 import hashlib
 import json
 import os
+import shutil
 import stat
 import tarfile
+import threading
 import uuid
 import zipfile
 from io import BytesIO
 from pathlib import Path
 
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from aether_storage.db import Database
 
@@ -34,6 +38,8 @@ async def read_bounded_upload(upload, limit: int, chunk_size: int = 65536) -> by
     if total == 0:
         raise ArtifactError("size_rejected", "产物长度超出限制或为空")
     return b"".join(parts)
+
+
 MAX_SNAPSHOT_FILES = 1000
 MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 100
@@ -46,6 +52,7 @@ ALLOWED_MEDIA_TYPES = {
     "application/zip",
     "application/x-tar",
 }
+_TERMINAL_STATES = {"resolved", "rolled_back", "reconciled"}
 
 
 class ArtifactError(Exception):
@@ -70,18 +77,54 @@ class ArtifactStore:
         self.root = assert_storage_root(root)
         self.database = database
         self.root.mkdir(parents=True, exist_ok=True)
+        self._journal_guard = threading.Lock()
 
-    def put(self, *, owner_id: str, project_id: str, data: bytes, media_type: str, classification: str = "project_private", conn=None) -> dict[str, object]:
+    def put(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        data: bytes,
+        media_type: str,
+        classification: str = "project_private",
+        conn=None,
+    ) -> dict[str, object]:
         self._validate_bytes(data, media_type)
         digest = hashlib.sha256(data).hexdigest()
         storage_key = f"{project_id}/{digest[:2]}/{digest}"
         final = self._path_for_key(storage_key)
         self._write_durable(final, data, digest)
-        artifact_id = str(uuid.uuid4())
-        self._journal(project_id, {"state": "prepared", "artifact_id": artifact_id, "storage_key": storage_key, "sha256": digest, "byte_size": len(data), "media_type": media_type, "classification": classification})
-        stored_id = self._insert(owner_id, project_id, artifact_id, digest, len(data), media_type, storage_key, classification, conn=conn)
-        self._journal(project_id, {"state": "committed", "artifact_id": stored_id, "sha256": digest})
-        return self._ref(stored_id, project_id, digest, len(data), media_type, classification)
+        attempt_id = str(uuid.uuid4())
+        self._journal(
+            project_id,
+            {
+                "state": "prepared",
+                "disposition": "awaiting_commit",
+                "attempt_id": attempt_id,
+                "artifact_id": attempt_id,
+                "storage_key": storage_key,
+                "sha256": digest,
+                "byte_size": len(data),
+                "media_type": media_type,
+                "classification": classification,
+            },
+        )
+        if conn is None:
+            with self.database.transaction(owner_id=owner_id, project_id=project_id) as owned:
+                chosen = self._watch_commit(owned, owner_id=owner_id, project_id=project_id, attempt_id=attempt_id, storage_key=storage_key, digest=digest)
+                artifact_id, stored_media, stored_class = self._insert_on(
+                    owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+                )
+                chosen["artifact_id"] = artifact_id
+                chosen["media_type"] = stored_media
+                chosen["classification"] = stored_class
+            return self._ref(chosen["artifact_id"], project_id, digest, len(data), chosen["media_type"], chosen["classification"])
+        chosen = self._watch_commit(conn, owner_id=owner_id, project_id=project_id, attempt_id=attempt_id, storage_key=storage_key, digest=digest)
+        artifact_id, stored_media, stored_class = self._insert_on(
+            conn, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        )
+        chosen["artifact_id"] = artifact_id
+        return self._ref(artifact_id, project_id, digest, len(data), stored_media, stored_class)
 
     def stage_without_commit(self, *, project_id: str, data: bytes, media_type: str) -> dict[str, object]:
         """Stop after a durable write. Recovery inserts the missing ledger row."""
@@ -91,25 +134,32 @@ class ArtifactStore:
         final = self._path_for_key(storage_key)
         self._write_durable(final, data, digest)
         artifact_id = str(uuid.uuid4())
-        record = {"state": "prepared", "artifact_id": artifact_id, "storage_key": storage_key, "sha256": digest, "byte_size": len(data), "media_type": media_type, "classification": "project_private"}
+        record = {
+            "state": "prepared",
+            "disposition": "staged",
+            "attempt_id": artifact_id,
+            "artifact_id": artifact_id,
+            "storage_key": storage_key,
+            "sha256": digest,
+            "byte_size": len(data),
+            "media_type": media_type,
+            "classification": "project_private",
+        }
         self._journal(project_id, record)
         return record
 
     def recover(self, *, owner_id: str, project_id: str) -> list[str]:
-        committed = {item["artifact_id"] for item in self._journal_rows(project_id) if item.get("state") == "committed"}
+        rows = self._journal_rows(project_id)
+        terminal = self._terminal_attempts(owner_id, project_id, rows)
         restored: list[str] = []
-        for item in self._journal_rows(project_id):
-            if item.get("state") != "prepared" or item["artifact_id"] in committed:
+        for item in rows:
+            if item.get("state") != "prepared":
                 continue
-            path = self._path_for_key(item["storage_key"])
-            data = path.read_bytes()
-            digest = hashlib.sha256(data).hexdigest()
-            if digest != item["sha256"] or len(data) != item["byte_size"]:
-                raise ArtifactError("recover_mismatch", "恢复时期望的哈希与磁盘不一致")
-            self._insert(owner_id, project_id, item["artifact_id"], digest, len(data), item["media_type"], item["storage_key"], item["classification"])
-            self._journal(project_id, {"state": "committed", "artifact_id": item["artifact_id"], "sha256": digest})
-            restored.append(item["artifact_id"])
-            committed.add(item["artifact_id"])
+            attempt = str(item.get("attempt_id") or item.get("artifact_id") or "")
+            if not attempt or attempt in terminal:
+                continue
+            self._recover_prepared(owner_id, project_id, item, rows, restored)
+            terminal.add(attempt)
         return restored
 
     def get(self, *, owner_id: str, project_id: str, artifact_id: str) -> tuple[bytes, str]:
@@ -136,13 +186,320 @@ class ArtifactStore:
         if updated != 1:
             raise ArtifactError("not_found", "产物不存在")
 
-    def import_archive(self, *, owner_id: str, project_id: str, data: bytes, media_type: str, max_files: int = MAX_SNAPSHOT_FILES, max_bytes: int = MAX_SNAPSHOT_BYTES, max_ratio: int = MAX_COMPRESSION_RATIO) -> dict[str, object]:
+    def import_archive(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        data: bytes,
+        media_type: str,
+        max_files: int = MAX_SNAPSHOT_FILES,
+        max_bytes: int = MAX_SNAPSHOT_BYTES,
+        max_ratio: int = MAX_COMPRESSION_RATIO,
+    ) -> dict[str, object]:
         members = self._inspect_archive(data, media_type, max_files, max_bytes, max_ratio)
+        payloads = self._archive_payloads(data, media_type, members)
         stored = self.put(owner_id=owner_id, project_id=project_id, data=data, media_type=media_type)
-        destination = self.root / "snapshots" / project_id / str(stored["artifact_id"])
-        destination.mkdir(parents=True, exist_ok=False)
-        self._extract(data, media_type, destination, members)
+        artifact_id = str(stored["artifact_id"])
+        digest = str(stored["sha256"])
+        lock_path = self.root / "locks" / project_id / f"{artifact_id}.lock"
+        lock_path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            self._publish_snapshot(project_id, artifact_id, payloads, digest, media_type)
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
         return stored
+
+    def _watch_commit(self, conn, *, owner_id: str, project_id: str, attempt_id: str, storage_key: str, digest: str) -> dict[str, str]:
+        chosen = {"artifact_id": attempt_id, "media_type": "", "classification": ""}
+
+        def rolled_back() -> None:
+            self._journal(
+                project_id,
+                {
+                    "state": "rolled_back",
+                    "attempt_id": attempt_id,
+                    "artifact_id": attempt_id,
+                    "storage_key": storage_key,
+                    "sha256": digest,
+                },
+            )
+
+        def unknown() -> None:
+            self._journal(
+                project_id,
+                {
+                    "state": "unknown",
+                    "attempt_id": attempt_id,
+                    "artifact_id": chosen["artifact_id"],
+                    "storage_key": storage_key,
+                    "sha256": digest,
+                    "reason": "commit_outcome_unknown",
+                },
+            )
+
+        def committed() -> None:
+            self._publish_after_commit(
+                owner_id=owner_id,
+                project_id=project_id,
+                attempt_id=attempt_id,
+                storage_key=storage_key,
+                digest=digest,
+            )
+
+        conn.info.setdefault("aether_after_rollback", []).append(rolled_back)
+        conn.info.setdefault("aether_after_unknown", []).append(unknown)
+        conn.info.setdefault("aether_after_commit", []).append(committed)
+        return chosen
+
+    def _publish_after_commit(self, *, owner_id: str, project_id: str, attempt_id: str, storage_key: str, digest: str) -> None:
+        row = self._storage_row(owner_id, project_id, storage_key)
+        if row is None:
+            self._journal(
+                project_id,
+                {
+                    "state": "unknown",
+                    "attempt_id": attempt_id,
+                    "artifact_id": attempt_id,
+                    "storage_key": storage_key,
+                    "sha256": digest,
+                    "reason": "row_absent_after_commit",
+                },
+            )
+            return
+        if row["deleted_at"] is not None:
+            self._journal(
+                project_id,
+                {
+                    "state": "reconciled",
+                    "attempt_id": attempt_id,
+                    "artifact_id": str(row["id"]),
+                    "storage_key": storage_key,
+                    "sha256": digest,
+                    "reason": "tombstone",
+                },
+            )
+            return
+        self._mark_committed(project_id, attempt_id, str(row["id"]), storage_key, digest)
+
+    def _mark_committed(self, project_id: str, attempt_id: str, artifact_id: str, storage_key: str, digest: str) -> None:
+        self._journal(
+            project_id,
+            {
+                "state": "resolved",
+                "attempt_id": attempt_id,
+                "artifact_id": artifact_id,
+                "storage_key": storage_key,
+                "sha256": digest,
+            },
+        )
+        self._journal(project_id, {"state": "committed", "attempt_id": attempt_id, "artifact_id": artifact_id, "sha256": digest})
+
+    def _terminal_attempts(self, owner_id: str, project_id: str, rows: list[dict[str, object]]) -> set[str]:
+        terminal: set[str] = set()
+        for item in rows:
+            state = item.get("state")
+            attempt = str(item.get("attempt_id") or "")
+            if state in _TERMINAL_STATES and attempt:
+                terminal.add(attempt)
+                continue
+            if state != "committed":
+                continue
+            artifact_id = str(item.get("artifact_id") or "")
+            if not artifact_id or not self._artifact_exists(owner_id, project_id, artifact_id):
+                continue
+            if attempt:
+                terminal.add(attempt)
+            else:
+                terminal.add(artifact_id)
+        return terminal
+
+    def _recover_prepared(
+        self,
+        owner_id: str,
+        project_id: str,
+        item: dict[str, object],
+        rows: list[dict[str, object]],
+        restored: list[str],
+    ) -> None:
+        attempt = str(item.get("attempt_id") or item["artifact_id"])
+        disposition = str(item.get("disposition") or "staged")
+        digest = str(item["sha256"])
+        storage_key = str(item["storage_key"])
+        stored = self._storage_row(owner_id, project_id, storage_key)
+        covering = self._covering_commits(item, rows)
+        covering_exists = any(self._artifact_exists(owner_id, project_id, str(entry.get("artifact_id") or "")) for entry in covering)
+        if disposition == "staged" and covering and not covering_exists:
+            self._journal(
+                project_id,
+                {
+                    "state": "reconciled",
+                    "attempt_id": attempt,
+                    "artifact_id": attempt,
+                    "storage_key": storage_key,
+                    "sha256": digest,
+                    "reason": "stale_commit",
+                },
+            )
+            return
+        if disposition == "staged" and not covering:
+            self._require_staged_bytes(item)
+            if stored is not None and stored["deleted_at"] is not None:
+                self._reconcile(project_id, attempt, str(stored["id"]), storage_key, digest, "tombstone")
+                return
+            if stored is not None:
+                self._mark_committed(project_id, attempt, str(stored["id"]), storage_key, digest)
+                return
+            canonical = self._insert(
+                owner_id,
+                project_id,
+                attempt,
+                digest,
+                int(item["byte_size"]),
+                str(item["media_type"]),
+                storage_key,
+                str(item["classification"]),
+            )
+            self._mark_committed(project_id, attempt, canonical, storage_key, digest)
+            restored.append(canonical)
+            return
+        if stored is not None and stored["deleted_at"] is not None:
+            self._reconcile(project_id, attempt, str(stored["id"]), storage_key, digest, "tombstone")
+            return
+        if stored is not None:
+            self._mark_committed(project_id, attempt, str(stored["id"]), storage_key, digest)
+            return
+        if covering_exists:
+            canonical = next(str(entry["artifact_id"]) for entry in covering if self._artifact_exists(owner_id, project_id, str(entry.get("artifact_id") or "")))
+            self._mark_committed(project_id, attempt, canonical, storage_key, digest)
+            return
+        reason = "stale_commit" if covering else "commit_absent"
+        self._reconcile(project_id, attempt, attempt, storage_key, digest, reason)
+
+    def _require_staged_bytes(self, item: dict[str, object]) -> None:
+        path = self._path_for_key(str(item["storage_key"]))
+        if not path.is_file():
+            raise ArtifactError("recover_mismatch", "恢复时期望的哈希与磁盘不一致")
+        data = path.read_bytes()
+        if hashlib.sha256(data).hexdigest() != item["sha256"] or len(data) != int(item["byte_size"]):
+            raise ArtifactError("recover_mismatch", "恢复时期望的哈希与磁盘不一致")
+
+    def _covering_commits(self, item: dict[str, object], rows: list[dict[str, object]]) -> list[dict[str, object]]:
+        attempt = str(item.get("attempt_id") or item.get("artifact_id") or "")
+        digest = item.get("sha256")
+        covering: list[dict[str, object]] = []
+        for entry in rows:
+            if entry.get("state") != "committed":
+                continue
+            same_attempt = entry.get("attempt_id") == attempt or entry.get("artifact_id") == attempt
+            same_bytes = entry.get("sha256") == digest and entry.get("artifact_id") != attempt
+            if same_attempt or same_bytes:
+                covering.append(entry)
+        return covering
+
+    def _reconcile(self, project_id: str, attempt_id: str, artifact_id: str, storage_key: str, digest: str, reason: str) -> None:
+        self._journal(
+            project_id,
+            {
+                "state": "reconciled",
+                "attempt_id": attempt_id,
+                "artifact_id": artifact_id,
+                "storage_key": storage_key,
+                "sha256": digest,
+                "reason": reason,
+            },
+        )
+
+    def _publish_snapshot(self, project_id: str, artifact_id: str, payloads: dict[str, bytes], digest: str, media_type: str) -> None:
+        destination = self.root / "snapshots" / project_id / artifact_id
+        manifest = self._manifest(artifact_id, digest, media_type, payloads)
+        if destination.exists() or destination.is_symlink():
+            if self._tree_matches(destination, payloads):
+                self._write_meta(project_id, artifact_id, manifest)
+                return
+            self._quarantine(destination)
+        parent = self.root / "tmp" / "extract"
+        parent.mkdir(parents=True, exist_ok=True)
+        staging = parent / uuid.uuid4().hex
+        staging.mkdir(exist_ok=False)
+        try:
+            self._write_members(staging, payloads)
+            if not self._tree_matches(staging, payloads):
+                raise ArtifactError("snapshot_mismatch", "解压结果与归档成员不一致")
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            os.rename(staging, destination)
+        except Exception:
+            shutil.rmtree(staging, ignore_errors=True)
+            raise
+        self._write_meta(project_id, artifact_id, manifest)
+
+    def _manifest(self, artifact_id: str, digest: str, media_type: str, payloads: dict[str, bytes]) -> dict[str, object]:
+        members = [
+            {"name": name, "sha256": hashlib.sha256(blob).hexdigest(), "byte_size": len(blob)}
+            for name, blob in sorted(payloads.items())
+        ]
+        return {
+            "state": "complete",
+            "artifact_id": artifact_id,
+            "sha256": digest,
+            "media_type": media_type,
+            "members": members,
+        }
+
+    def _write_meta(self, project_id: str, artifact_id: str, manifest: dict[str, object]) -> None:
+        directory = self.root / "snapshot-meta" / project_id
+        directory.mkdir(parents=True, exist_ok=True)
+        target = directory / f"{artifact_id}.json"
+        temporary = directory / f".{artifact_id}.{uuid.uuid4().hex}.tmp"
+        payload = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode()
+        with temporary.open("wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, target)
+        directory_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _tree_matches(self, destination: Path, payloads: dict[str, bytes]) -> bool:
+        if destination.is_symlink() or not destination.is_dir():
+            return False
+        found: dict[str, bytes] = {}
+        root = destination.resolve()
+        for path in destination.rglob("*"):
+            if path.is_symlink():
+                return False
+            if not path.is_file():
+                continue
+            resolved = path.resolve()
+            if root not in resolved.parents:
+                return False
+            found[path.relative_to(destination).as_posix()] = path.read_bytes()
+        return found == payloads
+
+    def _quarantine(self, destination: Path) -> None:
+        if not destination.exists() and not destination.is_symlink():
+            return
+        quarantine = self.root / "quarantine" / destination.parent.name
+        quarantine.mkdir(parents=True, exist_ok=True)
+        os.replace(destination, quarantine / f"{destination.name}-{uuid.uuid4().hex}")
+
+    def _write_members(self, destination: Path, payloads: dict[str, bytes]) -> None:
+        for name, blob in payloads.items():
+            target = self._destination_member(destination, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            fd = os.open(target, flags, 0o644)
+            try:
+                os.write(fd, blob)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
 
     def _validate_bytes(self, data: bytes, media_type: str) -> None:
         if media_type not in ALLOWED_MEDIA_TYPES:
@@ -201,41 +558,128 @@ class ArtifactStore:
         directory = self.root / "journal"
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / f"{project_id}.jsonl"
-        with path.open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(record, ensure_ascii=False) + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
+        line = (json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n").encode()
+        with self._journal_guard:
+            fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o644)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX)
+                os.write(fd, line)
+                os.fsync(fd)
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+                os.close(fd)
 
     def _journal_rows(self, project_id: str) -> list[dict[str, object]]:
         path = self.root / "journal" / f"{project_id}.jsonl"
         if not path.exists():
             return []
-        return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        with self._journal_guard:
+            with path.open(encoding="utf-8") as handle:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_SH)
+                try:
+                    raw = handle.read()
+                finally:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        return [json.loads(line) for line in raw.splitlines() if line.strip()]
 
-    def _insert(self, owner_id: str, project_id: str, artifact_id: str, digest: str, size: int, media_type: str, storage_key: str, classification: str, conn=None) -> str:
+    def _insert(
+        self,
+        owner_id: str,
+        project_id: str,
+        artifact_id: str,
+        digest: str,
+        size: int,
+        media_type: str,
+        storage_key: str,
+        classification: str,
+        conn=None,
+    ) -> str:
         if conn is None:
             with self.database.transaction(owner_id=owner_id, project_id=project_id) as owned:
-                return self._insert_on(owned, project_id, artifact_id, digest, size, media_type, storage_key, classification)
-        return self._insert_on(conn, project_id, artifact_id, digest, size, media_type, storage_key, classification)
-
-    def _insert_on(self, conn, project_id: str, artifact_id: str, digest: str, size: int, media_type: str, storage_key: str, classification: str) -> str:
-        existing = conn.execute(text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL"), {"project_id": project_id, "storage_key": storage_key}).scalar()
-        if existing is not None:
-            return str(existing)
-        conn.execute(
-            text(
-                "INSERT INTO artifacts (id, project_id, sha256, byte_size, media_type, storage_key, classification) "
-                "VALUES (:id, :project_id, :sha256, :byte_size, :media_type, :storage_key, :classification)"
-            ),
-            {"id": artifact_id, "project_id": project_id, "sha256": digest, "byte_size": size, "media_type": media_type, "storage_key": storage_key, "classification": classification},
+                stored_id, _media, _classification = self._insert_on(
+                    owned, project_id, artifact_id, digest, size, media_type, storage_key, classification
+                )
+                return stored_id
+        stored_id, _media, _classification = self._insert_on(
+            conn, project_id, artifact_id, digest, size, media_type, storage_key, classification
         )
-        return artifact_id
+        return stored_id
+
+    def _insert_on(
+        self,
+        conn,
+        project_id: str,
+        artifact_id: str,
+        digest: str,
+        size: int,
+        media_type: str,
+        storage_key: str,
+        classification: str,
+    ) -> tuple[str, str, str]:
+        existing = self._live_identity(conn, project_id, storage_key)
+        if existing is not None:
+            return existing
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    text(
+                        "INSERT INTO artifacts (id, project_id, sha256, byte_size, media_type, storage_key, classification) "
+                        "VALUES (:id, :project_id, :sha256, :byte_size, :media_type, :storage_key, :classification)"
+                    ),
+                    {
+                        "id": artifact_id,
+                        "project_id": project_id,
+                        "sha256": digest,
+                        "byte_size": size,
+                        "media_type": media_type,
+                        "storage_key": storage_key,
+                        "classification": classification,
+                    },
+                )
+        except IntegrityError:
+            raced = self._live_identity(conn, project_id, storage_key)
+            if raced is not None:
+                return raced
+            retained = conn.execute(
+                text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key"),
+                {"project_id": project_id, "storage_key": storage_key},
+            ).scalar()
+            if retained is not None:
+                raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+            raise
+        return artifact_id, media_type, classification
+
+    def _live_identity(self, conn, project_id: str, storage_key: str) -> tuple[str, str, str] | None:
+        row = conn.execute(
+            text(
+                "SELECT id::text AS id, media_type, classification FROM artifacts "
+                "WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL"
+            ),
+            {"project_id": project_id, "storage_key": storage_key},
+        ).mappings().first()
+        if row is None:
+            return None
+        return str(row["id"]), str(row["media_type"]), str(row["classification"])
 
     def _row(self, owner_id: str, project_id: str, artifact_id: str) -> dict | None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             row = conn.execute(
                 text("SELECT id::text, sha256, byte_size, media_type, storage_key, deleted_at FROM artifacts WHERE id = :id AND project_id = :project_id"),
                 {"id": artifact_id, "project_id": project_id},
+            ).mappings().first()
+        return None if row is None else dict(row)
+
+    def _artifact_exists(self, owner_id: str, project_id: str, artifact_id: str) -> bool:
+        return self._row(owner_id, project_id, artifact_id) is not None
+
+    def _storage_row(self, owner_id: str, project_id: str, storage_key: str) -> dict | None:
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id::text AS id, sha256, byte_size, media_type, storage_key, classification, deleted_at "
+                    "FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key"
+                ),
+                {"project_id": project_id, "storage_key": storage_key},
             ).mappings().first()
         return None if row is None else dict(row)
 
@@ -269,23 +713,20 @@ class ArtifactStore:
             raise ArtifactError("archive_limit", "解压后的文件数量或大小超过上限")
         return names
 
-    def _extract(self, data: bytes, media_type: str, destination: Path, names: list[str]) -> None:
+    def _archive_payloads(self, data: bytes, media_type: str, names: list[str]) -> dict[str, bytes]:
+        payloads: dict[str, bytes] = {}
         if media_type == "application/zip":
             with zipfile.ZipFile(BytesIO(data)) as archive:
                 for name in names:
-                    target = self._destination_member(destination, name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(archive.read(name))
-        else:
-            with tarfile.open(fileobj=BytesIO(data), mode="r:") as archive:
-                for name in names:
-                    member = archive.getmember(name)
-                    extracted = archive.extractfile(member)
-                    if extracted is None:
-                        raise ArtifactError("extract_failed", "无法读取归档成员")
-                    target = self._destination_member(destination, name)
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_bytes(extracted.read())
+                    payloads[name] = archive.read(name)
+            return payloads
+        with tarfile.open(fileobj=BytesIO(data), mode="r:") as archive:
+            for name in names:
+                extracted = archive.extractfile(name)
+                if extracted is None:
+                    raise ArtifactError("extract_failed", "无法读取归档成员")
+                payloads[name] = extracted.read()
+        return payloads
 
     def _destination_member(self, destination: Path, name: str) -> Path:
         self._reject_member_name(name)

@@ -51,7 +51,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
             raise ApiError(422, exc.code, "这条记忆不能写入") from exc
         memory_id = str(uuid.uuid4())
         command_id = str(uuid.uuid4())
-        command = {"command_id": command_id, "memory_id": memory_id, **payload}
+        command = {"command_id": command_id, "memory_id": memory_id, "owner_id": owner, **payload}
         route = f"POST /v1/projects/{project_id}/memories"
         digest = sha256_text(json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
@@ -82,6 +82,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
             "action": action,
             "claim": claim,
             "expected_revision": int(match),
+            "owner_id": owner,
         }
         route = f"PATCH /v1/projects/{project_id}/memories/{memory_id}"
         digest = sha256_text(json.dumps({"action": action, "claim": claim, "revision": int(match)}, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
@@ -113,6 +114,7 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
         command = {"command_id": command_id, "memory_id": memory_id, "expected_revision": int(match)}
         route = f"DELETE /v1/projects/{project_id}/memories/{memory_id}"
         digest = sha256_text(json.dumps(command, sort_keys=True, separators=(",", ":")))
+        command = {**command, "owner_id": owner}
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
             existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=digest)
             if existing is not None:
