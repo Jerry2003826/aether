@@ -46,7 +46,7 @@ P1 覆盖：
 - 本地 MCP stdio 夹具已能完成 argv 拒绝、schema 隔离、真实 echo、超时 unknown、重连和密钥脱敏。F17 仍是 not_started：交付物要求官方 SDK 客户端，当前客户端不是官方 SDK。
 - F12 done。没有测试产物的 `observed_test` 降为 proposed。同一 CI run 通过。对照表 `reports/f12_criteria.md`。
 - F13 done。GitHub runner 上的真实容器测试通过：同一 job 只有一个容器，重启后重新挂上；容器内公网、元数据和 Docker socket 不可达，密钥不在环境里，只能打到该 job 的脚本网关。对照表 `reports/f13_criteria.md`。
-- F14 改回 in_progress。评分改为先核对套件和合同哈希，再在沙箱容器里只跑绑定套件，不用候选自己的测试或 conftest。等这次提交的 PR CI 和 SonarCloud 变绿再标 done。对照表 `reports/f14_criteria.md`。
-- 下一步：F14 的 CI 变绿后标 done，再做 F15。不把未实测的图谱标成已启用。live 模型、Hermes 仍是 not_run。
+- F14 done。PR #1 CI run `38678232085`：unit `32 passed`，integration `100 passed, 2 warnings in 45.73s`。SonarCloud quality gate OK。评分在沙箱里只跑绑定套件。对照表 `reports/f14_criteria.md`。
+- 下一步：F15 CodeGraph。产品默认仍然关闭，先做实测探针。live 模型、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

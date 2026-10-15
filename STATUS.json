@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "F14 is in_progress until the sandbox grader fix is green on PR CI and SonarCloud. F15 waits.",
+  "next_action": "Implement F15 CodeGraph from the measured 1.6.2 CLI. Keep product enablement off until the owner turns it on.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "PR #1 CI run 38677249818: unit 32 passed; integration 95 passed, 2 warnings in 38.76s. SonarCloud quality gate OK.",
+  "last_test_result": "PR #1 CI run 38678232085: unit 32 passed; integration 100 passed, 2 warnings in 45.73s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -84,8 +84,7 @@
     "openhands_live_model": "not_run"
   },
   "f14": {
-    "status": "in_progress",
-    "ci_run": "38677249818",
-    "reopened": "grade must use the bound suite inside the sandbox"
+    "status": "done",
+    "ci_run": "38678232085"
   }
 }
