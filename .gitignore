@@ -19,3 +19,5 @@ workspaces/
 .coverage
 .codegraph/
 .codegraph-*/
+config/tokenizer/jieba-0.42.1.dict.txt
+config/retrieval/measured.json

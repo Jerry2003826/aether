@@ -1,6 +1,6 @@
 # F11 验收与测试
 
-每条验收对应至少一个会真实执行的测试。没有 skip。向量来自 CPU 上的 `BAAI/bge-m3`，revision `5617a9f61b028005a4858fdac845db406aefb181`，维度 1024。重排分数来自 `BAAI/bge-reranker-v2-m3`，revision `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`。测量写在 `config/retrieval/measured.json`。缓存里没有的文本会走 ML 进程，失败时不会编造向量。
+每条验收对应至少一个会真实执行的测试。没有 skip。向量来自 CPU 上的 `BAAI/bge-m3`，revision `5617a9f61b028005a4858fdac845db406aefb181`，维度 1024。重排分数来自 `BAAI/bge-reranker-v2-m3`，revision `953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`。测试用的紧凑结果在 `config/retrieval/fixture.json`，并带有每个向量的 sha256。`scripts/measure_retrieval_models.py` 把完整测量写到被 gitignore 的 `config/retrieval/measured.json`。缓存里没有的文本会走 ML 进程，失败时不会编造向量。
 
 | 验收 | 测试 |
 |---|---|

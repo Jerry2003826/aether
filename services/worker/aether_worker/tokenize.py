@@ -1,26 +1,62 @@
 """Frozen jieba 0.42.1 dictionary plus English and code tokens.
 
-The jieba package publishes source only. CI installs with ``uv sync --locked --no-build``,
-so the segmenter reads the vendored dictionary instead of building that package.
+The dictionary is jieba's own file. CI installs with ``uv sync --locked --no-build``,
+which cannot build jieba's source distribution, so a missing package copy is downloaded
+and checked against the sha256 in ``config/tokenizer/jieba-0.42.1.json``.
 """
 
 from __future__ import annotations
 
+import hashlib
+import importlib.util
+import json
 import re
+import urllib.request
 from functools import lru_cache
 from pathlib import Path
 
 TOKENIZER_VERSION = "jieba-0.42.1-dict-forward-max+code-symbols"
-_DICT = Path(__file__).resolve().parents[3] / "config" / "tokenizer" / "jieba-0.42.1.dict.txt"
+_ROOT = Path(__file__).resolve().parents[3]
+_MANIFEST = json.loads((_ROOT / "config" / "tokenizer" / "jieba-0.42.1.json").read_text(encoding="utf-8"))
+_DICT_SHA256 = str(_MANIFEST["dict_sha256"])
+_CACHE = _ROOT / ".cache" / "tokenizer" / "jieba-0.42.1.dict.txt"
 _LATIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 _OPERATORS = ("!=", "==", "<=", ">=", "&&", "||", "->", "::")
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _package_dict() -> Path | None:
+    spec = importlib.util.find_spec("jieba")
+    if spec is None or not spec.origin:
+        return None
+    path = Path(spec.origin).resolve().parent / "dict.txt"
+    return path if path.is_file() else None
+
+
+def _dictionary_path() -> Path:
+    for candidate in (_package_dict(), _CACHE):
+        if candidate is not None and candidate.is_file() and _sha256(candidate) == _DICT_SHA256:
+            return candidate
+    _CACHE.parent.mkdir(parents=True, exist_ok=True)
+    urllib.request.urlretrieve(str(_MANIFEST["dict_url"]), _CACHE)
+    if _sha256(_CACHE) != _DICT_SHA256:
+        _CACHE.unlink(missing_ok=True)
+        raise RuntimeError("jieba dictionary hash mismatch")
+    return _CACHE
 
 
 @lru_cache(maxsize=1)
 def _dictionary() -> tuple[frozenset[str], int]:
     words: set[str] = set()
     longest = 1
-    for line in _DICT.read_text(encoding="utf-8").splitlines():
+    for line in _dictionary_path().read_text(encoding="utf-8").splitlines():
         word = line.split(" ", 1)[0].strip()
         if not word:
             continue

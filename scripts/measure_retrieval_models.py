@@ -14,7 +14,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 ML = ROOT / "environments" / "ml"
-DESTINATION = ROOT / "config" / "retrieval" / "measured.json"
+DESTINATION = ROOT / "config" / "retrieval" / "measured.json"  # gitignored full measurement
 
 TEXTS = [
     "苹果派的烘烤温度是一百八十度",

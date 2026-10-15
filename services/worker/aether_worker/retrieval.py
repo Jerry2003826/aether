@@ -24,6 +24,7 @@ from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
 ROOT = Path(__file__).resolve().parents[3]
 ML_ENV = ROOT / "environments" / "ml"
+FIXTURE = ROOT / "config" / "retrieval" / "fixture.json"
 MEASUREMENTS = ROOT / "config" / "retrieval" / "measured.json"
 LOCK = json.loads((ROOT / "config" / "models.lock.json").read_text(encoding="utf-8"))
 EMBEDDING_REVISION = str(LOCK["ml"]["embedding_revision"])
@@ -35,7 +36,7 @@ CONTEXT_LIMIT = 8
 PER_SOURCE = 2
 DEBOUNCE_SECONDS = 30
 _KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
-_CACHE: tuple[tuple[str, float], dict[str, Any]] | None = None
+_CACHE: tuple[object, dict[str, Any]] | None = None
 
 
 class RetrievalError(Exception):
@@ -48,18 +49,32 @@ def _sha(value: str) -> str:
     return hashlib.sha256(value.encode()).hexdigest()
 
 
+def _read_measurement(path: Path) -> dict[str, Any]:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if payload.get("embedding_revision") != EMBEDDING_REVISION or payload.get("dimension") != DIMENSION:
+        raise RetrievalError("revision_mismatch")
+    return payload
+
+
 def _measured() -> dict[str, Any]:
     global _CACHE
-    if MEASUREMENTS.is_file():
-        stamp = MEASUREMENTS.stat().st_mtime
-        key = (str(MEASUREMENTS), stamp)
-        if _CACHE is None or _CACHE[0] != key:
-            payload = json.loads(MEASUREMENTS.read_text(encoding="utf-8"))
-            if payload.get("embedding_revision") != EMBEDDING_REVISION or payload.get("dimension") != DIMENSION:
-                raise RetrievalError("revision_mismatch")
-            _CACHE = (key, payload)
+    fixture_stamp = FIXTURE.stat().st_mtime if FIXTURE.is_file() else 0
+    full_stamp = MEASUREMENTS.stat().st_mtime if MEASUREMENTS.is_file() else 0
+    key = (str(FIXTURE), fixture_stamp, str(MEASUREMENTS), full_stamp)
+    if _CACHE is not None and _CACHE[0] == key:
         return _CACHE[1]
-    return {"embedding_revision": EMBEDDING_REVISION, "dimension": DIMENSION, "vectors": {}, "rerank_scores": {}}
+    if FIXTURE.is_file():
+        payload = _read_measurement(FIXTURE)
+    else:
+        payload = {"embedding_revision": EMBEDDING_REVISION, "dimension": DIMENSION, "vectors": {}, "rerank_scores": {}}
+    if MEASUREMENTS.is_file():
+        extra = _read_measurement(MEASUREMENTS)
+        payload["vectors"].update(extra.get("vectors") or {})
+        payload.setdefault("rerank_scores", {}).update(extra.get("rerank_scores") or {})
+        if extra.get("reranker_revision"):
+            payload["reranker_revision"] = extra["reranker_revision"]
+    _CACHE = (key, payload)
+    return payload
 
 
 def _encode_live(texts: list[str]) -> list[list[float]]:
