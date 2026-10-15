@@ -1,22 +1,18 @@
 # 交接
 
-审查意见已提交。PR #1 在 `767b212` 之后的 GitHub Actions 与 SonarCloud 为成功，并已标为可审查。随后完成 F03。
+PR #1 已可审查。提交 `767b212` 上 GitHub Actions 与 SonarCloud 为成功。其后又完成 F03–F06。
 
-## F03 测试
+## 最近测试
 
-```text
-AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration
-32 passed
-```
-
-产物路径由服务端按哈希生成。zip/tar 拒绝路径穿越、符号链接、硬链接和过高压缩比。落盘后未写数据库的记录可以恢复。产物根目录不能放在宿主 home 下。
+- F03 全量：`AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration` → 32 passed（在 F04 之前）。
+- F04：`uv run --locked --no-build pytest -q tests/integration/test_gateway.py` → 1 passed。
+- F05：`uv run --locked --no-build pytest -q tests/integration/test_budget.py` → 1 passed。
+- F06：`uv run --locked --no-build pytest -q tests/integration/test_operations.py` → 1 passed。
 
 ## 状态
 
-- F00 done
-- F01 blocked：BGE 权重未加载
-- F02 done
-- F03 done
-- F04 未开始
+- F00、F02、F03、F04、F05、F06：done
+- F01：blocked。BGE-M3 权重未加载，`dimension_probed` 为 null。OpenHands 导入记为 partial，没有调用模型。
+- F07 起未开始。
 
-CI integration 使用 pgvector `0.8.7-pg17` 与 Temporal dev server。
+live 模型、CodeGraph、Hermes 仍是 not_run。

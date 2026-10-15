@@ -147,8 +147,10 @@ tickets:
   - 审批绑定意图/内容hash/资源版本/过期/owner并事务消耗
   - HTTP成功响应丢失时模拟外部副作用不重复
   - 非幂等unknown进入needs_review；取消请求不冒充已停止
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/operations.py
+  - tests/integration/test_operations.py
 - id: F07
   stage: G2
   scope: core
