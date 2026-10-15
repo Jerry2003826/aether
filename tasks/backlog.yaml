@@ -519,8 +519,12 @@ tickets:
   - 网页/代码注释/MCP/Skill四载体测试任务正常率和实际不安全效果
   - 真实SSRF/网络/身份/审批/预算竞态/导入/删后回写探针
   - 安全失败阻止发布；不把分类器分数当整机边界证明
-  status: not_started
-  evidence: []
+  status: in_progress
+  evidence:
+  - services/worker/aether_worker/security_regression.py
+  - tests/unit/test_attack_carriers.py
+  - tests/integration/test_security_regression.py
+  - reports/f23_criteria.md
 - id: F24
   stage: G6
   scope: core
