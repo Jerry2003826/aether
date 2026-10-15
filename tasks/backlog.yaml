@@ -256,8 +256,13 @@ tickets:
   - 真实embedding/revision，BM25/dense/RRF/rerank分组对照
   - 授权过滤在检索/重排/LLM上下文前；删除/撤权即时不可见
   - 索引atomic swap与stale标记；中英/emoji/代码符号场景可复现
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/retrieval.py
+  - services/worker/aether_worker/tokenize.py
+  - config/retrieval/measured.json
+  - tests/integration/test_hybrid_retrieval.py
+  - reports/f11_criteria.md
 - id: F12
   stage: G3
   scope: core

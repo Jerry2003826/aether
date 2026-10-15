@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F11",
+  "current_task": "F12",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F11 hybrid retrieval. F17 stays not_started until the official MCP SDK is the client.",
+  "next_action": "Implement F12 context assembly and native PostgreSQL memory. F17 stays not_started until the official MCP SDK is the client.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "F10 fixture-host bypass narrowed: 100 passed, 2 warnings in 24.21s, EXIT:0.",
+  "last_test_result": "F11 hybrid retrieval: 114 passed, 2 warnings in 25.54s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -68,6 +68,9 @@
     "fixture_bypass": "allow_hosts and AETHER_INGEST_ALLOW_FIXTURES=1 only"
   },
   "f11": {
-    "status": "not_started"
+    "status": "done",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "dimension_probed": 1024
   }
 }

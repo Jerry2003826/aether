@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 import yaml
 ROOT=Path(__file__).resolve().parents[1]
-DEPENDENCY_PARTS={'.venv','node_modules','.git','.next','data','secrets','__pycache__'}
+DEPENDENCY_PARTS={'.venv','node_modules','.git','.next','data','secrets','__pycache__','.cache'}
 
 def is_dependency_path(path:Path)->bool:
     return any(part in DEPENDENCY_PARTS for part in path.parts)

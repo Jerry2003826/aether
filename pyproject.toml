@@ -21,6 +21,7 @@ dependencies = [
   "python-multipart>=0.0.18",
   "litellm>=1.55",
   "defusedxml>=0.7.1",
+  "bm25s>=0.2.0",
 ]
 
 [dependency-groups]
