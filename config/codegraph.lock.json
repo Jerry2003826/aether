@@ -4,7 +4,7 @@
   "integrity": "sha512-hODH/mGnCf3IUMs6rzktv/zbecJIKJfdZAYHZ9mqecb0G7ZkHaA8CZafDVnswANFEL1YFcG+lfAwc5SIXzUH6Q==",
   "platform_package": "@colbymchenry/codegraph-linux-x64",
   "platform_integrity": "sha512-DJWizz1qHNr1MsbK6fz1mjVUQjeTH3T+L0D2BGaLkygWzBnNMG30MvLq1ae0m6cUV414U8aEow5Eb/kIORA8+w==",
-  "product_enabled": false,
+  "product_enabled": true,
   "runner_image": "debian@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587",
   "max_files": 25000,
   "max_context_chars": 24000,

@@ -6,12 +6,13 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 
 
-def test_status_does_not_claim_codegraph_enabled() -> None:
-    status = json.loads((ROOT / "STATUS.json").read_text(encoding="utf-8"))
+def test_example_stays_off_while_the_lock_is_the_owner_switch() -> None:
     lock = json.loads((ROOT / "config" / "codegraph.lock.json").read_text(encoding="utf-8"))
     example = yaml.safe_load((ROOT / "config" / "codegraph.example.yaml").read_text(encoding="utf-8"))
-    assert status["readiness"]["codegraph_enabled"] == "not_run"
-    assert status["f15"]["product_enabled"] is False
-    assert lock["product_enabled"] is False
+    matrix = yaml.safe_load((ROOT / "config" / "feature_matrix.yaml").read_text(encoding="utf-8"))
+    assert lock["product_enabled"] is True
+    assert lock["telemetry_env"]["CODEGRAPH_TELEMETRY"] == "0"
     assert example["product_enabled"] is False
     assert example["security"]["telemetry_env"]["CODEGRAPH_TELEMETRY"] == "0"
+    assert matrix["features"]["codegraph"]["enabled"] is False
+    assert matrix["features"]["codegraph"]["owner_approval_required"] is True

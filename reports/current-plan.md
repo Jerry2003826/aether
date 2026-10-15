@@ -1,7 +1,11 @@
-# F26 已按 cb22fbc 的验收结果标 done
+# CodeGraph 所有者开关
 
-`reports/f26_acceptance_result.json` 是这次退出码 0 的原样结果。比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`。
+示例配置和功能矩阵保持关闭。已安装锁打开，安全默认不变：遥测关闭、容器断网、只索引 git 快照、失败时在快照内降级。
 
-`semantic_support` 仍是 `not_judged`，费用仍是 `unknown`。`live_ready` 按产品工程加 F26 记为 passed。Hermes 四组对照和 CodeGraph 仍是 not_run。
+真实证据命令：
 
-`dac5c49` 的失败结果留在 `reports/f26_acceptance_dac5c49.json`。
+```sh
+uv run --locked --no-build python scripts/run_codegraph_product.py --out reports/f15_product_result.json
+```
+
+`readiness.codegraph_enabled` 在结果检查全部通过之前保持 `not_run`。
