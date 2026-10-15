@@ -58,7 +58,8 @@ P1 覆盖：
 - F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
 - F21 done。PR #1 CI run `38686730319`：unit `40 passed in 7.73s`，integration `118 passed, 1 warning in 75.07s`。SonarCloud quality gate OK。对照表 `reports/f21_criteria.md`。
 - F20、F21 done。PR #1 CI run `38687896639`：unit `40 passed in 7.43s`，integration `123 passed, 1 warning in 72.10s`。SonarCloud quality gate OK。密钥整段替换。脚本整目录哈希后在容器里用 `python -I` 执行。回滚中途失败时指针和 canary 状态都不提交。对照表 `reports/f20_criteria.md`、`reports/f21_criteria.md`。
-- F22 重新打开为 in_progress。任务、记忆、编码作业要走控制台同一条创建接口，并和数据库里的行一致。`/v1/admin/*` 写明只靠单所有者不变量。还没标 done。提交在本地，推送时安装令牌已过期。
-- F23 进行中。四个载体记录正常完成和不安全效果。分类器分数不放行。故障矩阵看任务状态、命令和账本。还没标 done。
-- F24–F27 在本地为 in_progress。Hermes CLI 未安装，对照 live 是 not_run，没有领先结论。SBOM 来自锁文件，漏洞库是 offline not_run。恢复会停掉未完成投递，不删 volume。Live 要 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`，缺了就是 blocked。交付报告从 JUnit 计数，`live_ready` 是 false。
-- 下一步：GitHub 安装令牌过期，提交还在本地。令牌恢复后推送，等 PR CI 和 Sonar 变绿，再把 F22–F27 标 done。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F22–F27 done。PR #1 CI run `38694676859`：unit `49 passed in 10.97s`，integration `136 passed, 1 warning in 97.37s`。SonarCloud quality gate OK。对照表 `reports/f22_criteria.md` 到 `reports/f27_criteria.md`。
+- F24 Hermes 对照 live 是 not_run。本机没有 Hermes CLI，没有领先结论。
+- F26 `live_ready` 是 false。要跑真实探针必须同时提供 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`。缺任何一个就是 blocked，脚本模型不代替。
+- CodeGraph 产品开关仍然关闭，`codegraph_enabled` 是 false，仍是 not_run。
+- 下一步：补上那三个 live 变量后再跑 F26 探针。不宣布 live 可用。

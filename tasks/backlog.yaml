@@ -495,7 +495,7 @@ tickets:
   - 真实OpenAPI diff，无占位返回/生产mock
   - 任务/知识/记忆/代码/审批/跟踪/Discover/Skills/成本都走真实API
   - 键盘/错误/加载/断线/中文长文本E2E，原始HTML不直接执行
-  status: in_progress
+  status: done
   evidence:
   - services/api/aether_api/console_routes.py
   - services/worker/aether_worker/console_commands.py
@@ -519,7 +519,7 @@ tickets:
   - 网页/代码注释/MCP/Skill四载体测试任务正常率和实际不安全效果
   - 真实SSRF/网络/身份/审批/预算竞态/导入/删后回写探针
   - 安全失败阻止发布；不把分类器分数当整机边界证明
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/security_regression.py
   - tests/unit/test_attack_carriers.py
@@ -540,7 +540,7 @@ tickets:
   - 基线安装/CLI探针真实执行；缺key标live not_run
   - 相同模型/权限/预算与fresh/frozen learned环境；无法匹配差异显式列出
   - 开发集与最终holdout分离，raw结果/unknown费用/置信区间可重算；无数据不声称领先
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/hermes_baseline.py
   - tests/unit/test_hermes_baseline.py
@@ -561,7 +561,7 @@ tickets:
   - 使用实际构建产物生成SBOM；漏洞库时效与离线/在线模式可见
   - 固定依赖和完整许可文件；不得用README宽松标签替代依赖审计
   - 恢复DB+artifact后先停止外部dispatch并对账；不down -v删数据
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/supply.py
   - tests/unit/test_supply_chain.py
@@ -584,7 +584,7 @@ tickets:
   - 真实用户配置model API通过tools/schema/usage协议探针
   - 研究完整hybrid+引用验收；编码独立测试和恢复通过
   - 无API key/Linux资源如实blocked；脚本模型不替代本项
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/live_harness.py
   - tests/unit/test_live_harness.py
@@ -604,7 +604,7 @@ tickets:
   - 报告从JUnit/JSON实际记录生成，不手填全绿
   - 工程/live/CodeGraph/研究结论分开，未运行项完整列出
   - 启动不依赖archive/外部记忆/AG-UI；下一步清楚，不宣布未完成live可用
-  status: in_progress
+  status: done
   evidence:
   - services/worker/aether_worker/acceptance_report.py
   - tests/unit/test_acceptance_report.py

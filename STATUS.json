@@ -122,27 +122,32 @@
     "ci_run": "38687896639"
   },
   "f22": {
-    "status": "in_progress",
-    "ci_run": "38690927397"
+    "status": "done",
+    "ci_run": "38694676859"
   },
   "f23": {
-    "status": "in_progress"
+    "status": "done",
+    "ci_run": "38694676859"
   },
   "f24": {
-    "status": "in_progress",
+    "status": "done",
+    "ci_run": "38694676859",
     "live": "not_run"
   },
   "f25": {
-    "status": "in_progress",
+    "status": "done",
+    "ci_run": "38694676859",
     "vulnerability_db": "offline_not_run"
   },
   "f26": {
-    "status": "in_progress",
+    "status": "done",
+    "ci_run": "38694676859",
     "live_ready": false,
     "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"]
   },
   "f27": {
-    "status": "in_progress",
+    "status": "done",
+    "ci_run": "38694676859",
     "live_ready": false,
     "codegraph_enabled": false,
     "comparative_evidence": "not_run"
