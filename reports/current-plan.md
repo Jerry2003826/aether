@@ -1,7 +1,7 @@
 # F00–F25 与 F27 已 done；F26 仍 blocked
 
-监督者在 head `5ab4fef` 上对 DeepSeek `deepseek-chat` 跑了 live 探针，退出码 0。结果是 `reports/f26_live_result.json`。
+head `4f1ca09` 的 DeepSeek 重跑已原样写入 `reports/f26_live_result.json`，退出码 0。协议、引用、诱导后的编码修复和 Docker 隔离都有分开的记录。
 
-head `fbb8260` 的结果已原样保存，退出码 0，但证据不够：恢复检查没有单独的第一次提交，hybrid 和隔离没有排名和容器退出码。F26 不标 done。
+第一次失败是提示要求 `return a - b`。混合检索是三条短文冒烟，不是完整研究验收，也不是 OpenHands 编码恢复。因此不标 F26 done，`live_ready` 保持 false。
 
-请重跑 `uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json`。新文件应包含 `calls_detail`、提交 sha256、检索排名和容器 flags/exit_code。Hermes 四组对照和 CodeGraph 仍是 not_run。
+Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。

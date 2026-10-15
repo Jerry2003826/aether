@@ -4,7 +4,14 @@
 
 监督者已在 head `5ab4fef` 用 DeepSeek 跑过一次：`AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1`，`AETHER_LIVE_MODEL_ALIAS=deepseek-chat`，Python 3.13.5，退出码 0。原样结果在 `reports/f26_live_result.json`。文件里没有 key。
 
-head `fbb8260` 的结果也已原样保存，退出码 0。它报告 hybrid、隔离、引用和编码恢复都是 pass，但恢复检查和独立测试共用同一次调用的延迟和 token，文件里没有第一次提交的哈希，也没有检索排名和容器退出码。这不够当作规格里的恢复和隔离证据。F26 继续 blocked。下一次运行会把每次调用的 id、提交哈希、BM25/dense/RRF 排名，以及容器 flags、退出码和网络 errno 写进结果。新文件交回来之前不标 done。
+head `4f1ca09` 的重跑结果已原样保存，退出码 0。Docker 在场，key 不在文件里。三次调用分别是研究 1778ms、第一次编码 1539ms、修复 1638ms。两次源码哈希不同：`83ebbfa3938d60cd5ba0353e92e097acce0b22131c0c78755e3a9cdc9a8b64b3` 和 `ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772`。第一次失败原因是 `add(1, 2)=-1 expected 3`。容器退出码 0，`network_errno` 101，`secret_present` false。
+
+这两点必须照实写，不能把这次探针说成完整验收：
+
+- 第一次编码失败是探针自己诱导的。提示要求模型提交 `return a - b`，独立测试再按 `add(1, 2) == 3` 判失败。模型看到了这个测试输出并另交了一份源码。这不是模型自己先做对任务、再被独立测试打回。
+- 混合检索是三条固定短文上的冒烟：BM25 加 `config/retrieval/fixture.json` 里已测量的向量，再 RRF。`chunk-apple` 排在第一。这不是检索质量基准，也不是规格里的完整研究演示（导入真实中英资料，按来源版本和引用位置写比较报告）。
+
+因此 F26 仍是 blocked，`live_ready` 保持 false。规格把 `live_ready` 定义成产品工程加上 F26 通过；F26 没有通过，所以不能勾 live。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
 
 选中的供应商是 DeepSeek。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志。
 
@@ -33,7 +40,7 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 - 编码恢复：第一次要求 `return a - b`，独立测试按 `add(1, 2) == 3` 判失败，然后必须再提交一份不同哈希的 `return a + b`。
 - Linux 隔离：仅当当前是 Linux 且 `docker info` 成功时，用 `python:3.12-alpine` 跑 `--network none --read-only --cap-drop ALL`，确认容器里没有 key、公网连不上。没有 Docker 或镜像拉不下来就记 not_run 和原因，不假装通过。
 
-`status=probed` 才表示这些检查都通过。有 not_run 时退出码是 3（`incomplete`），`live_ready` 仍是 false。F26 继续 blocked，直到新的结果文件交回来。
+`status=probed` 只表示这次探针的检查都通过。它不是规格里的完整 F26，也不是 live V1。有 not_run 时退出码是 3（`incomplete`）。`live_ready` 保持 false。
 
 系统前提：
 

@@ -15,7 +15,7 @@
     "Hermes four-way comparison",
     "CodeGraph product enablement"
   ],
-  "next_action": "F26 stays blocked. The fbb8260 result is recorded but too weak: coding.recovery repeats the repair call's latency and tokens, and hybrid/linux have no ranks, hashes, or container exit code. Rerun uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live_result.json with the DeepSeek env vars and Docker. Do not mark F26 done until that new file is reviewed. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "next_action": "F26 stays blocked. The 4f1ca09 DeepSeek rerun is recorded in reports/f26_live_result.json. Protocol, citation, induced coding repair, and the Docker isolation check passed, but the hybrid step is a 3-passage smoke and the first coding failure was prompted. That does not meet the spec's full research report or OpenHands recovery, so live_ready stays false. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -150,9 +150,9 @@
     "live_ready": false,
     "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"],
     "probe": "reports/f26_live_result.json",
-    "probe_head": "fbb8260",
-    "probe_status": "probed_weak",
-    "reason": "fbb8260 的探针退出码 0，但结果没有第一次提交哈希、检索排名和容器退出码。恢复检查只重复了修复那一次调用的延迟和 token。证据不够，F26 继续 blocked，live_ready 保持 false。需要用加强后的探针重跑。"
+    "probe_head": "4f1ca09",
+    "probe_status": "probed",
+    "reason": "4f1ca09 的探针退出码 0：协议、引用、诱导后的编码修复和 Docker 隔离都有记录。第一次失败是提示要求 a - b，不是模型先做对再被打回。混合检索是三条短文冒烟，不是完整研究验收。所以 F26 继续 blocked，live_ready 保持 false。"
   },
   "f27": {
     "status": "done",
