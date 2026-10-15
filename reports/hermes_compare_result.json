@@ -1,0 +1,298 @@
+{
+  "status": "probed",
+  "comparative_evidence": "not_run",
+  "superior": null,
+  "reason": "公开开发切片每组最多一条，费用未知时不删行。这次不能宣布领先。",
+  "scripted_substitute": false,
+  "caps": {
+    "max_calls": 8,
+    "max_total_tokens": 8000,
+    "max_output_tokens": 128,
+    "wall_seconds": 45,
+    "spend_cap_usd": 1
+  },
+  "model_alias": "deepseek-chat",
+  "model_base": "https://api.deepseek.com/v1",
+  "dev": {
+    "count": 28,
+    "sha256": "08f072da437ec857bfbebd3938ca7e974bcb45388e1053eac4bf95a7d8ca50b4",
+    "split": "public_development",
+    "executed_case_id": "DEV-COMPARE-SUM",
+    "cases_sent_to_model": 1,
+    "dev_file_cases_sent": false
+  },
+  "holdout": {
+    "status": "not_run",
+    "reason": "holdout_not_supplied"
+  },
+  "unmatched": [
+    "Hermes 用钉住的 CLI 单次 chat --oneshot，AETHER 这侧是同一网关的一次 chat completion，不是 Temporal 任务。",
+    "两边都不读 holdout。公开开发集只记录哈希，不把 28 条规格说明发给模型。",
+    "四组用户题相同。learned 在题目前加上同一段冻结笔记。Hermes learned 还把这段笔记写成 HERMES_HOME/memories/MEMORY.md，并且不传 --ignore-rules，让 CLI 把冻结记忆放进系统提示。AETHER 没有那套记忆目录。",
+    "Hermes 子进程只拿允许名单里的环境变量。HOME 和 HERMES_HOME 都指向隔离目录。--toolsets bot_room 在钉住的 v0.22.1 里是空工具集，平台工具列表也是空的，终端和文件工具不进这次调用。",
+    "四组共用同一墙钟上限。请求里的 stream 和 stream_options 原样转发；上游返回 SSE 时网关按 SSE 回给 Hermes。",
+    "Hermes 还会单独请求一次会话标题，那次是非流式补全，和正式回答一起计入 8 次上限。AETHER 这侧没有这步。"
+  ],
+  "hermes_identity": {
+    "status": "verified",
+    "matches": true,
+    "commit": "297552a9d646119871391d202509822cd86330df",
+    "expected_commit": "297552a9d646119871391d202509822cd86330df",
+    "version": "0.22.1",
+    "version_line": "Hermes Agent v0.22.1 (2026.9.24) · stable · local 297552a9d646",
+    "path": "/workspace/aether/.hermes/.venv/bin/hermes"
+  },
+  "groups": {
+    "hermes_cold": {
+      "status": "ran",
+      "learned": false,
+      "prompt_sha256": "5e0fb6207b00778a02ec04eb3331d35cb2b565095f4081c6eb2e1f2e8903ce5e",
+      "response_sha256": "e73518819e04a8d6cb3934c8fd0ff7647cfc62787c790d3d2ea3abdd735a1842",
+      "response_excerpt": "{\"answer\": 3}\n",
+      "success": true,
+      "answer": 3,
+      "abstained": false,
+      "false_completion": false,
+      "cost_status": "unknown",
+      "cost_micro_usd": null,
+      "call_ids": [
+        "call-1",
+        "call-2"
+      ]
+    },
+    "hermes_learned": {
+      "status": "ran",
+      "learned": true,
+      "prompt_sha256": "a2951cfbc4cf1eefc90733cb5d676c1322aac0df40bf860b6f16b8042ea9ac85",
+      "response_sha256": "e73518819e04a8d6cb3934c8fd0ff7647cfc62787c790d3d2ea3abdd735a1842",
+      "response_excerpt": "{\"answer\": 3}\n",
+      "success": true,
+      "answer": 3,
+      "abstained": false,
+      "false_completion": false,
+      "cost_status": "unknown",
+      "cost_micro_usd": null,
+      "call_ids": [
+        "call-3",
+        "call-4"
+      ]
+    },
+    "aether_cold": {
+      "status": "ran",
+      "learned": false,
+      "prompt_sha256": "5e0fb6207b00778a02ec04eb3331d35cb2b565095f4081c6eb2e1f2e8903ce5e",
+      "response_sha256": "f0922a74d9e68aef4dc338c507f14ef96cb064630125c366685ae961581b454b",
+      "response_excerpt": "{\"answer\": 3}",
+      "success": true,
+      "answer": 3,
+      "abstained": false,
+      "false_completion": false,
+      "cost_status": "unknown",
+      "cost_micro_usd": null,
+      "call_ids": [
+        "call-5"
+      ]
+    },
+    "aether_learned": {
+      "status": "ran",
+      "learned": true,
+      "prompt_sha256": "a2951cfbc4cf1eefc90733cb5d676c1322aac0df40bf860b6f16b8042ea9ac85",
+      "response_sha256": "149e351abfbb6da8135fe5fc17576f1ee2496f272adfe61202f925d689c803ec",
+      "response_excerpt": "{\"answer\":3}",
+      "success": true,
+      "answer": 3,
+      "abstained": false,
+      "false_completion": false,
+      "cost_status": "unknown",
+      "cost_micro_usd": null,
+      "call_ids": [
+        "call-6"
+      ]
+    }
+  },
+  "calls": 6,
+  "calls_detail": [
+    {
+      "upstream_id": "91b59118-2028-4d04-ae86-3f35affd030e",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1757,
+      "request_sha256": "89af5c674a66e64a4a98493bb4a0c31b9f1cc06f86e8d2d129da9a6ddd475942",
+      "completion_sha256": "f0922a74d9e68aef4dc338c507f14ef96cb064630125c366685ae961581b454b",
+      "prompt_tokens": 749,
+      "completion_tokens": 6,
+      "total_tokens": 755,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "source": "gateway",
+      "held_tokens": 755,
+      "id": "call-1",
+      "group": "hermes_cold",
+      "prompt_sha256": "5e0fb6207b00778a02ec04eb3331d35cb2b565095f4081c6eb2e1f2e8903ce5e"
+    },
+    {
+      "upstream_id": "0cbb5de1-3523-49e2-b0ba-7225bbcc0d86",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1713,
+      "request_sha256": "19d9ffac7b5c156b615c7bd6e9631bcbbcbd15000b7500dbca1154745c082f72",
+      "completion_sha256": "18df53a9cfc1b6da9fb05a22fc69873c5e5a783b8051ea75aa46de48bc72d694",
+      "prompt_tokens": 256,
+      "completion_tokens": 12,
+      "total_tokens": 268,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort",
+        "response_format"
+      ],
+      "source": "gateway",
+      "held_tokens": 268,
+      "id": "call-2",
+      "group": "hermes_cold",
+      "prompt_sha256": "5e0fb6207b00778a02ec04eb3331d35cb2b565095f4081c6eb2e1f2e8903ce5e"
+    },
+    {
+      "upstream_id": "6ee06f35-33d4-438b-951e-ddb5f88cdc0f",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1480,
+      "request_sha256": "f28f1cf65618ec8406ee57c1e537e099bcc13fe08ed093029e1deefb7651ba1b",
+      "completion_sha256": "f0922a74d9e68aef4dc338c507f14ef96cb064630125c366685ae961581b454b",
+      "prompt_tokens": 830,
+      "completion_tokens": 6,
+      "total_tokens": 836,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "source": "gateway",
+      "held_tokens": 836,
+      "id": "call-3",
+      "group": "hermes_learned",
+      "prompt_sha256": "a2951cfbc4cf1eefc90733cb5d676c1322aac0df40bf860b6f16b8042ea9ac85"
+    },
+    {
+      "upstream_id": "a2ce085f-70d4-43b5-90de-d7d7da83bdea",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1395,
+      "request_sha256": "63296ce53a5b30b6f2f72f1e628ffb1230539a5a2e801d026e66b74ede9b2f2a",
+      "completion_sha256": "0b01b86b2eac85dd3d63b2b5550b53431e2f982b829b5bac05853f8a5a15e844",
+      "prompt_tokens": 274,
+      "completion_tokens": 15,
+      "total_tokens": 289,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort",
+        "response_format"
+      ],
+      "source": "gateway",
+      "held_tokens": 289,
+      "id": "call-4",
+      "group": "hermes_learned",
+      "prompt_sha256": "a2951cfbc4cf1eefc90733cb5d676c1322aac0df40bf860b6f16b8042ea9ac85"
+    },
+    {
+      "upstream_id": "b40ddf94-7aeb-400a-b57d-703065c02e6d",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1206,
+      "request_sha256": "4660c0835699cc65ea85f9854af631afc229e47ef21e7204bf2359508c31b78f",
+      "completion_sha256": "f0922a74d9e68aef4dc338c507f14ef96cb064630125c366685ae961581b454b",
+      "prompt_tokens": 27,
+      "completion_tokens": 6,
+      "total_tokens": 33,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [],
+      "source": "gateway",
+      "held_tokens": 33,
+      "id": "call-5",
+      "group": "aether_cold",
+      "prompt_sha256": "5e0fb6207b00778a02ec04eb3331d35cb2b565095f4081c6eb2e1f2e8903ce5e"
+    },
+    {
+      "upstream_id": "14c97add-c01f-4732-ac34-556c1cff0b10",
+      "http_status": 200,
+      "requested_model": "deepseek-chat",
+      "model": "deepseek-flash",
+      "latency_ms": 1409,
+      "request_sha256": "2c22daaff2cbdc886a6c32ec5264403a4da342cf91e4e5116e8c3ab59505811f",
+      "completion_sha256": "149e351abfbb6da8135fe5fc17576f1ee2496f272adfe61202f925d689c803ec",
+      "prompt_tokens": 45,
+      "completion_tokens": 5,
+      "total_tokens": 50,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [],
+      "source": "gateway",
+      "held_tokens": 50,
+      "id": "call-6",
+      "group": "aether_learned",
+      "prompt_sha256": "a2951cfbc4cf1eefc90733cb5d676c1322aac0df40bf860b6f16b8042ea9ac85"
+    }
+  ],
+  "summary": {
+    "groups": {
+      "hermes_cold": {
+        "n": 1,
+        "successes": 1,
+        "unknown_cost_count": 1,
+        "known_cost_micro_usd": [],
+        "cost_mean_micro_usd": null,
+        "wilson95": [
+          0.20654329147389294,
+          1.0
+        ]
+      },
+      "hermes_learned": {
+        "n": 1,
+        "successes": 1,
+        "unknown_cost_count": 1,
+        "known_cost_micro_usd": [],
+        "cost_mean_micro_usd": null,
+        "wilson95": [
+          0.20654329147389294,
+          1.0
+        ]
+      },
+      "aether_cold": {
+        "n": 1,
+        "successes": 1,
+        "unknown_cost_count": 1,
+        "known_cost_micro_usd": [],
+        "cost_mean_micro_usd": null,
+        "wilson95": [
+          0.20654329147389294,
+          1.0
+        ]
+      },
+      "aether_learned": {
+        "n": 1,
+        "successes": 1,
+        "unknown_cost_count": 1,
+        "known_cost_micro_usd": [],
+        "cost_mean_micro_usd": null,
+        "wilson95": [
+          0.20654329147389294,
+          1.0
+        ]
+      }
+    },
+    "superior": null,
+    "unknown_costs_dropped": false,
+    "reason": "公开开发切片每组最多一条，费用未知时不删行。这次不能宣布领先。"
+  },
+  "error": null
+}

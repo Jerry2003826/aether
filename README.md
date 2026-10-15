@@ -210,7 +210,7 @@ uv run --locked --no-build python scripts/run_codegraph_product.py --out reports
 
 该命令需要本机 Docker，以及能 `npm pack` 到 registry.npmjs.org 的网络。图谱建议不能改可信套件。
 
-Hermes 四组对照仍是 `not_run`，`comparative_evidence` 也是 `not_run`。F24 已安装并核对 Hermes CLI v0.22.1，没有领先结论。F25 的漏洞库仍是 `offline_not_run`。交接记录在 [`reports/HANDOFF.md`](reports/HANDOFF.md)。
+Hermes 四组在 head `fcceba5` 上用 live key 探测过一次，原样结果在 [`reports/hermes_compare_result.json`](reports/hermes_compare_result.json)。每组 n=1，都答对，Wilson 95% 区间约 0.21–1.0，不足以判断领先。`comparative_evidence` 仍是 `not_run`，`superior` 仍是 null，费用 unknown。请求别名是 `deepseek-chat`，上游返回的 model 是 `deepseek-flash`。F25 的漏洞库仍是 `offline_not_run`。交接记录在 [`reports/HANDOFF.md`](reports/HANDOFF.md)。
 
 ## 文档
 

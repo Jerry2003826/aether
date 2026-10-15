@@ -1,10 +1,7 @@
-# 审计一轮修复
+# Hermes 四组探测已记录，还不能判断领先
 
-基线 `b570f9197c650212a693f34a18d3729a04772f0d`。修 D01–D04 和 C01，不改 STATUS，不放宽已有测试。
+监督者在 head `fcceba5` 上用 live key 跑了 `scripts/run_hermes_compare.py`。原样结果在 `reports/hermes_compare_result.json`。四组各 1 条，都答对，6 次计量调用。每组 n=1，Wilson 95% 区间约 0.21–1.0。`comparative_evidence` 保持 not_run，`superior` 保持 null，费用 unknown。请求别名 `deepseek-chat`，上游返回的 model 是 `deepseek-flash`。
 
-- D01：上传指纹对原始字节做 SHA-256。非法 UTF-8 文本仍由媒体检查返回 422。
-- D02/D03：数据库提交是产物日志的权威。尝试 id 和规范 id 分开。未知结果对账，回滚和 tombstone 不重新公开。
-- D04：归档先解到临时目录，校验后改名发布。完成标记在 `snapshot-meta/`。
-- C01：`python -m aether_worker` 轮询现有 outbox，任务命令进 Temporal，其他命令走已有应用函数。
+上限 8 次调用、8000 token、单次输出 128、四组 45 秒墙钟。子进程环境是允许名单，learned 读取 `memories/MEMORY.md`，工具集是空的 `bot_room`，网关保留 SSE。
 
-回归：`tests/integration/test_audit_artifact_regressions.py`、`tests/integration/test_audit_artifact_durability.py`、`tests/integration/test_worker_process.py`。
+审计一轮的 D01–D04 和 C01 已在 main（`9d22bb8`）上。记录见 `reports/audits/gpt_round1/REPAIR_RESULT.md`。
