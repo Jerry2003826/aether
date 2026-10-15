@@ -57,4 +57,5 @@ P1 覆盖：
 - F19 done。PR #1 CI run `38685299953`：unit `34 passed in 6.97s`，integration `114 passed, 1 warning in 67.18s`。SonarCloud quality gate OK。探索默认关闭。不称协同过滤。对照表 `reports/f19_criteria.md`。
 - F14、F17、F20 done。PR #1 CI run `38686196972`：unit `40 passed in 10.06s`，integration `115 passed, 1 warning in 69.16s`。SonarCloud quality gate OK。评分结果只认父进程管道。MCP 注解不放宽本地风险和审批。技能包按需加载，未批准脚本不执行。`codegraph_enabled` 仍是 not_run。
 - F21 done。PR #1 CI run `38686730319`：unit `40 passed in 7.73s`，integration `118 passed, 1 warning in 75.07s`。SonarCloud quality gate OK。对照表 `reports/f21_criteria.md`。
-- 下一步：F22 控制台和其余 API。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。
+- F20 重新打开为 in_progress。密钥按整段 token 替换。脚本目录整树哈希，核对到的字节复制进容器，`python -I`，环境只有白名单。候选路径先归一化。本地：`uv run pytest -q tests/unit/test_skills.py tests/integration/test_skill_sandbox.py` 为 8 passed。还没标 done。
+- 下一步：F21 回滚原子性，然后等 PR CI 和 Sonar。live 模型、Hermes、CodeGraph 产品启用仍是 not_run。

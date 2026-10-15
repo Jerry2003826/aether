@@ -448,10 +448,11 @@ tickets:
   - 元数据/正文/资源按需加载，未审批脚本不执行
   - source trace脱敏且仅train/dev，候选不读取holdout
   - 候选不能请求自动升权或改可信控制代码
-  status: done
+  status: in_progress
   evidence:
   - services/worker/aether_worker/skills.py
   - tests/unit/test_skills.py
+  - tests/integration/test_skill_sandbox.py
   - reports/f20_criteria.md
 - id: F21
   stage: G5
