@@ -84,5 +84,9 @@ BEGIN
     EXECUTE 'GRANT SELECT ON resource_heads TO aether_api';
     EXECUTE 'GRANT SELECT, INSERT, UPDATE ON resource_heads TO aether_worker';
   END IF;
+  IF to_regclass('public.task_artifacts') IS NOT NULL THEN
+    EXECUTE 'GRANT SELECT, INSERT, UPDATE ON task_artifacts TO aether_worker';
+    EXECUTE 'GRANT SELECT ON task_artifacts TO aether_api, aether_verifier';
+  END IF;
 END;
 $$;

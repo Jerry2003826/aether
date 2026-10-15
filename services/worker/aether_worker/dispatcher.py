@@ -47,7 +47,7 @@ def _claim(database: Database, limit: int) -> list[dict[str, Any]]:
                 FROM claimed
                 WHERE outbox.project_id = claimed.project_id AND outbox.id = claimed.id
                 RETURNING outbox.project_id::text AS project_id, outbox.id::text AS id,
-                          outbox.task_id::text AS task_id, outbox.command_key, outbox.payload
+                          outbox.task_id::text AS task_id, outbox.command_key, outbox.kind, outbox.payload
                 """
             ),
             {"limit": limit},
@@ -71,7 +71,7 @@ def _mark(database: Database, project_id: str, command_id: str, status: str) -> 
         )
 
 
-async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: str, task_id: str, command_id: str, project_id: str, task_queue: str, intake_pause_seconds: float = 0) -> None:
+async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: str, task_id: str, command_id: str, project_id: str, task_queue: str, intake_pause_seconds: float = 0, kind: str = "start") -> None:
     argument: str | dict[str, object] = task_id
     if intake_pause_seconds > 0 and getattr(workflow, "accepts_intake_pause", False):
         argument = {"task_id": task_id, "intake_pause_seconds": intake_pause_seconds}
@@ -79,7 +79,7 @@ async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: 
         handle = await client.start_workflow(workflow.run, argument, id=workflow_id, task_queue=task_queue)
     except WorkflowAlreadyStartedError:
         handle = client.get_workflow_handle(workflow_id)
-    await handle.signal(workflow.command, {"command_id": command_id, "project_id": project_id})
+    await handle.signal(workflow.command, {"command_id": command_id, "project_id": project_id, "kind": kind})
 
 
 async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20, workflow: type[TaskWorkflow] = TaskWorkflow, intake_pause_seconds: float = 0) -> dict[str, list[str]]:
@@ -106,6 +106,7 @@ async def deliver_pending(database: Database, client: Client, *, task_queue: str
                 project_id=str(row["project_id"]),
                 task_queue=task_queue,
                 intake_pause_seconds=intake_pause_seconds,
+                kind=str(row["kind"]),
             )
         except Exception:
             failed.append(command_key)

@@ -146,6 +146,22 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
                     text("UPDATE tasks SET resume_state = 'cancel_requested', version = version + 1 WHERE id = :id AND status <> 'CANCELLED'"),
                     {"id": task_id},
                 )
+            elif kind == "pause":
+                conn.execute(
+                    text(
+                        "UPDATE tasks SET resume_state = 'pause_requested', version = version + 1 "
+                        "WHERE id = :id AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')"
+                    ),
+                    {"id": task_id},
+                )
+            elif kind == "resume":
+                conn.execute(
+                    text(
+                        "UPDATE tasks SET resume_state = NULL, version = version + 1 "
+                        "WHERE id = :id AND (status = 'PAUSED' OR resume_state = 'pause_requested')"
+                    ),
+                    {"id": task_id},
+                )
             _append_event(conn, project_id=project_id, task_id=task_id, event_type="command.accepted", payload={"command_id": command_id, "kind": kind})
             accepted = _accepted(request, command_id, task_id)
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
@@ -378,7 +394,17 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         {"project_id": project_id, "task_id": task_id},
     ).scalar_one()
     artifacts = conn.execute(
-        text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND task_id = :task_id AND deleted_at IS NULL ORDER BY created_at"),
+        text(
+            "SELECT id::text FROM ("
+            "SELECT a.id, a.created_at FROM artifacts AS a "
+            "WHERE a.project_id = :project_id AND a.task_id = :task_id AND a.deleted_at IS NULL "
+            "UNION "
+            "SELECT a.id, a.created_at FROM task_artifacts AS link "
+            "JOIN artifacts AS a ON a.project_id = link.project_id AND a.id = link.artifact_id "
+            "WHERE link.project_id = :project_id AND link.task_id = :task_id "
+            "AND link.deleted_at IS NULL AND a.deleted_at IS NULL"
+            ") AS visible ORDER BY created_at, id"
+        ),
         {"project_id": project_id, "task_id": task_id},
     ).scalars().all()
     verifications = conn.execute(
