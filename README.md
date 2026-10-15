@@ -210,7 +210,7 @@ export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
 uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
 ```
 
-`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。上传接口返回 `artifact_id`。失败时结果里有 `step`、`error_type` 和去掉密钥后的 `error_message`。
+`--out` 只接受 `reports/live_task_check.json`。退出码和 F26 一样：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。`probed` 只表示这次调用跑完，不表示 `live_ready`。上传接口返回 `artifact_id`。失败时结果里有 `step`、`error_type` 和去掉密钥后的 `error_message`。监督者在 head `7eb911b` 上用真实 key 跑过一次：退出码 0，`status=probed`，任务 `SUCCEEDED`，1 次 `research.call`，1 次验证，`cost_status=unknown`。原样结果在 [`reports/live_task_check.json`](reports/live_task_check.json)，文件 sha256 是 `085b8b3224c305fd5ad0fece2069e939237d7ed04a8fc262862d61943fb8fc91`。结果里的 `live_ready` 是 `false`。这次检查不改交付矩阵里的 `live_ready`。
 
 ## 当前状态
 
@@ -226,7 +226,7 @@ F00–F27 的 `status` 都是 `done`。`readiness`：
 
 `f27` 对象里仍留着该任务关闭时写入的 `live_ready: false` 和 `codegraph_enabled: false`。当前结论看上表的 `readiness`。
 
-F26 最近一次完整验收在 head `d694f89`，退出码 0，`status=probed`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁和 Linux 隔离都通过。3 次调用，合计 1303 token。比较报告 sha256 是 `710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe`，completion 484 token。`semantic_support` 仍是 `not_judged`：引用写齐不等于已经判断比较内容成立。`cost_status` 仍是 `unknown`。原样结果在 [`reports/f26_acceptance_result.json`](reports/f26_acceptance_result.json)，文件 sha256 是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。文件里的 `live_ready` 仍是 `false`，脚本不自证；交付矩阵按产品工程加 F26 记为 `passed`。更早的 `cb22fbc` 那次也是退出码 0，比较报告当时是 488 token。同一头上的 `scripts/run_live_task_check.py` 在创建任务之前失败：它读取上传响应的 `id`，接口返回的是 `artifact_id`，模型没有被调用。脚本现在读取 `artifact_id`。这次没有在本机用真实 key 重跑该检查。
+F26 最近一次完整验收在 head `d694f89`，退出码 0，`status=probed`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁和 Linux 隔离都通过。3 次调用，合计 1303 token。比较报告 sha256 是 `710c3053d6be9d52c18986aa3e13adfcd9d005b8ebe664ef69b3a183221b44fe`，completion 484 token。`semantic_support` 仍是 `not_judged`：引用写齐不等于已经判断比较内容成立。`cost_status` 仍是 `unknown`。原样结果在 [`reports/f26_acceptance_result.json`](reports/f26_acceptance_result.json)，文件 sha256 是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。文件里的 `live_ready` 仍是 `false`，脚本不自证；交付矩阵按产品工程加 F26 记为 `passed`。更早的 `cb22fbc` 那次也是退出码 0，比较报告当时是 488 token。同一头上的 `scripts/run_live_task_check.py` 在创建任务之前失败：它读取上传响应的 `id`，接口返回的是 `artifact_id`，模型没有被调用。脚本现在读取 `artifact_id`。修好之后，监督者在 head `7eb911b` 上用真实 key 跑通一次研究任务，见上面的现场检查记录。费用仍是 unknown。这次成功不改 `live_ready`。
 
 CodeGraph 已启用。所有者打开的是已安装锁 [`config/codegraph.lock.json`](config/codegraph.lock.json)（`product_enabled: true`，CLI `@colbymchenry/codegraph@1.6.2`）。[`config/codegraph.example.yaml`](config/codegraph.example.yaml) 和 `config/feature_matrix.yaml` 仍然关闭，新检出不会自动打开。证据在 [`reports/f15_product_result.json`](reports/f15_product_result.json)：`status` 为 `passed`，索引 162 个文件、2674 个节点、7081 条边，库 8892416 字节，冷索引约 2.00 秒，状态 `complete`。调用关系与 AST 一致，改快照后查询返回 `stale_snapshot`，容器带 `--network none`，遥测关闭。复现命令见 [`reports/f15_criteria.md`](reports/f15_criteria.md)：
 
