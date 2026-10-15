@@ -11,7 +11,7 @@ head `4f1ca09` 的重跑结果已原样保存，退出码 0。Docker 在场，ke
 - 第一次编码失败是探针自己诱导的。提示要求模型提交 `return a - b`，独立测试再按 `add(1, 2) == 3` 判失败。模型看到了这个测试输出并另交了一份源码。这不是模型自己先做对任务、再被独立测试打回。
 - 混合检索是三条固定短文上的冒烟：BM25 加 `config/retrieval/fixture.json` 里已测量的向量，再 RRF。`chunk-apple` 排在第一。这不是检索质量基准，也不是规格里的完整研究演示（导入真实中英资料，按来源版本和引用位置写比较报告）。
 
-因此已经跑过的短探针还不是完整 F26。Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+因此已经跑过的短探针还不是完整 F26。写这段时 Hermes 四组对照和 CodeGraph 产品启用都还没跑。当前结论以 `STATUS.json` 为准：CodeGraph 已启用；Hermes 在 head `fcceba5` 上有一次每组 n=1 的 live 探测，`comparative_evidence` 仍是 not_run。
 
 监督者机器需要：
 
@@ -50,7 +50,7 @@ head `dac5c49` 的完整验收退出码是 1，原样留在 `reports/f26_accepta
 - `semantic_support` 是 `not_judged`。引用在，不等于已经判断比较内容成立。
 - `cost_status` 是 `unknown`。供应商没有返回费用，不估一个账单。产物哈希有记录。
 - 稠密通道是这三条笔记上的精确余弦，不是 pgvector 基准。reranker 没有用。版本记在验收结果里，不是 Postgres 的 `source_versions` 行。
-- Hermes 四组对照和 CodeGraph 产品启用仍是 not_run。
+- 写这段时 Hermes 四组对照和 CodeGraph 产品启用都还没跑。当前 CodeGraph 已启用。Hermes 后来在 head `fcceba5` 上做了一次每组 n=1 的 live 探测，`comparative_evidence` 仍是 not_run，见 `reports/hermes_compare_result.json`。
 
 结果文件里的 `live_ready` 仍是 false。那是脚本不自证，不是这次交付结论。
 

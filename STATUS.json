@@ -12,9 +12,9 @@
     "comparative_evidence": "not_run"
   },
   "not_run": [
-    "Hermes four-way comparison"
+    "comparative_evidence"
   ],
-  "next_action": "comparative_evidence stays not_run. On the supervisor machine install pinned Hermes with scripts/install_hermes.py, then uv run --locked --no-build python scripts/run_hermes_compare.py --out reports/hermes_compare_result.json. Env: AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1, AETHER_LIVE_MODEL_ALIAS=deepseek-chat, AETHER_LIVE_MODEL_KEY. The script checks the pinned Hermes commit and version before spending, isolates HOME/HERMES_HOME, disables host toolsets, preserves stream, and meters calls that fail. Cap is 8 calls, 8000 tokens, 128 output tokens, 45s wall clock. Do not mark a winner until that file is reviewed. semantic_support stays not_judged.",
+  "next_action": "A four-way live probe is recorded in reports/hermes_compare_result.json on head fcceba5. Each group n=1, Wilson 95% about 0.21-1.0, so it does not support a winner. comparative_evidence stays not_run, superior stays null, cost_status stays unknown. Requested alias deepseek-chat; provider returned deepseek-flash. semantic_support stays not_judged.",
   "last_executed_commands": [
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
@@ -142,9 +142,20 @@
   "f24": {
     "status": "done",
     "ci_run": "38698706734",
-    "live": "not_run",
+    "live": "probed",
     "compare_script": "scripts/run_hermes_compare.py",
-    "compare_status": "not_run",
+    "compare_status": "probed",
+    "compare_result": "reports/hermes_compare_result.json",
+    "compare_head": "fcceba5",
+    "compare_sha256": "92149c0dd84fd60829d8a64e9bf59fb83ca52bbe3e102a25aa3399280fe7d3b2",
+    "calls": 6,
+    "per_group_n": 1,
+    "wilson95": [0.20654329147389294, 1.0],
+    "requested_model": "deepseek-chat",
+    "returned_model": "deepseek-flash",
+    "cost_status": "unknown",
+    "superior": null,
+    "comparative_evidence": "not_run",
     "cli": "hermes-agent v0.22.1 commit 297552a9d646119871391d202509822cd86330df"
   },
   "f25": {

@@ -19,9 +19,9 @@
 | 对照前核对钉住的 Hermes 提交和版本；对不上就不调用模型 | `tests/unit/test_hermes_compare.py::test_identity_mismatch_does_not_spend` |
 | CI 里的真实 Hermes 把冻结记忆送进请求，并且走 SSE | `tests/integration/test_hermes_compare_protocol.py::test_pinned_hermes_identity_and_local_protocol` |
 
-监督者还没跑这次对照，所以 `comparative_evidence` 保持 `not_run`。不要提前写 `reports/hermes_compare_result.json`。
+监督者已在 head `fcceba5` 用 live key 跑过一次四组探测。原样结果在 `reports/hermes_compare_result.json`，sha256 `92149c0dd84fd60829d8a64e9bf59fb83ca52bbe3e102a25aa3399280fe7d3b2`。四组各 1 条 `DEV-COMPARE-SUM`，都答对，共 6 次计量调用。每组 n=1，Wilson 95% 区间是 0.20654329147389294–1.0（约 0.21–1.0），不足以判断领先。`comparative_evidence` 仍是 `not_run`，`superior` 仍是 null，费用全部 `unknown`。请求的 model 是 `deepseek-chat`，上游返回的 model 是 `deepseek-flash`。`hermes_identity` 是 verified，提交 `297552a9d646119871391d202509822cd86330df`，版本 v0.22.1。
 
-先装钉住的 Hermes，再跑对照。密钥只留在这台机器上。
+下面仍是复现命令。密钥只留在这台机器上。
 
 ```sh
 uv run --locked --no-build python scripts/install_hermes.py
