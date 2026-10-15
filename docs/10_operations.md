@@ -8,6 +8,12 @@
 
 **live local**：owner配置模型key和price table后启用真实推理；编码使用隔离runner，研究来源通过白名单。默认不开公网、不自动收费、不发送真实外部消息。
 
+Live 探针只认这三个环境变量，缺任何一个就记 `blocked`，不用脚本模型代替：
+
+- `AETHER_LIVE_MODEL_KEY`：供应商 API key。
+- `AETHER_LIVE_MODEL_BASE`：OpenAI 兼容 API 根地址，例如 `https://api.example/v1`。
+- `AETHER_LIVE_MODEL_ALIAS`：请求里的模型名。
+
 **release**：镜像与依赖均固定、启用认证/TLS、runtime用户非superuser、完成备份恢复/网络隔离/真实模型测试。个人部署，不声明公开多租户安全。
 
 ## 2. 基础技术版本策略
