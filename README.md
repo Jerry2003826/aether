@@ -109,6 +109,31 @@ API 默认监听 `127.0.0.1:8000`：
 uv run --locked --no-build python -m aether_api.main
 ```
 
+Worker 是同一个 Python 源码里的另一个进程，不是第二套调度器。它连接已有的 Temporal，只把任务命令投进 `DurableTaskWorkflow`，其余命令按种类交给已经存在的应用函数：
+
+| `command_outbox.kind` | 处理 |
+|---|---|
+| `start`、`approve_goal`、`pause`、`resume`、`cancel` | `aether_dispatcher` 投递到 Temporal。`start` 由 worker 活动写入任务产物，再用 `aether_verifier` 记一条独立验证 |
+| `source.*`、`ingestion.create`、`feedback.record`、`skill.import`、`skill.deploy`、`watch.*`、`connector.register`、`coding.create` | `aether_worker` 调用 `apply_console_commands` |
+| `evaluation.create`、`skill.evaluate` | `aether_verifier` 调用 `apply_verifier_commands` |
+| `memory.*` | `aether_worker` 调用 `apply_memory_commands` |
+
+`deliver_pending` 不会领取控制台、记忆或验证命令。停掉进程再启动时，已经 `DELIVERED` 的命令不会再执行一次；Temporal 按 `command_id` 去重，产物和验证按任务幂等。
+
+把 `ensure_database` 返回的三个角色 URL 设进环境。产物目录必须和 API 的 `AETHER_ARTIFACT_ROOT` 是同一个路径。
+
+```sh
+export AETHER_WORKER_DATABASE_URL='postgresql://aether_worker:…@127.0.0.1:5432/aether'
+export AETHER_VERIFIER_DATABASE_URL='postgresql://aether_verifier:…@127.0.0.1:5432/aether'
+export AETHER_DISPATCHER_DATABASE_URL='postgresql://aether_dispatcher:…@127.0.0.1:5432/aether'
+export AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
+export AETHER_ARTIFACT_ROOT=data/artifacts
+export AETHER_TASK_QUEUE=aether-tasks
+uv run --locked --no-build python -m aether_worker
+```
+
+进程打出 `aether-worker-ready` 后开始轮询。`SIGTERM` 或 `SIGINT` 让当前这一轮结束后退出。队列默认 `aether-tasks`，测试可以改 `AETHER_TASK_QUEUE`。
+
 引导密钥由 `issue_bootstrap_secret` 写入 `secrets/bootstrap.json`（文件里是哈希）。终端只显示一次明文。随后向 loopback 的 `POST /v1/auth/bootstrap` 提交 `bootstrap_secret`、`display_name` 和至少 12 个字符的 `passphrase`。
 
 ```sh

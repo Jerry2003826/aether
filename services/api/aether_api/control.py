@@ -70,7 +70,7 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=payload_hash)
             if existing is not None:
                 return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
-            created = insert_start_command(conn, project_id=project_id, goal=goal.strip(), command_key=command_id)
+            created = insert_start_command(conn, project_id=project_id, goal=goal.strip(), command_key=command_id, owner_id=owner)
             _append_event(conn, project_id=project_id, task_id=created["task_id"], event_type="task.accepted", payload={"goal": goal.strip(), "status": "QUEUED"})
             accepted = _accepted(request, command_id, created["task_id"])
             _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
@@ -381,6 +381,14 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND task_id = :task_id AND deleted_at IS NULL ORDER BY created_at"),
         {"project_id": project_id, "task_id": task_id},
     ).scalars().all()
+    verifications = conn.execute(
+        text(
+            "SELECT id::text AS id, criterion_id, verdict, artifact_sha256, contract_sha256, verifier_identity, "
+            "report_artifact_id::text AS report_artifact_id, reason, checked_at "
+            "FROM verification_results WHERE project_id = :project_id AND task_id = :task_id ORDER BY created_at, id"
+        ),
+        {"project_id": project_id, "task_id": task_id},
+    ).mappings().all()
     draft = task["draft_contract"] if isinstance(task["draft_contract"], dict) else {}
     return {
         "id": task["id"],
@@ -394,6 +402,7 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         "budget": budget,
         "unknown_request_count": int(unknown),
         "artifact_ids": [str(item) for item in artifacts],
+        "verification_results": [dict(row) for row in verifications],
     }
 
 
@@ -418,7 +427,21 @@ def _public_task(item: dict[str, Any] | None) -> dict[str, Any]:
             "request_count": int(budget["requests_admitted"]) if budget else 0,
         },
         "artifact_ids": item["artifact_ids"],
-        "verification_results": [],
+        "verification_results": [_verification(row) for row in item["verification_results"]],
+    }
+
+
+def _verification(row: dict[str, Any]) -> dict[str, Any]:
+    evidence = str(row["report_artifact_id"] or row["id"])
+    return {
+        "criterion_id": row["criterion_id"],
+        "verdict": row["verdict"],
+        "artifact_sha256": row["artifact_sha256"],
+        "contract_sha256": row["contract_sha256"],
+        "verifier_identity": row["verifier_identity"],
+        "evidence_ids": [evidence],
+        "reason": row["reason"],
+        "checked_at": _stamp(row["checked_at"]),
     }
 
 
