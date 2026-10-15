@@ -1,0 +1,88 @@
+name: ci
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pack-and-unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: "3.13"
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Resolve control-plane lock
+        run: uv sync --locked --no-build
+      - name: Pack self-check and reference tests
+        run: |
+          uv run --locked --no-build python scripts/verify_freeze.py
+          uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Unit tests
+        run: uv run --locked --no-build pytest -q tests/unit
+      - name: Web typecheck
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.18.2 --activate
+          cd apps/web
+          pnpm install --frozen-lockfile
+          pnpm typecheck
+
+  integration:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: pgvector/pgvector:0.8.7-pg17@sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 30
+      temporal:
+        image: temporalio/temporal:1.9.1@sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e
+        command: server start-dev --ip 0.0.0.0 --port 7233 --headless --log-format json
+        ports:
+          - 7233:7233
+        options: >-
+          --health-cmd "temporal operator cluster health --address 127.0.0.1:7233"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 40
+          --health-start-period 15s
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86
+        with:
+          python-version: "3.13"
+      - name: Resolve control-plane lock
+        run: uv sync --locked --no-build
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: "24"
+      - name: Install web dependencies
+        run: |
+          corepack enable
+          corepack prepare pnpm@10.18.2 --activate
+          cd apps/web
+          pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: uv run --locked --no-build playwright install --with-deps chromium
+      - name: Install pinned Hermes and probe it
+        run: uv run --locked --no-build python scripts/install_hermes.py
+      - name: Integration tests and doctor
+        env:
+          AETHER_REQUIRE_SERVICES: "1"
+          AETHER_ADMIN_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+          AETHER_TEMPORAL_ADDRESS: 127.0.0.1:7233
+        run: |
+          uv run --locked --no-build pytest -q tests/integration
+          uv run --locked --no-build python scripts/doctor.py --require-services

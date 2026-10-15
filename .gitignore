@@ -2,11 +2,16 @@
 .env.*
 !.env.example
 .venv/
+.hermes/
+.hermes-v*.tar.gz
+.cache/
 __pycache__/
 *.pyc
+*.egg-info/
 .pytest_cache/
 node_modules/
 .next/
+*.tsbuildinfo
 *.log
 !reports/reference-tests.log
 !reports/pack-verification.log
@@ -16,3 +21,5 @@ workspaces/
 .coverage
 .codegraph/
 .codegraph-*/
+config/tokenizer/jieba-0.42.1.dict.txt
+config/retrieval/measured.json

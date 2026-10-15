@@ -5,6 +5,7 @@ POST任务在同一DB事务写task、不可变合同版本、command_outbox；�
 用户审批先写可信审批记录/命令；Workflow在安全点接收后通过Activity核对。不要直接用DB的task.status启动/重试工作。task状态由Workflow产生的单调事件投影；UI显示command pending与projection watermark。
 重要事件与相应领域写入在同一DB事务落盘；event_id和(project,task,sequence)唯一。LISTEN/NOTIFY或内存队列仅是唤醒，SSE重连从DB补齐，不能以是否收到推送判断操作是否发生。
 HTTP鉴权/资源ACL是DB权威，任务进度是Temporal权威，外部效果最终由远端证据确认；不要声称存在一个覆盖全部分布式世界的万能事实源。
+`resource_heads` 上的 `FOR UPDATE` 只覆盖派发事务里的版本预检。事务在外部写入之前就提交，锁随之释放，所以它不是跨进程的并发保护，也不能代替之后的 `note_resource_version` 与对账。
 
 ## B. 编码执行器不是主调度器
 OpenHands内部的工具循环可以继续，但必须受任务级token、费用、时间、文件和网络上限约束；不能再创建AETHER根任务/自行委派无界子Agent。首选控制worker持有SDK编排，Agent Server只在隔离workspace执行工具；选中release的实际进程拓扑必须探针确认。若SDK逻辑与工具都在sandbox，使用单用途模型token，不给管理权限。

@@ -22,8 +22,14 @@ tickets:
   - uv/pnpm或等价锁实际解析；不动系统Python
   - 真Postgres和Temporal可连；缺ML/OpenHands不阻塞本任务
   - doctor区分installed/configured/probed，null不是已锁定
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - uv.lock
+  - apps/web/pnpm-lock.yaml
+  - infra/images.lock.json
+  - config/upstream.lock.json
+  - config/models.lock.json
+  - reports/doctor.json
 - id: F01
   stage: G0
   scope: core
@@ -39,8 +45,12 @@ tickets:
   - 四个OpenHands包按兼容release组合导入，确认LLM gateway可配置
   - BGE模型revision/维数/资源验证；缺下载标blocked而非随机向量
   - 非live探针无需购买模型，live结果另列F26；不为兼容迁移整个控制面
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - reports/f01-probe.json
+  - environments/openhands/uv.lock
+  - environments/ml/probe_encode.py
+  - environments/ml/uv.lock
 - id: F02
   stage: G1
   scope: core
@@ -58,8 +68,15 @@ tickets:
   - 实际runtime DB角色测RLS/复合FK，非superuser
   - CSRF/Origin/会话撤销/默认loopback验证
   - 跨project列表/详情/连接池scope隔离通过
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - migrations/versions/0001_initial.py
+  - migrations/sql/0003_grants.sql
+  - packages/storage/aether_storage/bootstrap.py
+  - tests/integration/test_auth.py
+  - tests/integration/test_rls.py
+  - tests/integration/test_migration.py
+  - tests/integration/test_privileges.py
 - id: F03
   stage: G1
   scope: core
@@ -75,8 +92,10 @@ tickets:
   - hash/长度/媒体类型核实，目录由server生成
   - zip-slip/symlink/hardlink/解压限额用例拒绝
   - 落盘而DB未提交等故障可恢复；不挂host repo/home
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/artifacts.py
+  - tests/integration/test_artifacts.py
 - id: F04
   stage: G1
   scope: core
@@ -93,8 +112,11 @@ tickets:
   - 无授权工具/出口拒绝；body不能改变token的project/task
   - provider key不进actor/UI/log；read-only仍要审查数据出口
   - LiteLLM只适配模型；用fake upstream测真实HTTP/token路径而非return固定成功
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/gateway/aether_gateway/model.py
+  - services/gateway/aether_gateway/registry.py
+  - tests/integration/test_gateway.py
 - id: F05
   stage: G1
   scope: core
@@ -110,8 +132,10 @@ tickets:
   - 并发reservation原子限额，重复结算不重复扣款
   - 超时可能计费保持held；unknown价格或usage不算0
   - planner/修复/judge/编码内部调用均覆盖，verification额度受保护
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/budget.py
+  - tests/integration/test_budget.py
 - id: F06
   stage: G1
   scope: core
@@ -128,8 +152,10 @@ tickets:
   - 审批绑定意图/内容hash/资源版本/过期/owner并事务消耗
   - HTTP成功响应丢失时模拟外部副作用不重复
   - 非幂等unknown进入needs_review；取消请求不冒充已停止
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - packages/storage/aether_storage/operations.py
+  - tests/integration/test_operations.py
 - id: F07
   stage: G2
   scope: core
@@ -145,8 +171,13 @@ tickets:
   - task+command事务提交；稳定workflow ID和command去重
   - Workflow无外部I/O；actor不能直接mark_success
   - 32节点长链支持；循环/33节点拒绝；写资源串行、读并行最多2
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/workflows.py
+  - services/worker/aether_worker/dispatcher.py
+  - services/worker/aether_worker/planning.py
+  - tests/unit/test_planning.py
+  - tests/integration/test_workflow.py
 - id: F08
   stage: G2
   scope: core
@@ -162,8 +193,12 @@ tickets:
   - UI连接真实API/DB/Workflow，无固定假成功数据
   - SSE断线按sequence补齐；pending command与投影水位可见
   - 审批操作服务端鉴权，事件/产物接口无跨project泄漏
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/api/aether_api/control.py
+  - apps/web/app/page.tsx
+  - tests/integration/test_control.py
+  - reports/f08_criteria.md
 - id: F09
   stage: G2
   scope: core
@@ -180,8 +215,12 @@ tickets:
   - 真实存储/Temporal/网关/本地工具/独立verifier；仅模型可scripted
   - worker重启、命令重投、审批重放、过期候选验收拒绝
   - 记录调用次数/产物hash和真实测试日志，不只打印state string
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/research.py
+  - services/worker/aether_worker/research_workflow.py
+  - tests/integration/test_kernel.py
+  - reports/f09_criteria.md
 - id: F10
   stage: G3
   scope: core
@@ -197,8 +236,11 @@ tickets:
   - 原文不可变hash及Unicode offset正确；空正文显式失败
   - SSRF实际连接/redirect/DNS约束；parser隔离/资源上限
   - 静态默认，JS仅Playwright受控profile；下载权重/依赖不发生在用户请求中
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/ingest.py
+  - tests/integration/test_ingest.py
+  - reports/f10_criteria.md
 - id: F11
   stage: G3
   scope: core
@@ -214,8 +256,13 @@ tickets:
   - 真实embedding/revision，BM25/dense/RRF/rerank分组对照
   - 授权过滤在检索/重排/LLM上下文前；删除/撤权即时不可见
   - 索引atomic swap与stale标记；中英/emoji/代码符号场景可复现
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/retrieval.py
+  - services/worker/aether_worker/tokenize.py
+  - config/retrieval/measured.json
+  - tests/integration/test_hybrid_retrieval.py
+  - reports/f11_criteria.md
 - id: F12
   stage: G3
   scope: core
@@ -231,8 +278,12 @@ tickets:
   - 事实/来源声称/推断/用户确认分开，冲突不悄悄覆盖
   - 预算化目标+计划+证据+记忆+渐进skill，不回灌全量历史
   - 高敏/跨project数据不能由摘要或CodeGraph绕过出口授权
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/memory.py
+  - services/api/aether_api/memory_routes.py
+  - tests/integration/test_memory.py
+  - reports/f12_criteria.md
 - id: F13
   stage: G4
   scope: core
@@ -251,8 +302,13 @@ tickets:
   - 实际job调用经受限gateway；不暴露provider/admin密钥
   - start幂等且重启attach既有job；不能重复建容器
   - 真实Linux网络/挂载/进程限制探针；平台未测不标支持
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/runner.py
+  - services/worker/aether_worker/namespace_probe.py
+  - reports/f13-platform.json
+  - reports/f13_criteria.md
+  - tests/integration/test_runner.py
 - id: F14
   stage: G4
   scope: core
@@ -268,8 +324,12 @@ tickets:
   - 可信suite/contract/candidate hash绑定；改码后旧绿灯失效
   - actor不能改可信grader结果；空test/skipall/伪造JUnit不直接通过
   - 断worker/断runner/取消三类真实故障演示；live模型演示另列F26
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/verification.py
+  - tests/integration/test_verification.py
+  - apps/web/app/code/page.tsx
+  - reports/f14_criteria.md
 - id: F15
   stage: G4
   scope: selected_optional
@@ -284,8 +344,12 @@ tickets:
   - 固定release/schema/遥测关闭并实测公网阻断
   - snapshot而非host path，改码hash失效、跨project拒绝
   - 取消能清理；fallback明确；成本包含冷索引；不减少trusted suite
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/codegraph_adapter.py
+  - tests/integration/test_codegraph.py
+  - config/codegraph.lock.json
+  - reports/f15_criteria.md
 - id: F16
   stage: G5
   scope: core
@@ -301,8 +365,11 @@ tickets:
   - 旧摘要/embedding任务不能在删除后重新写入已删内容
   - 记忆/向量/BM25/cache/推荐特征联动失效
   - 备份保留与history局限明确，未删除物理副本不能声称全删
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/retention.py
+  - tests/integration/test_retention.py
+  - reports/f16_criteria.md
 - id: F17
   stage: G5
   scope: core
@@ -319,8 +386,12 @@ tickets:
   - stdio argv无shell拼接；用户内容不能安装新server
   - schema漂移隔离，annotations不能自授权限
   - 真正连接fixture MCP，超时/重连/未知结果与secret隔离通过
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/gateway/aether_gateway/mcp_client.py
+  - tests/fixtures/mcp_fixture.py
+  - tests/unit/test_mcp.py
+  - reports/f17_criteria.md
 - id: F18
   stage: G5
   scope: core
@@ -337,8 +408,11 @@ tickets:
   - owner批准来源/频率/预算后才启用
   - 无变更不总结；重复trigger不重复通知
   - 停止watch阻止后续dispatch；默认不发送外部消息
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/watches.py
+  - tests/integration/test_watches.py
+  - reports/f18_criteria.md
 - id: F19
   stage: G5
   scope: core
@@ -354,8 +428,11 @@ tickets:
   - 曝光和反馈有ID，重复事件不重复计入
   - 默认探索off；开启时记录正确候选概率与policy版本
   - 隐藏/删除立即影响候选，清空画像后可重建；不冒称协同过滤
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/recommendations.py
+  - tests/integration/test_recommendations.py
+  - reports/f19_criteria.md
 - id: F20
   stage: G5
   scope: core
@@ -371,8 +448,12 @@ tickets:
   - 元数据/正文/资源按需加载，未审批脚本不执行
   - source trace脱敏且仅train/dev，候选不读取holdout
   - 候选不能请求自动升权或改可信控制代码
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/skills.py
+  - tests/unit/test_skills.py
+  - tests/integration/test_skill_sandbox.py
+  - reports/f20_criteria.md
 - id: F21
   stage: G5
   scope: core
@@ -389,8 +470,11 @@ tickets:
   - grader身份与数据集隔离，actor不能自写分数
   - 差候选拒绝/证据不足不升级；合成控制测试显著标注
   - 仅owner可批准canary；task固定技能版本，回滚原子；不要求必然发现好技能
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/skill_eval.py
+  - tests/integration/test_skill_eval.py
+  - reports/f21_criteria.md
 - id: F22
   stage: G6
   scope: core
@@ -411,8 +495,14 @@ tickets:
   - 真实OpenAPI diff，无占位返回/生产mock
   - 任务/知识/记忆/代码/审批/跟踪/Discover/Skills/成本都走真实API
   - 键盘/错误/加载/断线/中文长文本E2E，原始HTML不直接执行
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/api/aether_api/console_routes.py
+  - services/worker/aether_worker/console_commands.py
+  - apps/web/app/console/page.tsx
+  - tests/integration/test_console_api.py
+  - tests/integration/test_console_browser.py
+  - reports/f22_criteria.md
 - id: F23
   stage: G6
   scope: core
@@ -429,8 +519,12 @@ tickets:
   - 网页/代码注释/MCP/Skill四载体测试任务正常率和实际不安全效果
   - 真实SSRF/网络/身份/审批/预算竞态/导入/删后回写探针
   - 安全失败阻止发布；不把分类器分数当整机边界证明
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/security_regression.py
+  - tests/unit/test_attack_carriers.py
+  - tests/integration/test_security_regression.py
+  - reports/f23_criteria.md
 - id: F24
   stage: G6
   scope: core
@@ -446,8 +540,14 @@ tickets:
   - 基线安装/CLI探针真实执行；缺key标live not_run
   - 相同模型/权限/预算与fresh/frozen learned环境；无法匹配差异显式列出
   - 开发集与最终holdout分离，raw结果/unknown费用/置信区间可重算；无数据不声称领先
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/hermes_baseline.py
+  - scripts/install_hermes.py
+  - config/hermes.lock.json
+  - tests/unit/test_hermes_baseline.py
+  - tests/integration/test_hermes_probe.py
+  - reports/f24_criteria.md
 - id: F25
   stage: G6
   scope: core
@@ -464,8 +564,12 @@ tickets:
   - 使用实际构建产物生成SBOM；漏洞库时效与离线/在线模式可见
   - 固定依赖和完整许可文件；不得用README宽松标签替代依赖审计
   - 恢复DB+artifact后先停止外部dispatch并对账；不down -v删数据
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/supply.py
+  - tests/unit/test_supply_chain.py
+  - tests/integration/test_backup_restore.py
+  - reports/f25_criteria.md
 - id: F26
   stage: G6
   scope: live
@@ -483,8 +587,19 @@ tickets:
   - 真实用户配置model API通过tools/schema/usage协议探针
   - 研究完整hybrid+引用验收；编码独立测试和恢复通过
   - 无API key/Linux资源如实blocked；脚本模型不替代本项
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/live_harness.py
+  - services/worker/aether_worker/f26_acceptance.py
+  - scripts/run_f26_live.py
+  - scripts/run_f26_acceptance.py
+  - environments/openhands/f26_job.py
+  - tests/unit/test_live_harness.py
+  - tests/unit/test_f26_acceptance.py
+  - reports/f26_criteria.md
+  - reports/f26_live_result.json
+  - reports/f26_acceptance_result.json
+  - reports/f26_acceptance_dac5c49.json
 - id: F27
   stage: G6
   scope: core
@@ -500,5 +615,8 @@ tickets:
   - 报告从JUnit/JSON实际记录生成，不手填全绿
   - 工程/live/CodeGraph/研究结论分开，未运行项完整列出
   - 启动不依赖archive/外部记忆/AG-UI；下一步清楚，不宣布未完成live可用
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/acceptance_report.py
+  - tests/unit/test_acceptance_report.py
+  - reports/f27_criteria.md

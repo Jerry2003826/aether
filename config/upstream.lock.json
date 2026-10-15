@@ -1,0 +1,293 @@
+{
+  "is_actual_lock": false,
+  "partial": true,
+  "generated_by_task": "F00",
+  "reason": "Only control-plane Python distributions resolved by uv are versioned. Commit SHAs, image runtime platforms, OpenHands and ML weights remain null until their own probes.",
+  "python": "3.13.16",
+  "entries": [
+    {
+      "repository": "temporalio/temporal",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "temporalio/sdk-python",
+      "role": "core",
+      "version": "1.34.0",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "fastapi/fastapi",
+      "role": "core",
+      "version": "0.143.1",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "pydantic/pydantic",
+      "role": "core",
+      "version": "2.14.1",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "sqlalchemy/sqlalchemy",
+      "role": "core",
+      "version": "2.1.4",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "sqlalchemy/alembic",
+      "role": "core",
+      "version": "1.20.0",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "BerriAI/litellm",
+      "role": "core",
+      "version": "1.105.1",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "OpenHands/software-agent-sdk",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pgvector/pgvector",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pgvector/pgvector-python",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "xhluca/bm25s",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "fxsjy/jieba",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "FlagOpen/FlagEmbedding",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "encode/httpx",
+      "role": "core",
+      "version": "0.28.1",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [
+        "linux/amd64"
+      ],
+      "probe_log": "uv.lock"
+    },
+    {
+      "repository": "adbar/trafilatura",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "kurtmckee/feedparser",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "docling-project/docling",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "microsoft/playwright-python",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "modelcontextprotocol/python-sdk",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "agentskills/agentskills",
+      "role": "core_spec",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "vercel/next.js",
+      "role": "core",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "shadcn-ui/ui",
+      "role": "core_ui",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "pydantic/pydantic-ai",
+      "role": "dev",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "anchore/syft",
+      "role": "dev_release",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "google/osv-scanner",
+      "role": "dev_release",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    },
+    {
+      "repository": "colbymchenry/codegraph",
+      "role": "selected_optional",
+      "version": "1.6.2",
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": ["linux/amd64"],
+      "probe_log": "config/codegraph.lock.json"
+    },
+    {
+      "repository": "NousResearch/hermes-agent",
+      "role": "baseline_only",
+      "version": null,
+      "commit_sha": null,
+      "artifact_sha256": null,
+      "license_files": [],
+      "platforms_tested": [],
+      "probe_log": null
+    }
+  ]
+}

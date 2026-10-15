@@ -87,7 +87,7 @@ CREATE TABLE command_outbox (
  created_at timestamptz NOT NULL DEFAULT now(),
  task_id uuid, command_key text NOT NULL, kind text NOT NULL, payload jsonb NOT NULL,
 payload_sha256 text NOT NULL CHECK(payload_sha256 ~ '^[0-9a-f]{64}$'),
-status text NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','DELIVERING','DELIVERED','FAILED')),
+status text NOT NULL DEFAULT 'PENDING' CHECK(status IN ('PENDING','DELIVERING','DELIVERED','FAILED','STOPPED')),
 lease_until timestamptz, attempts integer NOT NULL DEFAULT 0 CHECK(attempts>=0), delivered_at timestamptz,
 UNIQUE(project_id,command_key), FOREIGN KEY(project_id,task_id) REFERENCES tasks(project_id,id),
  PRIMARY KEY(project_id,id)

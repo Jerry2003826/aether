@@ -1,0 +1,26 @@
+{
+  "is_actual_lock": false,
+  "generated_by_task": "F00",
+  "mode": "offline",
+  "providers": {
+    "user_provider": {
+      "model_id": null,
+      "base_url": null,
+      "pricing_version": null,
+      "live_enabled": false
+    }
+  },
+  "aliases": ["planner", "actor", "coder", "judge", "extractor"],
+  "ml": {
+    "embedding_model_id": "BAAI/bge-m3",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
+    "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "weights_present": true,
+    "device": "cpu"
+  },
+  "scripted": {
+    "label": "SCRIPTED_PROVIDER_NOT_REAL_AI",
+    "report_usage_status": "scripted"
+  }
+}

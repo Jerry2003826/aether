@@ -1,0 +1,187 @@
+{
+  "status": "probed",
+  "live_ready": false,
+  "missing": [],
+  "model_alias": "deepseek-chat",
+  "research": "pass",
+  "coding": "pass",
+  "hybrid_retrieval": "pass",
+  "linux_isolation": "pass",
+  "scripted_substitute": false,
+  "calls": 3,
+  "calls_detail": [
+    {
+      "id": "call-1",
+      "kind": "research",
+      "latency_ms": 1778,
+      "prompt_tokens": 409,
+      "completion_tokens": 128,
+      "submission_sha256": null
+    },
+    {
+      "id": "call-2",
+      "kind": "coding_first",
+      "latency_ms": 1539,
+      "prompt_tokens": 293,
+      "completion_tokens": 42,
+      "submission_sha256": "83ebbfa3938d60cd5ba0353e92e097acce0b22131c0c78755e3a9cdc9a8b64b3"
+    },
+    {
+      "id": "call-3",
+      "kind": "coding_repair",
+      "latency_ms": 1638,
+      "prompt_tokens": 319,
+      "completion_tokens": 43,
+      "submission_sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772"
+    }
+  ],
+  "caps": {
+    "max_calls": 8,
+    "max_output_tokens": 128,
+    "max_total_tokens": 4000
+  },
+  "usage": {
+    "prompt_tokens": 1021,
+    "completion_tokens": 213,
+    "total_tokens": 1234,
+    "cost_micro_usd": null,
+    "cost_status": "unknown"
+  },
+  "hybrid": {
+    "query": "苹果派",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "gold_id": "chunk-apple",
+    "bm25": [
+      "chunk-apple",
+      "chunk-code",
+      "chunk-rail"
+    ],
+    "dense": [
+      "chunk-apple",
+      "chunk-code",
+      "chunk-rail"
+    ],
+    "rrf": [
+      "chunk-apple",
+      "chunk-code",
+      "chunk-rail"
+    ],
+    "reason": null
+  },
+  "linux": {
+    "image": "python:3.12-alpine",
+    "flags": [
+      "--network",
+      "none",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--pids-limit",
+      "32"
+    ],
+    "exit_code": 0,
+    "network_errno": 101,
+    "secret_present": false,
+    "reason": null
+  },
+  "checks": [
+    {
+      "id": "hybrid_retrieval",
+      "status": "pass",
+      "latency_ms": null,
+      "reason": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "linux_isolation",
+      "status": "pass",
+      "latency_ms": null,
+      "reason": null,
+      "prompt_tokens": null,
+      "completion_tokens": null,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "protocol.tools",
+      "status": "pass",
+      "latency_ms": 1778,
+      "reason": null,
+      "call_id": "call-1",
+      "prompt_tokens": 409,
+      "completion_tokens": 128,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "protocol.schema",
+      "status": "pass",
+      "latency_ms": 1778,
+      "reason": null,
+      "call_id": "call-1",
+      "prompt_tokens": 409,
+      "completion_tokens": 128,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "protocol.usage",
+      "status": "pass",
+      "latency_ms": 1778,
+      "reason": null,
+      "call_id": "call-1",
+      "prompt_tokens": 409,
+      "completion_tokens": 128,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "research.citation",
+      "status": "pass",
+      "latency_ms": 1778,
+      "reason": null,
+      "call_id": "call-1",
+      "prompt_tokens": 409,
+      "completion_tokens": 128,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "coding.first_attempt",
+      "status": "fail",
+      "latency_ms": 1539,
+      "reason": "add(1, 2)=-1 expected 3",
+      "call_id": "call-2",
+      "prompt_tokens": 293,
+      "completion_tokens": 42,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "coding.independent_test",
+      "status": "pass",
+      "latency_ms": 1638,
+      "reason": null,
+      "call_id": "call-3",
+      "prompt_tokens": 319,
+      "completion_tokens": 43,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    },
+    {
+      "id": "coding.recovery",
+      "status": "pass",
+      "latency_ms": 1638,
+      "reason": null,
+      "call_id": "call-3",
+      "prompt_tokens": 319,
+      "completion_tokens": 43,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    }
+  ],
+  "error": null
+}

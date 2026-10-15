@@ -1,0 +1,43 @@
+{
+  "openhands": {
+    "status": "partial",
+    "reason": null,
+    "selected_release": "1.54.0",
+    "selection": "PyPI current versions of the four packages matched 1.54.0 on the probe date; not a hand-written digest",
+    "interpreter": "CPython 3.13.16 via uv",
+    "imports": {
+      "openhands.sdk": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/sdk/__init__.py"
+      },
+      "openhands.tools": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/tools/__init__.py"
+      },
+      "openhands.workspace": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/workspace/__init__.py"
+      },
+      "openhands.agent_server": {
+        "imported": true,
+        "file": "/workspace/environments/openhands/.venv/lib/python3.13/site-packages/openhands/agent_server/__init__.py"
+      }
+    },
+    "llm_gateway_configured": true,
+    "llm_gateway_note": "LLM(base_url) accepted a local gateway URL. No provider was called.",
+    "sync_returncode": 0,
+    "live_model": "not_run",
+    "stderr_tail": null
+  },
+  "ml": {
+    "status": "passed",
+    "reason": null,
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
+    "weights_present": true,
+    "package_install": "uv sync --frozen",
+    "device": "cpu",
+    "sample_norm": 1.0,
+    "encode_input": "aether probe"
+  }
+}

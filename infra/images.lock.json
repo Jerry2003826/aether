@@ -1,0 +1,30 @@
+{
+  "is_actual_lock": false,
+  "reason": "Registry digests were read from the manifest list. This host has no Docker daemon, so the images were not pulled or executed here. Local PostgreSQL is a separate apt probe.",
+  "images": [
+    {
+      "repository": "pgvector/pgvector",
+      "tag": "0.8.7-pg17",
+      "digest": "sha256:ac08538c6f8b9904c33c8224c5e5706dbe760aca29db1d096972b4052c22a75d",
+      "digest_source": "registry-1.docker.io manifest index docker-content-digest",
+      "platforms_tested": [],
+      "local_runtime_probe": {
+        "package": "postgresql-16",
+        "server": "16.15",
+        "pgvector_available": "0.6.0",
+        "same_as_ci_image": false
+      }
+    },
+    {
+      "repository": "temporalio/temporal",
+      "tag": "1.9.1",
+      "digest": "sha256:ad4c82c97bd12b417d1ea942610dbcd511afb250c4d5ed26c694009533df447e",
+      "digest_source": "registry-1.docker.io manifest index docker-content-digest",
+      "cli_probed": "1.9.1",
+      "server_bundled_in_cli": "1.32.0",
+      "ui_bundled_in_cli": "2.54.1",
+      "dev_server_is_release_persistence": false,
+      "platforms_tested": ["linux/amd64 cli"]
+    }
+  ]
+}

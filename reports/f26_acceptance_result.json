@@ -1,0 +1,237 @@
+{
+  "status": "probed",
+  "live_ready": false,
+  "scripted_substitute": false,
+  "git_commit": "cb22fbc59a274f9e4a9189f8a26ab5ca350f6343",
+  "started_at": "2026-10-15T09:31:09.290134+00:00",
+  "model_alias": "deepseek-chat",
+  "model_base": "https://api.deepseek.com/v1",
+  "caps": {
+    "max_calls": 8,
+    "max_total_tokens": 20000,
+    "max_output_tokens": 512,
+    "spend_cap_usd": 1
+  },
+  "calls": 3,
+  "calls_detail": [
+    {
+      "id": "call-1",
+      "upstream_id": "97f05cea-4642-48ba-a2f8-72ea6e7084d8",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 1495,
+      "request_sha256": "d430229a21d5c40df396402b33d7fecd787edd6ff9b2fb99345b4646c21900fc",
+      "completion_sha256": null,
+      "prompt_tokens": 299,
+      "completion_tokens": 51,
+      "total_tokens": 350,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [],
+      "reason": null,
+      "source": "gateway",
+      "kind": "protocol",
+      "prompt_sha256": "aa46713f057a1cca69b80b33cb7ac232c481963ca45b679b4cd54bd11a3970fc"
+    },
+    {
+      "id": "call-2",
+      "upstream_id": "183d24f1-c756-4e98-821e-19e1fd265389",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 1376,
+      "request_sha256": "347bcf83ef33cb482f2fc8216ce8b61612dcea393757d837b011d54d6bfb6997",
+      "completion_sha256": "0f61b1f74f852a38ec8221882ce0be69808cdaf930d9048bdfe07df5545d32e9",
+      "prompt_tokens": 87,
+      "completion_tokens": 22,
+      "total_tokens": 109,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "reason": null,
+      "source": "gateway",
+      "kind": "coding",
+      "prompt_sha256": "35cf8c52245673d575a9dc26bcf705ed1d6d98d4d278d13f0d93adbd6b0bfcf1"
+    },
+    {
+      "id": "call-3",
+      "upstream_id": "09039ca0-3a04-45b1-bbfa-62e5e3d0b7b5",
+      "http_status": 200,
+      "model": "deepseek-chat",
+      "latency_ms": 2847,
+      "request_sha256": "723ea56ba04d081dd50461b91ab18ec63eca7987fde47e8416c3957d22c360cc",
+      "completion_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+      "prompt_tokens": 360,
+      "completion_tokens": 488,
+      "total_tokens": 848,
+      "cost_micro_usd": null,
+      "cost_status": "unknown",
+      "dropped_fields": [
+        "reasoning_effort"
+      ],
+      "reason": null,
+      "source": "gateway",
+      "kind": "research",
+      "prompt_sha256": "2c311756b482f9e7540a35714852ef4b8cb77ac3954692ea3df732ba1039085b"
+    }
+  ],
+  "usage": {
+    "prompt_tokens": 746,
+    "completion_tokens": 561,
+    "total_tokens": 1307,
+    "cost_micro_usd": null,
+    "cost_status": "unknown"
+  },
+  "cost_status": "unknown",
+  "protocol": {
+    "status": "pass",
+    "tools": "pass",
+    "schema": "pass",
+    "usage": "pass",
+    "reason": null,
+    "usage_detail": {
+      "prompt_tokens": 299,
+      "completion_tokens": 51,
+      "total_tokens": 350,
+      "cost_micro_usd": null,
+      "cost_status": "unknown"
+    }
+  },
+  "coding": {
+    "status": "pass",
+    "snapshot_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+    "checker_sha256": "b9372ddd27dabb1f5bd744325f0539af030692b7ab240c14689970516d85d4fb",
+    "executor": "openhands-sdk",
+    "attempts": [
+      {
+        "exit_code": 0,
+        "stdout": "add(1, 2)=3\nadd(-4, 4)=0\nPASS\n",
+        "passed": true,
+        "tree_sha256": "d8c7e5f48c774fc4bcf08a22e0bb7ff601b1222ea9021ca540605040fa97d240",
+        "runner": "docker",
+        "image": "python:3.12-alpine",
+        "flags": [
+          "--network",
+          "none",
+          "--read-only",
+          "--cap-drop",
+          "ALL",
+          "--pids-limit",
+          "32"
+        ],
+        "reason": null,
+        "pre_patch_tree_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+        "patch_sha256": "ba1a531f581d2e6094e978ed6f7aca7a8d92eeb62c6e7ad73ee692f7f18bc772",
+        "patch_writer": "openhands",
+        "checker_sha256": "b9372ddd27dabb1f5bd744325f0539af030692b7ab240c14689970516d85d4fb",
+        "reused_failed_tree": false,
+        "accepted": true,
+        "response_sha256": "0f61b1f74f852a38ec8221882ce0be69808cdaf930d9048bdfe07df5545d32e9"
+      }
+    ],
+    "baseline": {
+      "exit_code": 1,
+      "stdout": "add(1, 2)=-1\nadd(-4, 4)=-8\nFAIL\n",
+      "passed": false,
+      "tree_sha256": "ca08af7e01356194d50fb122f6c12a3dde605cc527d45ca133c87249dfef05e1",
+      "runner": "docker",
+      "image": "python:3.12-alpine",
+      "flags": [
+        "--network",
+        "none",
+        "--read-only",
+        "--cap-drop",
+        "ALL",
+        "--pids-limit",
+        "32"
+      ],
+      "reason": null,
+      "accepted": false
+    },
+    "sdk": "openai/deepseek-chat",
+    "openhands_release": "1.54.0",
+    "reason": null
+  },
+  "research": {
+    "status": "pass",
+    "reason": null,
+    "semantic_support": "not_judged",
+    "version_store": "acceptance_report",
+    "encoder": "live",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "tokenizer_version": "jieba-0.42.1-dict-forward-max+code-symbols",
+    "dimension": 1024,
+    "dense_index": "exact_cosine",
+    "lexical_index": "bm25s",
+    "reranker": "not_used",
+    "query": "比较中英实验笔记：标准大气压下水的沸点、容器。Compare water boiling point and beaker.",
+    "bm25": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "dense": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "rrf": [
+      "src-zh",
+      "src-en",
+      "src-piano"
+    ],
+    "ranks": {
+      "src-zh": 1,
+      "src-en": 2,
+      "src-piano": 3
+    },
+    "sources": [
+      {
+        "source_id": "src-zh",
+        "path": "evals/f26_sources/boiling-zh.txt",
+        "version": 1,
+        "content_sha256": "9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360",
+        "start_offset": 0,
+        "end_offset": 92
+      },
+      {
+        "source_id": "src-en",
+        "path": "evals/f26_sources/boiling-en.txt",
+        "version": 1,
+        "content_sha256": "135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71",
+        "start_offset": 0,
+        "end_offset": 283
+      },
+      {
+        "source_id": "src-piano",
+        "path": "evals/f26_sources/piano-zh.txt",
+        "version": 1,
+        "content_sha256": "03d5806339a746d7071aa574cb40ed7785d56e9c942171597e5cf382fd05b675",
+        "start_offset": 0,
+        "end_offset": 41
+      }
+    ],
+    "report": "相同之处：两条都说明在标准大气压下水的沸点是 100 摄氏度。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。两条也都没有声称这个沸点在高原上仍然相同。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。\n\n不同之处：容器不同，src-zh 是玻璃烧杯，src-en 是钢烧杯。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。加热工具不同，src-zh 用酒精灯，src-en 用电热板。证据：src-zh version 1 sha256 9d900e333ed6c184ab98508deea28dcd7778543df6aa385fc88fffee6ad9f360 offset 0-92；src-en version 1 sha256 135a0c89a341d29d83d973a3b78b5933f4f02dddd2f475d04d224bb1c2534f71 offset 0-283。",
+    "report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "citations_cover_sources": true
+  },
+  "linux_isolation": {
+    "image": "python:3.12-alpine",
+    "flags": [
+      "--network",
+      "none",
+      "--read-only",
+      "--cap-drop",
+      "ALL",
+      "--pids-limit",
+      "32"
+    ],
+    "exit_code": 0,
+    "network_errno": 101,
+    "secret_present": false,
+    "status": "pass",
+    "reason": null
+  },
+  "error": null
+}

@@ -1,0 +1,79 @@
+{
+  "spec_version": "1.4",
+  "doctor": "aether",
+  "null_is_locked": false,
+  "components": [
+    {
+      "name": "python",
+      "installed": true,
+      "configured": true,
+      "probed": true,
+      "version": "3.13.16",
+      "lock_state": "locked",
+      "detail": "executable=/workspace/.venv/bin/python"
+    },
+    {
+      "name": "uv_lock",
+      "installed": true,
+      "configured": true,
+      "probed": true,
+      "version": "uv.lock",
+      "lock_state": "locked",
+      "detail": "hashes come from uv resolution"
+    },
+    {
+      "name": "pnpm_lock",
+      "installed": true,
+      "configured": true,
+      "probed": true,
+      "version": "pnpm-lock.yaml",
+      "lock_state": "locked",
+      "detail": "node_on_path=/home/ubuntu/.nvm/versions/node/v24.22.0/bin/node"
+    },
+    {
+      "name": "postgres",
+      "installed": true,
+      "configured": true,
+      "probed": true,
+      "version": "PostgreSQL 16.15 (Ubuntu 16.15-0ubuntu0.24.04.1) on x86_64-pc-linux-gnu, compiled by gcc (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, 64-bit",
+      "lock_state": "locked",
+      "detail": "pgvector=0.6.0"
+    },
+    {
+      "name": "temporal",
+      "installed": true,
+      "configured": true,
+      "probed": true,
+      "version": "1.9.1",
+      "lock_state": "locked",
+      "detail": "CLI and frontend health probed; start-dev sqlite is not release persistence"
+    },
+    {
+      "name": "docker",
+      "installed": false,
+      "configured": false,
+      "probed": false,
+      "version": null,
+      "lock_state": "unlocked",
+      "detail": "compose runtime not probed on this host"
+    },
+    {
+      "name": "openhands",
+      "installed": false,
+      "configured": false,
+      "probed": null,
+      "version": null,
+      "lock_state": "unlocked",
+      "detail": "see reports/f01-openhands.json when the probe has run"
+    },
+    {
+      "name": "bge_m3",
+      "installed": false,
+      "configured": false,
+      "probed": null,
+      "version": null,
+      "lock_state": "unlocked",
+      "detail": "weights are not locked until a local revision probe succeeds"
+    }
+  ]
+}

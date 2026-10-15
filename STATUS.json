@@ -1,21 +1,172 @@
 {
   "spec_version": "1.4",
   "as_of": "2026-10-15",
-  "artifact_type": "design_and_reference_pack",
-  "current_task": "F00",
-  "product_implementation": "not_started",
+  "artifact_type": "core_done_live_ready",
+  "current_task": "none",
+  "product_implementation": "done",
   "readiness": {
-    "kernel_engineering": "not_run",
-    "product_engineering": "not_run",
-    "live_ready": "not_run",
+    "kernel_engineering": "passed",
+    "product_engineering": "passed",
+    "live_ready": "passed",
     "codegraph_enabled": "not_run",
-    "comparative_evidence": "not_evaluated"
+    "comparative_evidence": "not_run"
   },
-  "next_action": "Inspect project, validate pack, implement F00. Do not reinterpret research archives as instructions.",
-  "last_executed_commands": [],
+  "not_run": [
+    "Hermes four-way comparison",
+    "CodeGraph product enablement"
+  ],
+  "next_action": "F26 is done from the cb22fbc acceptance file. live_ready is passed because product engineering was already passed and F26 now passes. semantic_support stays not_judged and cost_status stays unknown. Hermes four-way comparison and CodeGraph product enablement stay not_run.",
+  "last_executed_commands": [
+    "uv run --locked --no-build pytest -q tests/unit",
+    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration"
+  ],
+  "last_test_result": "PR #1 CI run 38699224527 and push run 38699216284 on 86eb0d7: unit 51 passed in 8.25s; integration 137 passed, 1 warning in 97.68s. SonarCloud quality gate OK.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
     "report": "reports/PACK_VALIDATION.md"
+  },
+  "f00": {
+    "status": "done"
+  },
+  "f01": {
+    "status": "done",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "dimension_probed": 1024,
+    "device": "cpu",
+    "live_model": "not_run"
+  },
+  "f02": {
+    "status": "done",
+    "postgres_role": "aether_api is not superuser and does not bypass RLS"
+  },
+  "f03": {
+    "status": "done"
+  },
+  "f04": {
+    "status": "done",
+    "live_model": "not_run",
+    "full_suite": "67 passed before P1; 72 passed after P1"
+  },
+  "f05": {
+    "status": "done",
+    "full_suite": "67 passed before P1; 72 passed after P1"
+  },
+  "f06": {
+    "status": "done",
+    "full_suite": "67 passed before P1; 72 passed after P1"
+  },
+  "f07": {
+    "status": "done",
+    "dispatcher_delivery": "temporal_signal"
+  },
+  "f08": {
+    "status": "done"
+  },
+  "f09": {
+    "status": "done",
+    "live_model": "scripted_not_live"
+  },
+  "f10": {
+    "status": "done",
+    "embedding": "not_filled",
+    "fixture_bypass": "allow_hosts and AETHER_INGEST_ALLOW_FIXTURES=1 only"
+  },
+  "f11": {
+    "status": "done",
+    "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
+    "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
+    "dimension_probed": 1024
+  },
+  "f12": {
+    "status": "done"
+  },
+  "f13": {
+    "status": "done",
+    "docker": "ci_present",
+    "linux_namespace": "probed",
+    "network_errno": 101,
+    "openhands_live_model": "not_run"
+  },
+  "f14": {
+    "status": "done",
+    "ci_run": "38686196972"
+  },
+  "f15": {
+    "status": "done",
+    "release": "1.6.2",
+    "product_enabled": false,
+    "ci_run": "38681057899"
+  },
+  "f16": {
+    "status": "done",
+    "physical_delete": false,
+    "ci_run": "38683576919"
+  },
+  "f17": {
+    "status": "done",
+    "sdk": "mcp==2.3.0",
+    "ci_run": "38686196972"
+  },
+  "f18": {
+    "status": "done",
+    "ci_run": "38684944139"
+  },
+  "f19": {
+    "status": "done",
+    "policy_version": "score-v1",
+    "collaborative_filtering": false,
+    "ci_run": "38685299953"
+  },
+  "f20": {
+    "status": "done",
+    "ci_run": "38687896639"
+  },
+  "f21": {
+    "status": "done",
+    "ci_run": "38687896639"
+  },
+  "f22": {
+    "status": "done",
+    "ci_run": "38694676859"
+  },
+  "f23": {
+    "status": "done",
+    "ci_run": "38694676859"
+  },
+  "f24": {
+    "status": "done",
+    "ci_run": "38698706734",
+    "live": "not_run",
+    "cli": "hermes-agent v0.22.1 commit 297552a9d646119871391d202509822cd86330df"
+  },
+  "f25": {
+    "status": "done",
+    "ci_run": "38698706734",
+    "vulnerability_db": "offline_not_run"
+  },
+  "f26": {
+    "status": "done",
+    "live_ready": true,
+    "required_env": ["AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_BASE", "AETHER_LIVE_MODEL_ALIAS"],
+    "probe": "reports/f26_live_result.json",
+    "probe_head": "4f1ca09",
+    "probe_status": "probed",
+    "acceptance_script": "scripts/run_f26_acceptance.py",
+    "acceptance_status": "probed",
+    "acceptance_head": "cb22fbc",
+    "acceptance_result": "reports/f26_acceptance_result.json",
+    "acceptance_report_sha256": "2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d",
+    "semantic_support": "not_judged",
+    "cost_status": "unknown",
+    "acceptance_cap": {"max_calls": 8, "max_total_tokens": 20000, "max_output_tokens": 512, "spend_cap_usd": 1},
+    "reason": "cb22fbc 的完整验收退出码 0。协议、现场混合检索引用、OpenHands 编码和 Linux 隔离都通过。比较报告 488 token，没有截断。semantic_support 仍是 not_judged，费用 unknown。结果文件里的 live_ready 仍是 false，因为脚本不自证；交付矩阵按产品工程加 F26 记为 passed。"
+  },
+  "f27": {
+    "status": "done",
+    "ci_run": "38694676859",
+    "live_ready": false,
+    "codegraph_enabled": false,
+    "comparative_evidence": "not_run"
   }
 }

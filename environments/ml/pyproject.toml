@@ -1,0 +1,19 @@
+[project]
+name = "aether-ml-probe"
+version = "0.0.0"
+description = "Isolated ML probe. Import success is not a weight or dimension lock."
+requires-python = ">=3.12"
+dependencies = [
+  "FlagEmbedding==1.4.2",
+]
+
+[tool.uv]
+package = false
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
