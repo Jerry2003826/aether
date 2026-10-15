@@ -469,7 +469,7 @@ tickets:
   - grader身份与数据集隔离，actor不能自写分数
   - 差候选拒绝/证据不足不升级；合成控制测试显著标注
   - 仅owner可批准canary；task固定技能版本，回滚原子；不要求必然发现好技能
-  status: not_started
+  status: in_progress
   evidence: []
 - id: F22
   stage: G6

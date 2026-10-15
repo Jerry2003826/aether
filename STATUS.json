@@ -11,7 +11,7 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F21 skill evaluation, canary approval, and rollback.",
+  "next_action": "F21 skill evaluation is implemented locally. Mark done only after PR CI and SonarCloud are green.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
@@ -116,5 +116,8 @@
   "f20": {
     "status": "done",
     "ci_run": "38686196972"
+  },
+  "f21": {
+    "status": "in_progress"
   }
 }
