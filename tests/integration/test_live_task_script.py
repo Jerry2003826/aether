@@ -64,6 +64,8 @@ def test_live_task_check_script_calls_the_fake_upstream(role_urls, clean_db) -> 
             "AETHER_LIVE_MODEL_ALIAS": "research-alias",
             "AETHER_LIVE_MODEL_KEY": TOKEN,
             "AETHER_RESEARCH_PROVIDER": "live",
+            # The checkout is home, so data/ inside the repo is not a legal artifact root.
+            "HOME": str(ROOT),
         }
     )
     try:

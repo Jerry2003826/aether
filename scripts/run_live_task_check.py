@@ -9,6 +9,7 @@ import argparse
 import json
 import os
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
@@ -26,6 +27,7 @@ sys.path.insert(0, str(ROOT / "packages" / "storage"))
 sys.path.insert(0, str(ROOT / "packages" / "domain"))
 
 from aether_api.auth_service import issue_bootstrap_secret
+from aether_storage.artifacts import ArtifactError, assert_storage_root
 from aether_worker.live_harness import LIVE_ALIAS, LIVE_BASE, LIVE_KEY, redact_secret
 
 ALLOWED_OUT = Path("reports/live_task_check.json")
@@ -44,6 +46,22 @@ REQUIRED = (
     LIVE_ALIAS,
     LIVE_KEY,
 )
+
+
+def _artifact_root() -> Path:
+    """Artifact storage rejects the host home. A checkout under $HOME cannot use its data/ directory."""
+    candidate = Path(tempfile.mkdtemp(prefix="aether-live-task-"))
+    try:
+        return assert_storage_root(candidate)
+    except ArtifactError:
+        shutil.rmtree(candidate, ignore_errors=True)
+    fallback = Path("/tmp") / f"aether-live-task-{uuid.uuid4().hex}"
+    fallback.mkdir()
+    try:
+        return assert_storage_root(fallback)
+    except ArtifactError:
+        shutil.rmtree(fallback, ignore_errors=True)
+        raise
 
 
 def _port() -> int:
@@ -141,8 +159,7 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
     step = "startup"
     api_port = _port()
     queue = f"aether-live-check-{uuid.uuid4()}"
-    artifact_root = ROOT / "data" / "live-task-check"
-    artifact_root.mkdir(parents=True, exist_ok=True)
+    artifact_root = _artifact_root()
     secret_path = ROOT / "secrets" / f"live-task-{uuid.uuid4().hex}.json"
     secret_path.parent.mkdir(parents=True, exist_ok=True)
     secret = issue_bootstrap_secret(secret_path)
@@ -251,6 +268,7 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
         _stop(worker)
         _stop(api)
         secret_path.unlink(missing_ok=True)
+        shutil.rmtree(artifact_root, ignore_errors=True)
         for path in (api_log, worker_log):
             if path is not None:
                 path.unlink(missing_ok=True)
