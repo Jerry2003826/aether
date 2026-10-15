@@ -62,8 +62,7 @@ def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db
     thread.start()
     _wait(f"http://127.0.0.1:{api_port}/health/live")
     if not Path("apps/web/node_modules/next/package.json").is_file():
-        subprocess.run(["corepack", "prepare", "pnpm@10.18.2", "--activate"], check=True)
-        subprocess.run(["pnpm", "install", "--frozen-lockfile"], cwd="apps/web", check=True)
+        subprocess.run(["corepack", "pnpm@10.18.2", "install", "--frozen-lockfile"], cwd="apps/web", check=True)
     web = subprocess.Popen(
         ["node_modules/.bin/next", "dev", "--hostname", "127.0.0.1", "--port", str(web_port)],
         cwd="apps/web",
