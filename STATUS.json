@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F11",
+  "current_task": "F14",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "CI on dde95e5 is red: integration failed and SonarCloud reliability is C. F11, F12, and F13 stay in_progress until that gate is green.",
+  "next_action": "Implement F14 candidate export and independent verification. F15 stays after F14.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "PR #1 CI on dde95e5: integration failed (1 failed, 88 passed). SonarCloud new_reliability_rating is 3 (C). Local 121 passed is not the CI result.",
+  "last_test_result": "PR #1 CI run 38676628928: pack-and-unit 32 passed; integration 91 passed, 2 warnings in 35.83s. SonarCloud quality gate OK (reliability 1, security 1).",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -68,16 +68,16 @@
     "fixture_bypass": "allow_hosts and AETHER_INGEST_ALLOW_FIXTURES=1 only"
   },
   "f11": {
-    "status": "in_progress",
+    "status": "done",
     "embedding_revision": "5617a9f61b028005a4858fdac845db406aefb181",
     "reranker_revision": "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e",
     "dimension_probed": 1024
   },
   "f12": {
-    "status": "in_progress"
+    "status": "done"
   },
   "f13": {
-    "status": "in_progress",
+    "status": "done",
     "docker": "ci_present",
     "linux_namespace": "probed",
     "network_errno": 101,
