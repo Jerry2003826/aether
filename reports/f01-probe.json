@@ -1,6 +1,6 @@
 {
   "openhands": {
-    "status": "passed",
+    "status": "partial",
     "reason": null,
     "selected_release": "1.54.0",
     "selection": "PyPI current versions of the four packages matched 1.54.0 on the probe date; not a hand-written digest",

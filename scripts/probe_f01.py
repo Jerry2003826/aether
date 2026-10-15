@@ -43,7 +43,7 @@ def probe_openhands() -> dict:
     gateway_ok = bool(payload) and payload.get("llm_base_url") == "http://127.0.0.1:9/v1"
     ok = bool(modules) and all(item.get("imported") for item in modules.values()) and gateway_ok
     return {
-        "status": "passed" if ok else "blocked",
+        "status": openhands_probe_status(imports_ok=ok, model_called=False),
         "reason": None if ok else "OpenHands import or LLM base_url configuration failed",
         "selected_release": "1.54.0",
         "selection": "PyPI current versions of the four packages matched 1.54.0 on the probe date; not a hand-written digest",
@@ -95,9 +95,13 @@ def probe_ml() -> dict:
         timeout=180,
     )
     ok = sync["returncode"] == 0 and imported["returncode"] == 0
+    if ok:
+        reason = "FlagEmbedding imported, but weights were not loaded and dimension was not measured"
+    else:
+        reason = "FlagEmbedding install or import failed"
     return {
-        "status": "blocked" if ok else "blocked",
-        "reason": "package import does not verify BGE revision or dimension; weights were not loaded",
+        "status": "blocked",
+        "reason": reason,
         "import_ok": ok,
         "embedding_revision": None,
         "dimension": None,
@@ -106,12 +110,24 @@ def probe_ml() -> dict:
     }
 
 
+def openhands_probe_status(*, imports_ok: bool, model_called: bool) -> str:
+    """Import success is not a model-call pass."""
+    if not imports_ok:
+        return "blocked"
+    if not model_called:
+        return "partial"
+    return "passed"
+
+
 def main() -> int:
     report = {"openhands": probe_openhands(), "ml": probe_ml()}
     destination = ROOT / "reports" / "f01-probe.json"
     destination.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(report, ensure_ascii=False, indent=2))
-    if report["openhands"]["status"] == "passed" and report["openhands"].get("imports") is None:
+    openhands = report["openhands"]
+    if openhands["status"] == "passed" and openhands.get("live_model") == "not_run":
+        return 1
+    if openhands["status"] == "passed" and openhands.get("imports") is None:
         return 1
     return 0
 
