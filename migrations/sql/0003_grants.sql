@@ -57,6 +57,7 @@ GRANT SELECT, INSERT, UPDATE ON
 TO aether_worker;
 GRANT SELECT, INSERT ON audit_events TO aether_worker;
 GRANT SELECT ON verification_results, evaluation_runs, projects TO aether_worker;
+GRANT UPDATE (visibility_epoch) ON projects TO aether_worker;
 
 -- Verifier appends evidence. Dispatcher only moves outbox rows.
 GRANT SELECT ON

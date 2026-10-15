@@ -11,12 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F16 memory correction and derived-index invalidation.",
+  "next_action": "Wait for PR CI and SonarCloud on F16 retention, then continue F17.",
   "last_executed_commands": [
-    "uv run --locked --no-build pytest -q tests/integration/test_codegraph.py",
-    "gh pr checks 1"
+    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_retention.py tests/integration/test_migration.py tests/integration/test_memory.py"
   ],
-  "last_test_result": "PR #1 CI run 38681057899: unit 32 passed; integration 102 passed, 2 warnings in 52.97s. SonarCloud quality gate OK (reliability, security, maintainability all 1).",
+  "last_test_result": "Local F16 retention, migration, and memory tests passed. Not marked done until this push is green on PR CI.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -93,5 +92,9 @@
     "release": "1.6.2",
     "product_enabled": false,
     "ci_run": "38681057899"
+  },
+  "f16": {
+    "status": "in_progress",
+    "physical_delete": false
   }
 }

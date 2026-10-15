@@ -20,6 +20,7 @@ from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
+from aether_worker.retention import commit_embedding, current_epoch
 from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -219,6 +220,13 @@ def group_metrics(groups: dict[str, list[str]], relevant: set[str], *, k: int = 
     return {name: {"recall_at_10": recall(ids), "mrr_at_10": mrr(ids), "ndcg_at_10": ndcg(ids)} for name, ids in groups.items()}
 
 
+def generation_is_fresh(conn: Any, project_id: str, seen_epoch: int, chunk_ids: list[str]) -> bool:
+    if current_epoch(conn, project_id) != int(seen_epoch):
+        return False
+    visible = {row["id"] for row in _visible(conn, project_id)}
+    return all(chunk_id in visible for chunk_id in chunk_ids)
+
+
 def _bind(conn: Any, owner_id: str, project_id: str) -> None:
     conn.execute(text("SELECT set_config('aether.owner_id', :owner_id, true)"), {"owner_id": owner_id})
     conn.execute(text("SELECT set_config('aether.project_id', :project_id, true)"), {"project_id": project_id})
@@ -314,24 +322,27 @@ def build_generation(
             rows = _visible(conn, project_id)
             if not rows:
                 raise RetrievalError("empty_index")
+            seen_epoch = current_epoch(conn, project_id)
             missing = [row["text_content"] for row in rows if row["embedding_revision"] != EMBEDDING_REVISION]
             vectors = encode_texts(missing) if missing else []
             encoded = dict(zip(missing, vectors, strict=True))
             for row in rows:
                 if row["text_content"] not in encoded:
                     continue
-                conn.execute(
-                    text(
-                        "UPDATE chunks SET embedding = CAST(:embedding AS vector), embedding_revision = :revision "
-                        "WHERE project_id = :project_id AND id = :id"
-                    ),
-                    {
-                        "embedding": _vector_literal(encoded[row["text_content"]]),
-                        "revision": EMBEDDING_REVISION,
-                        "project_id": project_id,
-                        "id": row["id"],
-                    },
+                wrote = commit_embedding(
+                    conn,
+                    project_id=project_id,
+                    chunk_id=row["id"],
+                    embedding=_vector_literal(encoded[row["text_content"]]),
+                    revision=EMBEDDING_REVISION,
+                    seen_epoch=seen_epoch,
                 )
+                if not wrote:
+                    conn.rollback()
+                    raise RetrievalError("stale_visibility")
+            if not generation_is_fresh(conn, project_id, seen_epoch, [row["id"] for row in rows]):
+                conn.rollback()
+                raise RetrievalError("stale_visibility")
             conn.commit()
             _bind(conn, owner_id, project_id)
             if partial.exists():
@@ -353,6 +364,9 @@ def build_generation(
                 raise RetrievalError("index_rejected")
             if final.exists():
                 raise RetrievalError("generation_key_rejected")
+            _bind(conn, owner_id, project_id)
+            if not generation_is_fresh(conn, project_id, seen_epoch, chunk_ids):
+                raise RetrievalError("stale_visibility")
             os.replace(partial, final)
             stored = store.put(owner_id=owner_id, project_id=project_id, data=raw, media_type="application/json")
             generation_id = conn.execute(

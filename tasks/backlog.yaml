@@ -365,7 +365,7 @@ tickets:
   - 旧摘要/embedding任务不能在删除后重新写入已删内容
   - 记忆/向量/BM25/cache/推荐特征联动失效
   - 备份保留与history局限明确，未删除物理副本不能声称全删
-  status: not_started
+  status: in_progress
   evidence: []
 - id: F17
   stage: G5

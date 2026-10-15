@@ -10,6 +10,7 @@ from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
+from aether_worker.retention import invalidate_derived
 
 STATUSES = {"proposed", "source_claim", "user_confirmed", "observed_test", "inference", "superseded"}
 KINDS = {"episodic", "semantic", "procedural"}
@@ -368,3 +369,4 @@ def _delete(conn: Any, *, project_id: str, payload: dict[str, Any]) -> None:
     ).rowcount
     if updated != 1:
         raise MemoryError("version_conflict")
+    invalidate_derived(conn, project_id=project_id)
