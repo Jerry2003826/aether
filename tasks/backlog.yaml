@@ -234,8 +234,11 @@ tickets:
   - 原文不可变hash及Unicode offset正确；空正文显式失败
   - SSRF实际连接/redirect/DNS约束；parser隔离/资源上限
   - 静态默认，JS仅Playwright受控profile；下载权重/依赖不发生在用户请求中
-  status: not_started
-  evidence: []
+  status: done
+  evidence:
+  - services/worker/aether_worker/ingest.py
+  - tests/integration/test_ingest.py
+  - reports/f10_criteria.md
 - id: F11
   stage: G3
   scope: core
@@ -251,7 +254,7 @@ tickets:
   - 真实embedding/revision，BM25/dense/RRF/rerank分组对照
   - 授权过滤在检索/重排/LLM上下文前；删除/撤权即时不可见
   - 索引atomic swap与stale标记；中英/emoji/代码符号场景可复现
-  status: not_started
+  status: blocked
   evidence: []
 - id: F12
   stage: G3

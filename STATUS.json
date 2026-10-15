@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-15",
   "artifact_type": "implementation_in_progress",
-  "current_task": "F10",
+  "current_task": "F11",
   "product_implementation": "in_progress",
   "readiness": {
     "kernel_engineering": "not_run",
@@ -11,11 +11,11 @@
     "codegraph_enabled": "not_run",
     "comparative_evidence": "not_evaluated"
   },
-  "next_action": "Implement F10 authorized ingestion, parsing, and source versions.",
+  "next_action": "F11 stays blocked until BGE-M3 dimension is measured. Next unblocked backlog task after that chain is F17.",
   "last_executed_commands": [
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration"
   ],
-  "last_test_result": "F09 full suite: 87 passed, 2 warnings in 17.84s, EXIT:0.",
+  "last_test_result": "F10 full suite: 90 passed, 2 warnings in 18.62s, EXIT:0.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -58,5 +58,13 @@
   "f09": {
     "status": "done",
     "live_model": "scripted_not_live"
+  },
+  "f10": {
+    "status": "done",
+    "embedding": "not_filled"
+  },
+  "f11": {
+    "status": "blocked",
+    "recovery": "Measure BAAI/bge-m3 dimension before BM25/dense/RRF comparison. Do not substitute random vectors."
   }
 }

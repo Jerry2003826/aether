@@ -41,6 +41,8 @@ P1 覆盖：
 - F07 done。`aether_dispatcher` 把 `command_outbox` 投到真实 Temporal。Temporal 拒绝时行留在 DELIVERING，任务保持 QUEUED，不会被标成成功。同一个 command_id 再投递不会在 Workflow 里出现两次。
 - F08 done。任务创建返回 202，状态保持 QUEUED，并经 dispatcher 进入真实 Temporal。SSE 用 Last-Event-ID 按 sequence 补齐，响应里有 pending command 和 projection_updated_at。审批决定由服务端核对 owner、哈希和版本。事件和产物不跨项目。全量：`83 passed, 2 warnings in 16.57s`，`EXIT:0`。对照表 `reports/f08_criteria.md`。
 - F09 done。本地产物经真实存储和文本工具进入脚本网关，HTTP 调用 1 次，哈希与 `aether_verifier` 的 PASS/FAIL 写入验收表。过期候选在 actor 自报 PASS 时仍为 FAIL。worker 重启后重投同一命令，`research.call` 仍是 1 条。全量：`87 passed, 2 warnings in 17.84s`，`EXIT:0`。对照表 `reports/f09_criteria.md`。
-- 下一步：F10 授权采集。F01 仍 blocked。F15 不跳过。
+- F10 done。码点偏移覆盖中文、emoji 和 CRLF。空正文失败。loopback 与跳向 loopback 的重定向都不会发出连接。授权夹具上的 HTTP 下载写入 SourceVersion，chunk 的 embedding 仍是 null。全量：`90 passed, 2 warnings in 18.62s`，`EXIT:0`。对照表 `reports/f10_criteria.md`。
+- F11 blocked。依赖 F01，BGE 维度未实测，不用随机向量。F12、F16 以及依赖它们的任务因此还不能标 done。F13 也依赖 F01。F15 仍排在 F14 之后，不跳过。
+- 下一步未阻塞任务：F17 MCP。live 模型、CodeGraph、Hermes 仍是 not_run。
 
 live 模型、CodeGraph、Hermes 仍是 not_run。

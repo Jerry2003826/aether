@@ -1,13 +1,11 @@
-# F10 授权采集、解析、来源与文本版本
+# F11 真实混合检索
 
-目标：HTTP/RSS/本地文档进入不可变 SourceVersion 和 Chunk。空正文失败。SSRF 约束实际连接。解析器有资源上限。
+目标：BM25、pgvector、BGE、RRF/rerank 的分组对照。授权过滤在检索前。索引用原子切换。
 
-合同：`docs/05_knowledge.md`，`docs/06_security.md`。
+合同：`docs/05_knowledge.md`。
 
-拟改路径：`services/worker/aether_worker/ingest.py`、`tests/integration/test_ingest.py`。
+进度：blocked。`reports/f01-probe.json` 里 `dimension_probed` 仍是 null。不能用随机向量充当 BGE。
 
-测试：`AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/unit tests/integration`
+恢复：加载 BAAI/bge-m3 权重，记下实测维度和 revision，再做 F11。
 
-进度：未开始。
-
-阻塞：无。F01 仍 blocked，不使用随机向量。
+F15 仍在 F14 之后，不从计划里去掉。
