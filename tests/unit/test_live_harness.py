@@ -175,7 +175,7 @@ def test_error_text_redacts_the_key(monkeypatch) -> None:
     assert report["status"] == "failed"
 
 
-def test_script_writes_blocked_result_without_calling_out(tmp_path: Path, monkeypatch) -> None:
+def test_script_writes_blocked_result_without_calling_out(monkeypatch) -> None:
     monkeypatch.delenv(LIVE_KEY, raising=False)
     monkeypatch.delenv(LIVE_BASE, raising=False)
     monkeypatch.delenv(LIVE_ALIAS, raising=False)
@@ -184,9 +184,12 @@ def test_script_writes_blocked_result_without_calling_out(tmp_path: Path, monkey
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    destination = tmp_path / "f26_live_result.json"
-    code = module.main(["--out", str(destination)])
-    written = json.loads(destination.read_text(encoding="utf-8"))
+    destination = Path("reports/f26_live_result.json")
+    try:
+        code = module.main(["--out", "reports/f26_live_result.json"])
+        written = json.loads(destination.read_text(encoding="utf-8"))
+    finally:
+        destination.unlink(missing_ok=True)
     assert code == 2
     assert written["status"] == "blocked"
     assert written["live_ready"] is False
