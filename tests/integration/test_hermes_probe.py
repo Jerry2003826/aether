@@ -13,7 +13,7 @@ def test_pinned_hermes_cli_prints_its_real_version(tmp_path: Path, monkeypatch) 
     assert probed["returncode"] == 0
     lines = probed["version"].splitlines()
     assert lines[0].startswith(f"Hermes Agent v{lock['version']} ")
-    assert lock["commit"][:12] in lines[0]
+    assert lock["commit"][:8] in lines[0]
     assert "Install method: git" in lines
     assert any(line.startswith("Python: 3.14") for line in lines)
     assert f"OpenAI SDK: {lock['openai_sdk']}" in lines

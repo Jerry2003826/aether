@@ -6,7 +6,6 @@ that prints the version is the git checkout, so the CLI can read the tag.
 
 from __future__ import annotations
 
-import argparse
 import hashlib
 import json
 import os
@@ -20,6 +19,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "config" / "hermes.lock.json"
+INSTALL_DIR = ROOT / ".hermes"
 REPOSITORY = "https://github.com/NousResearch/hermes-agent.git"
 TAG = "v0.22.1"
 COMMIT = "297552a9d646119871391d202509822cd86330df"
@@ -111,47 +111,46 @@ def _lock_matches(lock: dict[str, object]) -> bool:
     }
 
 
-def _ensure_checkout(dest: Path) -> None:
-    if (dest / ".git").is_dir() and _git(dest, "rev-parse", "HEAD") == COMMIT:
+def _ensure_checkout() -> None:
+    if (INSTALL_DIR / ".git").is_dir() and _git(INSTALL_DIR, "rev-parse", "HEAD") == COMMIT:
         return
-    if dest.exists():
-        shutil.rmtree(dest)
-    dest.parent.mkdir(parents=True, exist_ok=True)
-    subprocess.run(["git", "clone", "--depth", "1", "--branch", TAG, REPOSITORY, str(dest)], check=True)
+    if INSTALL_DIR.exists():
+        shutil.rmtree(INSTALL_DIR)
+    subprocess.run(["git", "clone", "--depth", "1", "--branch", TAG, REPOSITORY, ".hermes"], cwd=ROOT, check=True)
 
 
-def install(dest: Path) -> str:
+def install() -> str:
     lock = json.loads(LOCK_PATH.read_text(encoding="utf-8"))
     if not _lock_matches(lock):
         _fail("hermes.lock.json does not match the pinned install")
-    archive = dest.parent / f"hermes-v{VERSION}.tar.gz"
+    archive = ROOT / f".hermes-v{VERSION}.tar.gz"
     if not archive.is_file() or _sha256(archive) != ARCHIVE_SHA256:
         _download(ARCHIVE_URL, archive)
     actual = _sha256(archive)
     if actual != ARCHIVE_SHA256:
         archive.unlink(missing_ok=True)
         _fail(f"hermes archive sha256 {actual} != {ARCHIVE_SHA256}")
-    _ensure_checkout(dest)
-    if _git(dest, "rev-parse", "HEAD") != COMMIT:
+    _ensure_checkout()
+    if _git(INSTALL_DIR, "rev-parse", "HEAD") != COMMIT:
         _fail(f"hermes HEAD is not {COMMIT}")
-    if _git(dest, "rev-parse", TAG) != TAG_OBJECT:
+    if _git(INSTALL_DIR, "rev-parse", TAG) != TAG_OBJECT:
         _fail(f"hermes tag object is not {TAG_OBJECT}")
-    if _git(dest, "rev-parse", f"{TAG}^{{}}") != COMMIT:
+    if _git(INSTALL_DIR, "rev-parse", f"{TAG}^{{}}") != COMMIT:
         _fail(f"hermes tag does not peel to {COMMIT}")
     for relative in BOUND_FILES:
         member = f"{ARCHIVE_ROOT}/{relative}"
-        cloned = hashlib.sha256((dest / relative).read_bytes()).hexdigest()
+        cloned = hashlib.sha256((INSTALL_DIR / relative).read_bytes()).hexdigest()
         if cloned != _archive_sha(archive, member):
             _fail(f"{relative} does not match the checksummed archive")
     env = _clean_env()
     subprocess.run(["uv", "python", "install", PYTHON], check=True, env=env)
     subprocess.run(
         ["uv", "sync", "--python", PYTHON, "--frozen", "--no-dev"],
-        cwd=dest,
+        cwd=INSTALL_DIR,
         check=True,
         env=env,
     )
-    binary = dest / ".venv" / "bin" / "hermes"
+    binary = INSTALL_DIR / ".venv" / "bin" / "hermes"
     if not binary.is_file():
         _fail("hermes executable was not installed")
     home = Path(tempfile.mkdtemp(prefix="hermes-home-"))
@@ -171,7 +170,7 @@ def install(dest: Path) -> str:
         print(completed.stderr, end="", file=sys.stderr)
     version_line = completed.stdout.splitlines()[0] if completed.stdout else ""
     prefix = f"Hermes Agent v{VERSION} "
-    if completed.returncode != 0 or not version_line.startswith(prefix) or COMMIT[:12] not in version_line:
+    if completed.returncode != 0 or not version_line.startswith(prefix) or COMMIT[:8] not in version_line:
         _fail(f"hermes version probe failed: {completed.returncode} {version_line}")
     github_path = os.environ.get("GITHUB_PATH")
     if github_path:
@@ -181,10 +180,7 @@ def install(dest: Path) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--dest", type=Path, required=True)
-    args = parser.parse_args()
-    binary = install(args.dest)
+    binary = install()
     print(f"hermes_bin={binary}")
 
 

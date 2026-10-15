@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 .venv/
+.hermes/
+.hermes-v*.tar.gz
 .cache/
 __pycache__/
 *.pyc

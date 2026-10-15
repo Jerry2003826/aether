@@ -77,7 +77,7 @@ jobs:
       - name: Install Playwright Chromium
         run: uv run --locked --no-build playwright install --with-deps chromium
       - name: Install pinned Hermes and probe it
-        run: uv run --locked --no-build python scripts/install_hermes.py --dest "${RUNNER_TEMP}/hermes"
+        run: uv run --locked --no-build python scripts/install_hermes.py
       - name: Integration tests and doctor
         env:
           AETHER_REQUIRE_SERVICES: "1"
