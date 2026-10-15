@@ -54,7 +54,10 @@ from aether_worker.tokenize import TOKENIZER_VERSION
 
 ROOT = Path(__file__).resolve().parents[3]
 SNAPSHOT = ROOT / "evals" / "f26_snapshot"
+CHECKER = ROOT / "evals" / "f26_checker" / "check.py"
 SOURCES = ROOT / "evals" / "f26_sources"
+BILLING_NAME = "billing.py"
+CHECK_NAME = "check.py"
 OPENHANDS_PYTHON = ROOT / "environments" / "openhands" / ".venv" / "bin" / "python"
 OPENHANDS_JOB = ROOT / "environments" / "openhands" / "f26_job.py"
 MAX_CALLS = 8
@@ -95,6 +98,14 @@ def _copy_snapshot(destination: Path) -> None:
     if destination.exists():
         shutil.rmtree(destination)
     shutil.copytree(SNAPSHOT, destination)
+    shutil.copyfile(CHECKER, destination / CHECK_NAME)
+
+
+def _reference_sha() -> str:
+    with tempfile.TemporaryDirectory() as temporary:
+        destination = Path(temporary) / "reference"
+        _copy_snapshot(destination)
+        return _tree_sha(destination)
 
 
 def _head() -> str | None:
@@ -120,7 +131,7 @@ def _default_verify(tree: Path) -> dict[str, Any]:
 
 def _local_check(tree: Path) -> dict[str, Any]:
     completed = subprocess.run(
-        [sys.executable, "check.py"],
+        [sys.executable, CHECK_NAME],
         cwd=tree,
         capture_output=True,
         text=True,
@@ -149,7 +160,7 @@ def _docker_check(tree: Path, secret: str) -> dict[str, Any]:
         "/work",
         VERIFY_IMAGE,
         "python",
-        "check.py",
+        CHECK_NAME,
     ]
     if secret and any(secret in part for part in command):
         return {
@@ -588,13 +599,13 @@ def _grade_attempt(
     checker_sha: str,
     verify: Callable[[Path], dict[str, Any]],
 ) -> dict[str, Any]:
-    original = (SNAPSHOT / "billing.py").read_bytes()
-    current = (attempt_dir / "billing.py").read_bytes()
+    original = (SNAPSHOT / BILLING_NAME).read_bytes()
+    current = (attempt_dir / BILLING_NAME).read_bytes()
     graded = verify(attempt_dir)
     graded["pre_patch_tree_sha256"] = pre_patch
     graded["patch_sha256"] = hashlib.sha256(current).hexdigest()
     graded["patch_writer"] = "openhands" if current != original else "unchanged"
-    graded["checker_sha256"] = hashlib.sha256((attempt_dir / "check.py").read_bytes()).hexdigest()
+    graded["checker_sha256"] = hashlib.sha256((attempt_dir / CHECK_NAME).read_bytes()).hexdigest()
     checker_ok = graded["checker_sha256"] == checker_sha
     fresh = pre_patch == snapshot_sha
     graded["reused_failed_tree"] = not fresh
@@ -703,8 +714,8 @@ def run_f26_acceptance(
     sources = _read_sources()
     hybrid = _hybrid(sources, encode)
     linux = (isolate or _linux_isolation)(secret)
-    snapshot_sha = _tree_sha(SNAPSHOT)
-    checker_sha = hashlib.sha256((SNAPSHOT / "check.py").read_bytes()).hexdigest()
+    snapshot_sha = _reference_sha()
+    checker_sha = hashlib.sha256(CHECKER.read_bytes()).hexdigest()
     coding: dict[str, Any] = {
         "status": NOT_RUN,
         "snapshot_sha256": snapshot_sha,
@@ -758,7 +769,7 @@ def run_f26_acceptance(
             coding["reason"] = blocked
         else:
             try:
-                billing = (SNAPSHOT / "billing.py").read_text(encoding="utf-8")
+                billing = (SNAPSHOT / BILLING_NAME).read_text(encoding="utf-8")
                 prompt = _coding_prompt(str(baseline.get("stdout") or ""), billing)
                 for _ in range(2):
                     attempt_dir = work / f"attempt-{len(coding['attempts']) + 1}"
@@ -781,7 +792,7 @@ def run_f26_acceptance(
                     coding["attempts"].append(graded)
                     if graded["accepted"]:
                         break
-                    billing = (attempt_dir / "billing.py").read_text(encoding="utf-8")
+                    billing = (attempt_dir / BILLING_NAME).read_text(encoding="utf-8")
                     prompt = _coding_prompt(str(graded.get("stdout") or graded.get("reason") or ""), billing)
                 coding["sdk"] = observed.get("sdk")
                 coding["openhands_release"] = observed.get("release")

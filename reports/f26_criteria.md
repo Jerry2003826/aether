@@ -41,7 +41,7 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 这一次做四件事：
 
 - 协议：一次 `tools` / `schema` / `usage` 探针，模型别名必须是 `deepseek-chat`。
-- 编码：`evals/f26_snapshot` 里的 `add` 本来就是 `return a - b`。独立测试先在新目录里观察到 `add(1, 2)=-1`。每次尝试都从快照重新复制，失败目录的哈希不能当成通过。OpenHands SDK 进程自己把补丁写进 `billing.py`，父进程不替它写。通过必须来自另一次只读容器：`python:3.12-alpine`，`--network none --read-only --cap-drop ALL --pids-limit 32`。没有 Docker 或镜像拉不下来，这项是 not_run。
+- 编码：`evals/f26_snapshot` 里的 `add` 本来就是 `return a - b`。可信检查在 `evals/f26_checker/check.py`，每次复制进一个新目录，不放在模型可以改的快照里。独立测试先观察到 `add(1, 2)=-1`。每次尝试都从快照重新复制，失败目录的哈希不能当成通过。OpenHands SDK 进程自己把补丁写进 `billing.py`，父进程不替它写。通过必须来自另一次只读容器：`python:3.12-alpine`，`--network none --read-only --cap-drop ALL --pids-limit 32`。没有 Docker 或镜像拉不下来，这项是 not_run。
 - 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
 - Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
 
