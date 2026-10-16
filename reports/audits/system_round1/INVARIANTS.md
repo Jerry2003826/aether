@@ -43,7 +43,7 @@
 | INV-TRUTH-03 | 只有获准、仍可见、已确认的资料能作为验收依据；互相矛盾的证据只能 UNVERIFIABLE | `_source_snapshot`，`research.required_facts` / `goal_completion_detail` | `goal_effect.py:779-787`；`services/worker/aether_worker/research.py:147-163,388-418` | 已证实违反（P0-01、P1-05） |
 | INV-TRUTH-04 | 对外展示的合同哈希就是验收绑定的权威合同；批准后的合同不可改写 | `control._snapshot` / `revise_contract` | `control.py:112-129,434-441` | 已证实违反（P2-02） |
 | INV-TRUTH-05 | 证据元数据如实：运行模式、费用来源、用量状态 | `_ensure_verification` 报告，`record_model_response`，`ModelGateway._cost_micro_usd` | `goal_effect.py:635-649`；`budget.py:496-524`；`model.py:24-37` | 已证实违反（P2-01） |
-| INV-TRUTH-06 | 审批记录真实反映 owner 的决定，系统不代签 | `_ensure_contract` | `goal_effect.py:407-426` | 潜在风险（规格偏离，S-077） |
+| INV-TRUTH-06 | 审批记录真实反映 owner 的决定，系统不代签 | `_ensure_contract` | `goal_effect.py:407-426` | 潜在风险（规格偏离，S-071） |
 
 ## 四、不算错钱
 
@@ -61,11 +61,11 @@
 | ID | 不变量 | 负责组件 | 代码位置 | 状态 |
 |---|---|---|---|---|
 | INV-DATA-01 | 去重只共享字节，不共享角色、分类、归属和删除状态 | `ArtifactStore._insert_on` / `_live_identity`，`_bind_task_artifact` | `packages/storage/aether_storage/artifacts.py:692-746`；`goal_effect.py:493-500` | 已证实违反（P1-01） |
-| INV-DATA-02 | 事务原子；产物日志的 committed 以数据库提交为准；崩溃后的暂存能被对账 | `Database.transaction`，`ArtifactStore._watch_commit` / `recover` | `packages/storage/aether_storage/db.py:20-51`；`artifacts.py:153-165,218-301` | 潜在风险：`recover()` 没有产品调用方（S-042）；提交语义本身守住 |
+| INV-DATA-02 | 事务原子；产物日志的 committed 以数据库提交为准；崩溃后的暂存能被对账 | `Database.transaction`，`ArtifactStore._watch_commit` / `recover` | `packages/storage/aether_storage/db.py:20-51`；`artifacts.py:153-165,218-301` | 潜在风险：`recover()` 没有产品调用方（S-041），`get()` 可能短读（S-042）；提交语义本身守住 |
 | INV-DATA-03 | 删除一个产物不能让之后无关的同字节写入永久失败 | `_insert_on` + `UNIQUE(project_id, storage_key)` | `artifacts.py:723-733`；`contracts/schema.sql:155` | 已证实违反（P1-01） |
 | INV-DATA-04 | 恢复不毁掉恢复点之后仍被账本引用的字节；恢复能执行完 | `supply.restore_project` / `_install_tree` | `services/worker/aether_worker/supply.py:81-108,183-221` | 已证实违反（P1-09） |
 | INV-DEL-01 | 删除或更正后的记忆、删除后的资料，不再进入新任务的模型上下文和验收 | `memory._delete` / `_patch`，`_source_snapshot` | `services/worker/aether_worker/memory.py:298,338,341,365-372`；`goal_effect.py:779-787` | 已证实违反（P0-01） |
-| INV-DEL-02 | 删除让派生索引和缓存失效（visibility epoch），晚到写入不能复活 | `retention.invalidate_derived` / `commit_*`，检索缓存 | `services/worker/aether_worker/retention.py:31-38,47-120`；`console_commands.py:196-210` | 潜在风险：来源删除不递增 epoch，检索缓存同 epoch 内仍返回旧结果（S-049；检索未接产品路径） |
+| INV-DEL-02 | 删除让派生索引和缓存失效（visibility epoch），晚到写入不能复活 | `retention.invalidate_derived` / `commit_*`，检索缓存 | `services/worker/aether_worker/retention.py:31-38,47-120`；`console_commands.py:196-210` | 潜在风险：来源删除不递增 epoch，检索缓存同 epoch 内仍返回旧结果（S-048；检索未接产品路径） |
 
 ## 六、长期稳定
 
@@ -98,7 +98,7 @@
 |---|---|---|---|---|
 | INV-LEARN-01 | 已上线（canary）的技能能经 owner 回滚到上一版本 | `console_commands._rollback`，`skill_eval.rollback_active`，`console_routes._deploy_body` | `console_commands.py:355-369`；`skill_eval.py:137-170`；`services/api/aether_api/console_routes.py:627-647` | 已证实违反（P2-04） |
 | INV-LEARN-02 | 记忆纠错产生新版本，旧版本不再生效（包括作为资料） | `memory._patch` | `memory.py:319-362` | 已证实违反（P0-01） |
-| INV-LEARN-03 | 评测只能由独立 verifier 执行并写分数；actor 不能自带分数；排队的评测会被执行 | `skill_eval.record_evaluation`，`console_commands._queue_evaluation` | `skill_eval.py:35-73`；`console_commands.py:521-553` | 潜在风险：写分数的约束守住（`test_skill_eval.py`），但排队的评测没有执行者（S-069） |
+| INV-LEARN-03 | 评测只能由独立 verifier 执行并写分数；actor 不能自带分数；排队的评测会被执行 | `skill_eval.record_evaluation`，`console_commands._queue_evaluation` | `skill_eval.py:35-73`；`console_commands.py:521-553` | 潜在风险：写分数的约束守住（`test_skill_eval.py`），但排队的评测没有执行者（S-068） |
 | INV-LEARN-04 | 技能晋升不会自动发生 | `skills.propose_candidate`，`config/feature_matrix.yaml` | `skills.py:205-211` | 守住（`tests/unit/test_skills.py`，`verify_freeze.py`） |
 
 ## 状态统计核对
