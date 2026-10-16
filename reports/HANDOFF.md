@@ -2,7 +2,7 @@
 
 ## F26 验收与研究路径的两处不稳定（分支 `cursor/f26-hardening-1f84`）
 
-基线 `0767a5e`。没有改 `contracts/`、`reference/`、验收通过条件的判定口径，也没有改 `STATUS.json` 的 `live_ready`。本机没有 live model key，不能重跑真实 DeepSeek。所有者需要重跑 `scripts/run_f26_acceptance.py` 和 `scripts/run_live_task_check.py`。
+基线 `0767a5e`，实现提交 `bfca959`。没有改 `contracts/`、`reference/`、验收通过条件的判定口径，也没有改 `STATUS.json` 的 `live_ready`。本机没有 live model key，不能重跑真实 DeepSeek。所有者需要重跑 `scripts/run_f26_acceptance.py` 和 `scripts/run_live_task_check.py`。
 
 两处修复：
 
