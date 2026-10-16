@@ -2,7 +2,7 @@
 
 ## SYS-06 记忆来源与 SYS-04 验收条款（分支 `cursor/r6-memory-provenance-110a`）
 
-基线现为 `85d27d3`（PR #21 已合入，ADR-F30 归 SYS-02/07）。本决定改记 ADR-F31。只改 SYS-06 与 SYS-04。没有改 `verification.py`、技能评审、工作区导出、`acceptance_report`、搜索路由或 `skill.evaluate`。没有改 `contracts/`、`reference/`、`STATUS.json`。没有放宽断言，没有 skip 或 xfail。不改变 `live_ready`。
+基线现为 `85d27d3`（PR #21 已合入，ADR-F30 归 SYS-02/07）。实现提交 `35d66b9`。本决定改记 ADR-F31。只改 SYS-06 与 SYS-04。没有改 `verification.py`、技能评审、工作区导出、`acceptance_report`、搜索路由或 `skill.evaluate`。没有改 `contracts/`、`reference/`、`STATUS.json`。没有放宽断言，没有 skip 或 xfail。不改变 `live_ready`。
 
 SYS-06：确认和更正继承 `provenance.sensitivity` 与 `source_artifact_ids`。显式降级是 `declassify`，要有一次性 `memory_declassify` 授权；已经是目标级别时拒绝且不消耗授权。`_is_project_test_run` 不看 JSON 的 `kind`。产物须已提交，重算哈希等于账本，正文不能自记失败，并且 `aether_verifier` 的 `test_run` 行把 PASS 绑到同一哈希。PASS 与 FAIL 并存则拒绝。正向路径：验证者账本绑定的 PASS 使记忆成为 `observed_test`，见 `tests/integration/test_r6_memory_contract.py` 的 `test_test_run_requires_verifier_ledger_bound_to_the_bytes`。`tests/integration/test_memory.py` 里没有账本的用户 JSON 期望改为 `proposed`，不再把 `kind=test_run` 当成通过。
 
