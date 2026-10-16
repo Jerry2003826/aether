@@ -171,7 +171,32 @@ def _upload(http: httpx.Client, csrf: str, project_id: str, key: str, name: str,
     return str(uploaded.json()["artifact_id"])
 
 
+def _task_status(database: Database, owner_id: str, project_id: str, task_id: str) -> str:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        status = conn.execute(
+            text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": task_id},
+        ).scalar_one()
+    return str(status)
+
+
+def _wait_approval(database: Database, owner_id: str, project_id: str, task_id: str, proc, logs: list[str]) -> None:
+    deadline = time.time() + 60
+    last = ""
+    while time.time() < deadline:
+        if proc.poll() is not None:
+            raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-60:])}")
+        last = _task_status(database, owner_id, project_id, task_id)
+        if last == "RUNNING":
+            raise AssertionError("任务在编码作业开始前已是 RUNNING")
+        if last == "WAITING_APPROVAL":
+            return
+        time.sleep(0.2)
+    raise AssertionError(f"任务没有停在 WAITING_APPROVAL，最后是 {last}")
+
+
 def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, logs) -> None:
+    _wait_approval(database, owner_id, project_id, task_id, proc, logs)
     broken = _upload(http, csrf, project_id, "r7-code-broken", "broken.json", _workspace(0, 42), "application/json")
     failed = http.post(
         f"/v1/projects/{project_id}/coding-jobs",
@@ -182,6 +207,7 @@ def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, lo
     job_id = failed.json()["resource_id"]
     first = _wait_job(database, owner_id, project_id, "value", {"FAILED"}, proc, logs)
     assert first["patch_id"]
+    assert _task_status(database, owner_id, project_id, task_id) == "WAITING_APPROVAL"
     fixed = _upload(http, csrf, project_id, "r7-code-fixed", "fixed.json", _workspace(42, 42), "application/json")
     again = http.post(
         f"/v1/projects/{project_id}/coding-jobs",
@@ -207,6 +233,7 @@ def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, lo
     assert finished["result_id"] in body["artifact_ids"]
     assert body["budget"]["request_count"] >= 2
     assert body["budget"]["held_micro_usd"] == 0
+    assert _task_status(database, owner_id, project_id, task_id) == "WAITING_APPROVAL"
 
 
 def _skill(http, csrf, owner_id, project_id, database, proc, logs) -> None:

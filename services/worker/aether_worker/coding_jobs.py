@@ -190,11 +190,20 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 task_id=task_id,
                 request_key=request_key,
                 attempt_id=str(fencing),
+                job_id=job_id,
+                operation_id=str(row["operation_id"]),
             )
-            restore_status = _ensure_model_runnable(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
             proxy: CodingModelProxy | None = None
             try:
                 proxy = CodingModelProxy(database, job_token=model_token)
+                _renew_lease(
+                    database,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    operation_id=str(row["operation_id"]),
+                    job_id=job_id,
+                    fencing_token=fencing,
+                )
                 try:
                     sandbox = run_coding_sandbox(
                         root,
@@ -241,15 +250,6 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             finally:
                 if proxy is not None:
                     proxy.close()
-                if restore_status is not None:
-                    _restore_task_status(
-                        database,
-                        owner_id=owner_id,
-                        project_id=project_id,
-                        task_id=task_id,
-                        status=restore_status[0],
-                        version=restore_status[1],
-                    )
             result = sandbox["result"]
             passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
             error = None if passed else "test_failed"
@@ -1043,6 +1043,8 @@ def _issue_coding_token(
     task_id: str,
     request_key: str,
     attempt_id: str,
+    job_id: str,
+    operation_id: str,
 ) -> str:
     gateway = ModelGateway(database, upstream_base="", provider_key="")
     return gateway.issue_token(
@@ -1053,6 +1055,8 @@ def _issue_coding_token(
         attempt_id=attempt_id,
         capabilities=["coding:model"],
         aliases=["coder"],
+        job_id=job_id,
+        operation_id=operation_id,
     )
 
 
@@ -1079,49 +1083,6 @@ def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     if incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
         return None
     return incoming, outgoing
-
-
-# _admit only accepts RUNNING and VERIFYING. A coding attempt borrows RUNNING from these
-# statuses and puts the previous one back. Pause, cancel and PAUSED stay put.
-_ADMISSION_BORROW = {"QUEUED", "DRAFT", "WAITING_APPROVAL", "NEEDS_REVIEW", "FAILED", "SUCCEEDED"}
-
-
-def _ensure_model_runnable(database: Database, *, owner_id: str, project_id: str, task_id: str) -> tuple[str, int] | None:
-    """Move a task to RUNNING for model admission. The returned status and version are restored afterwards."""
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        row = conn.execute(
-            text("SELECT status, resume_state, version FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
-            {"project_id": project_id, "id": task_id},
-        ).mappings().first()
-        if row is None or str(row["resume_state"] or "") in {"pause_requested", "cancel_requested"} or str(row["status"]) in {"CANCELLED", "PAUSED"}:
-            raise CodingError("task_not_runnable")
-        status = str(row["status"])
-        if status in {"RUNNING", "VERIFYING"}:
-            return None
-        if status not in _ADMISSION_BORROW:
-            raise CodingError("task_not_runnable")
-        version = conn.execute(
-            text(
-                "UPDATE tasks SET status = 'RUNNING', version = version + 1 "
-                "WHERE project_id = :project_id AND id = :id AND status = :status RETURNING version"
-            ),
-            {"project_id": project_id, "id": task_id, "status": status},
-        ).scalar()
-        if version is None:
-            raise CodingError("task_not_runnable")
-    return status, int(version)
-
-
-def _restore_task_status(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str, version: int) -> None:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
-            text(
-                "UPDATE tasks SET status = :status, version = version + 1 "
-                "WHERE project_id = :project_id AND id = :id AND status = 'RUNNING' AND version = :version "
-                "AND COALESCE(resume_state, '') NOT IN ('pause_requested', 'cancel_requested')"
-            ),
-            {"status": status, "version": version, "project_id": project_id, "id": task_id},
-        )
 
 
 def _measured_usage(

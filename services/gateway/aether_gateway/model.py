@@ -6,13 +6,15 @@ import json
 import secrets
 import urllib.error
 import urllib.request
+import uuid
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from typing import Any
 
 import litellm
 from sqlalchemy import text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.engine import Connection
+from sqlalchemy.exc import DataError, IntegrityError
 
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
@@ -28,6 +30,8 @@ SCRIPTED_COMPLETION_TOKENS = 4
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
 _CHAT_FIELDS = ("model", "messages", "tools", "tool_choice")
+_CODING_LEASE_STATES = ("STARTING", "ACTIVE", "EXPORTING")
+_MAX_FENCING = 9223372036854775807
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -171,12 +175,16 @@ class ModelGateway:
         capabilities: list[str],
         aliases: list[str],
         egress: list[str] | None = None,
+        job_id: str | None = None,
+        operation_id: str | None = None,
     ) -> str:
         """A token for one booked request of one task attempt.
 
         complete() spends this token on the first admitted call. relay_chat keeps
         the session token and spends a new child token per call. owner_id stays in
         the stored scope so the gateway can open that child without reading projects.
+        A coding session also stores the job and operation so the call is fenced by
+        that job's lease instead of the task status.
         """
         token = secrets.token_urlsafe(32)
         scope = {
@@ -189,6 +197,10 @@ class ModelGateway:
             "aliases": aliases,
             "egress": egress or [],
         }
+        if job_id is not None:
+            scope["job_id"] = job_id
+        if operation_id is not None:
+            scope["operation_id"] = operation_id
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             conn.execute(
                 text(
@@ -285,11 +297,12 @@ class ModelGateway:
         return result
 
     def relay_chat(self, job_token: str, body: dict[str, Any]) -> dict[str, Any]:
-        """Forward one coding chat completion through the same admission as complete().
+        """Forward one coding chat completion fenced by the coding job lease.
 
         The session token stays valid for the attempt. Each call spends a new
-        one-time grant: _admit revokes it, a repeat of that prompt is rejected,
-        and another call past the reservation is rejected before the provider.
+        one-time child grant. A repeat of that prompt is rejected, and another
+        call past the reservation is rejected before the provider. The task row
+        is not read or written.
         """
         grant = self._scope(job_token)
         scope = grant["scope"]
@@ -313,17 +326,23 @@ class ModelGateway:
         return result
 
     def _spend_coding_ticket(self, session: dict[str, Any], *, alias: str, prompt: str) -> int:
-        """Open one child reservation and pass it through _admit. Replay and overrun stop here."""
+        """Spend one child ticket while the coding job lease and fencing token still match.
+
+        Replay and overrun stop here. This does not call _admit and does not change the task.
+        """
         scope = session["scope"]
         project_id = str(session["project_id"])
         task_id = str(session["task_id"])
         parent_key = str(scope["request_key"])
-        attempt_id = str(scope["attempt_id"])
-        prompt_sha = sha256_text(prompt)
-        child_key = f"{parent_key}:call:{prompt_sha}"
         owner_id = scope.get("owner_id")
         if not isinstance(owner_id, str) or not owner_id:
             raise GatewayDenied("budget_exceeded")
+        job_id = _uuid_text(scope.get("job_id"))
+        operation_id = _uuid_text(scope.get("operation_id"))
+        fencing = _fencing_token(scope.get("attempt_id"))
+        attempt_id = str(fencing)
+        prompt_sha = sha256_text(prompt)
+        child_key = f"{parent_key}:call:{prompt_sha}"
         self._open_coding_ticket(
             project_id=project_id,
             task_id=task_id,
@@ -332,23 +351,67 @@ class ModelGateway:
             attempt_id=attempt_id,
             alias=alias,
             prompt_sha=prompt_sha,
-        )
-        child_token = self.issue_token(
-            owner_id=owner_id,
-            project_id=project_id,
-            task_id=task_id,
-            request_key=child_key,
-            attempt_id=attempt_id,
-            capabilities=["coding:model"],
-            aliases=[alias],
+            job_id=job_id,
+            operation_id=operation_id,
+            fencing=fencing,
         )
         try:
-            max_tokens = self._admit(self._scope(child_token), alias=alias, prompt=prompt, requested=None)
+            child_token = self.issue_token(
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=child_key,
+                attempt_id=attempt_id,
+                capabilities=["coding:model"],
+                aliases=[alias],
+                job_id=job_id,
+                operation_id=operation_id,
+            )
+            self._revoke_once(self._scope(child_token))
+            self._require_coding_lease(
+                project_id=project_id,
+                task_id=task_id,
+                job_id=job_id,
+                operation_id=operation_id,
+                fencing=fencing,
+            )
         except GatewayDenied:
-            self._close_coding_ticket(project_id, task_id, child_key)
+            self._abort_coding_ticket(project_id, task_id, parent_key, child_key)
             raise
         self._close_coding_ticket(project_id, task_id, child_key)
-        return max_tokens
+        return CODING_CALL_OUTPUT_CAP
+
+    def _require_coding_lease(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        job_id: str,
+        operation_id: str,
+        fencing: int,
+    ) -> None:
+        with self.database.transaction(project_id=project_id) as conn:
+            if not _coding_lease_held(
+                conn,
+                project_id=project_id,
+                task_id=task_id,
+                job_id=job_id,
+                operation_id=operation_id,
+                fencing=fencing,
+            ):
+                raise GatewayDenied("token_rejected")
+
+    def _revoke_once(self, grant: dict[str, Any]) -> None:
+        with self.database.transaction(project_id=str(grant["project_id"])) as conn:
+            updated = conn.execute(
+                text(
+                    "UPDATE capability_grants SET revoked_at = now() "
+                    "WHERE project_id = :project_id AND id = :id AND revoked_at IS NULL AND expires_at > now()"
+                ),
+                {"project_id": grant["project_id"], "id": grant["id"]},
+            ).rowcount
+        if updated != 1:
+            raise GatewayDenied("token_rejected")
 
     def _open_coding_ticket(
         self,
@@ -360,8 +423,20 @@ class ModelGateway:
         attempt_id: str,
         alias: str,
         prompt_sha: str,
+        job_id: str,
+        operation_id: str,
+        fencing: int,
     ) -> None:
         with self.database.transaction(project_id=project_id) as conn:
+            if not _coding_lease_held(
+                conn,
+                project_id=project_id,
+                task_id=task_id,
+                job_id=job_id,
+                operation_id=operation_id,
+                fencing=fencing,
+            ):
+                raise GatewayDenied("token_rejected")
             parent = conn.execute(
                 text(
                     "SELECT usage_status, usage_detail FROM model_requests "
@@ -463,6 +538,70 @@ class ModelGateway:
                     "task_id": task_id,
                     "request_key": child_key,
                 },
+            )
+
+    def _abort_coding_ticket(self, project_id: str, task_id: str, parent_key: str, child_key: str) -> None:
+        """Drop the in-flight hold when the lease disappears before the provider is called."""
+        with self.database.transaction(project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": child_key},
+            ).mappings().first()
+            if row is None:
+                return
+            parent = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
+            ).mappings().first()
+            if parent is not None:
+                detail = parent["usage_detail"]
+                if isinstance(detail, str):
+                    detail = json.loads(detail)
+                detail = dict(detail or {})
+                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+                conn.execute(
+                    text(
+                        "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                        "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                    ),
+                    {
+                        "detail": json.dumps(detail),
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "request_key": parent_key,
+                    },
+                )
+            child = row["usage_detail"]
+            if isinstance(child, str):
+                child = json.loads(child)
+            child = dict(child or {})
+            child["dispatch_state"] = "response_recorded"
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = 0, input_tokens = 0, output_tokens = 0, "
+                    "usage_detail = CAST(:detail AS jsonb), completed_at = now() "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(child),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": child_key,
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE capability_grants SET revoked_at = now() "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND revoked_at IS NULL "
+                    "AND scope->>'request_key' = :request_key"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": child_key},
             )
 
     def _add_measured_usage(self, session: dict[str, Any], result: dict[str, Any]) -> None:
@@ -615,3 +754,54 @@ class ModelGateway:
                 {"project_id": project_id, "id": grant["id"]},
             )
         return max_tokens
+
+
+def _uuid_text(value: object) -> str:
+    if not isinstance(value, str):
+        raise GatewayDenied("token_rejected")
+    try:
+        return str(uuid.UUID(value))
+    except ValueError as exc:
+        raise GatewayDenied("token_rejected") from exc
+
+
+def _fencing_token(value: object) -> int:
+    if not isinstance(value, str) or not value.isdecimal():
+        raise GatewayDenied("token_rejected")
+    fencing = int(value)
+    if fencing > _MAX_FENCING:
+        raise GatewayDenied("token_rejected")
+    return fencing
+
+
+def _coding_lease_held(
+    conn: Connection,
+    *,
+    project_id: str,
+    task_id: str,
+    job_id: str,
+    operation_id: str,
+    fencing: int,
+) -> bool:
+    try:
+        row = conn.execute(
+            text(
+                "SELECT 1 FROM coding_jobs AS j "
+                "JOIN operations AS o ON o.project_id = j.project_id AND o.id = j.operation_id "
+                "WHERE j.project_id = :project_id AND j.id = :job_id AND j.task_id = :task_id "
+                "AND j.operation_id = :operation_id AND j.fencing_token = :fencing AND j.state = ANY(:states) "
+                "AND o.lease_until > now() "
+                "FOR UPDATE OF j"
+            ),
+            {
+                "project_id": project_id,
+                "job_id": job_id,
+                "task_id": task_id,
+                "operation_id": operation_id,
+                "fencing": fencing,
+                "states": list(_CODING_LEASE_STATES),
+            },
+        ).first()
+    except DataError as exc:
+        raise GatewayDenied("token_rejected") from exc
+    return row is not None

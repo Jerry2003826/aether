@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import cast
 
 from aether_gateway.__main__ import GATEWAY_CHAT_TIMEOUT_SECONDS, gateway_timeout
-from aether_gateway.model import GatewayDenied, ModelGateway, accepted_chat_body, scripted_chat_completion
+from aether_gateway.model import (
+    GatewayDenied,
+    ModelGateway,
+    _fencing_token,
+    _uuid_text,
+    accepted_chat_body,
+    scripted_chat_completion,
+)
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
 
@@ -42,6 +49,29 @@ def _gateway(upstream: str) -> ModelGateway:
     gateway._spend_coding_ticket = lambda _session, *, alias, prompt: 64  # type: ignore[method-assign]
     gateway._add_measured_usage = lambda _session, _result: None  # type: ignore[method-assign]
     return gateway
+
+
+def test_coding_fence_identity_rejects_a_non_decimal_attempt() -> None:
+    assert _fencing_token("7") == 7
+    try:
+        _fencing_token("not-a-fence")
+    except GatewayDenied as exc:
+        assert exc.code == "token_rejected"
+        assert exc.sent is False
+    else:
+        raise AssertionError("非数字 fencing 应拒绝")
+    try:
+        _uuid_text("not-a-job")
+    except GatewayDenied as exc:
+        assert exc.code == "token_rejected"
+    else:
+        raise AssertionError("非法作业 id 应拒绝")
+    try:
+        _fencing_token(str(9223372036854775808))
+    except GatewayDenied as exc:
+        assert exc.code == "token_rejected"
+    else:
+        raise AssertionError("超出 bigint 的 fencing 应拒绝")
 
 
 def test_chat_body_keeps_only_the_allowlist_and_the_server_timeout() -> None:
