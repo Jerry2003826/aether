@@ -11,4 +11,4 @@
 - SOCKS 只绑定该内部地址，出口网卡不提供代理
 - `playwright==1.64.0`
 
-结果：冻结检查通过。威胁浏览器单元测试 27 passed。本机没有 Docker。`0c19274` 的 pull_request integration 是 `392 passed, 4 warnings in 656.17s`。同一次提交的 push integration 有 1 个无关失败：PDF 索引进度停在 RUNNING。Sonar 质量门通过。`live_ready` 保持 pending。
+结果：冻结检查通过。威胁浏览器单元测试 27 passed。本机没有 Docker。`0c19274` 的 pull_request integration 是 `392 passed, 4 warnings in 656.17s`。同一次提交的 push integration 有 1 个失败：PDF 作业在正文版本写入后仍是 RUNNING，因为未测量文本启动了 Hub 嵌入下载。`6cdfa0e` 整批跳过向量，两次 integration 都失败。收窄后的采集只跳过未测量正文，测量向量照常写入，90 秒没有加长。这次收窄的 CI 还没有记录。`live_ready` 保持 pending。

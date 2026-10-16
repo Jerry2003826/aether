@@ -127,24 +127,40 @@ def embedding_runtime_ready() -> bool:
     return _RUNTIME_READY
 
 
-def vectors_for_index(texts: list[str]) -> list[list[float]] | None:
-    """Vectors for unmeasured chunks, or None when the local model cannot run.
+def vectors_for_index(texts: list[str], *, allow_download: bool) -> list[list[float] | None]:
+    """Measured vectors always. Unmeasured vectors only when a live encode is allowed.
 
-    None leaves embeddings unset. The caller still publishes the lexical index.
+    A skipped unmeasured text is None. The caller still publishes the lexical index.
     """
     if not texts:
         return []
-    if not embedding_runtime_ready():
-        print(f"aether-embedding-skipped reason=weights_absent count={len(texts)}", flush=True)
-        return None
-    return encode_texts(texts)
+    table: dict[str, list[float]] = _measured()["vectors"]
+    missing_at = [index for index, item in enumerate(texts) if _sha(item) not in table]
+    live: dict[int, list[float]] = {}
+    if missing_at and (allow_download or embedding_runtime_ready()):
+        encoded = _encode_live([texts[index] for index in missing_at])
+        live = dict(zip(missing_at, encoded, strict=True))
+    elif missing_at:
+        print(f"aether-embedding-skipped reason=weights_absent count={len(missing_at)}", flush=True)
+    chosen: list[list[float] | None] = []
+    for index, item in enumerate(texts):
+        vector = table.get(_sha(item))
+        if vector is None:
+            vector = live.get(index)
+        if vector is None:
+            chosen.append(None)
+            continue
+        if len(vector) != DIMENSION:
+            raise RetrievalError("dimension_mismatch")
+        chosen.append(vector)
+    return chosen
 
 
 def _encode_live(texts: list[str]) -> list[list[float]]:
     print(f"aether-embedding-start count={len(texts)}", flush=True)
     try:
         completed = subprocess.run(
-            ["uv", "run", "--offline", "--frozen", "python", "encode_texts.py"],
+            ["uv", "run", "--frozen", "python", "encode_texts.py"],
             cwd=ML_ENV,
             input=json.dumps({"texts": texts}),
             text=True,
@@ -355,6 +371,7 @@ def build_generation(
     index_root: Path,
     force: bool = False,
     now: datetime | None = None,
+    allow_download: bool = True,
 ) -> str:
     """Snapshot visible chunks, write a temp BM25 directory, then publish one READY generation."""
     moment = now or datetime.now(timezone.utc)
@@ -393,8 +410,12 @@ def build_generation(
                 raise RetrievalError("empty_index")
             seen_epoch = current_epoch(conn, project_id)
             missing = [row["text_content"] for row in rows if row["embedding_revision"] != EMBEDDING_REVISION]
-            vectors = vectors_for_index(missing) if missing else []
-            encoded = {} if vectors is None else dict(zip(missing, vectors, strict=True))
+            vectors = vectors_for_index(missing, allow_download=allow_download) if missing else []
+            encoded = {
+                item: vector
+                for item, vector in zip(missing, vectors, strict=True)
+                if vector is not None
+            }
             for row in rows:
                 if row["text_content"] not in encoded:
                     continue

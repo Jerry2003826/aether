@@ -16,7 +16,11 @@ Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所�
 
 本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 失败，失败信息是 Docker is required，不是 skip。
 
-`0c19274` 的 push integration（https://github.com/Jerry2003826/aether/actions/runs/38964656426）在 `test_text_pdf_is_indexed_as_extracted_text` 上失败：90 秒时作业仍是 `RUNNING`，`source_version_id` 已经写上，`error_code` 为空，worker 日志只有 `aether-worker-ready`。本机对 `tests/fixtures/r8a/bake.pdf` 的抽取结果是 `苹果派烘烤说明`，不在测量表里，所以索引构建会去跑 `environments/ml/encode_texts.py`。这个进程原先会访问 Hub，超时是 900 秒，测试只等 90 秒。docling 抽取本身不是这段等待。现在没有已固定修订的权重或不能离线导入时，采集不下载模型，词法索引照常发布，向量留空。失败时测试会打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。这次修正的 CI 还没有记录。`live_ready` 仍是 pending。没有合并。
+`0c19274` 的 push integration（https://github.com/Jerry2003826/aether/actions/runs/38964656426）在 `test_text_pdf_is_indexed_as_extracted_text` 上失败：90 秒时作业仍是 `RUNNING`，`source_version_id` 已经写上，`error_code` 为空，worker 进程还在，日志只有 `aether-worker-ready`。本机对 `tests/fixtures/r8a/bake.pdf` 的抽取结果是 `苹果派烘烤说明`，不在测量表里。版本写入发生在 `_publish_index` 之前，所以卡点不是 docling，也不是未领任务，没有吞掉的异常。卡在未测量正文调用 `encode_texts.py`：它会 `HfApi().model_info` 再加载 BGE-M3，子进程超时 900 秒，测试只等 90 秒。
+
+`6cdfa0e` 把整批向量都跳过，并且让编码进程强制离线。push run https://github.com/Jerry2003826/aether/actions/runs/38968650893 和 PR run https://github.com/Jerry2003826/aether/actions/runs/38968658047 的 integration 都失败：`test_measured_revision_and_grouped_channels`、`test_github_and_arxiv_are_fetched_indexed_and_searchable`、`test_source_filter_keeps_chunks_outside_the_global_window`。日志是 `aether-embedding-skipped reason=weights_absent`，已测量的苹果派和铁路短语也被丢掉。
+
+现在只在采集作业里对未测量正文跳过实时编码（`allow_download=False`，且本机没有该修订快照或不能离线导入）。测量表里的向量照常写入。显式 `build_generation` 仍默认允许编码进程访问 Hub。90 秒轮询没有加长。失败时测试仍打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。这次收窄的 CI 还没有记录。`live_ready` 仍是 pending。没有合并。
 
 本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
 

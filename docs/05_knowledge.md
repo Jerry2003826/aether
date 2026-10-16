@@ -41,7 +41,7 @@ BM25S `method=lucene,k1=1.2,b=0.75`。`Tokenizer` 采用冻结中文jieba词典+
 
 每项目一个不可变generation。构建worker从固定数据库快照导出有序chunk IDs与文本，保存BM25矩阵/词表、映射、source watermark和manifest hash；写临时目录后校验，原子切换active generation。查询拿到generation句柄后整个请求使用同一版本，引用计数结束才GC旧目录。进程并发构建通过数据库advisory lock/lease避免覆盖。
 
-明确限制：BM25S不是我们的事务型增量索引；批量重建默认debounce30秒。UI展示index_lag。新资料只有当chunk/vector/lexical符合最低合同才显示ready；向量失败可显式lexical_only，不假装完整hybrid。采集构建索引时，若本机没有已固定修订的嵌入权重，或 ML 环境不能离线导入，就不在这条作业里下载模型；词法索引用已抽取的文本发布，向量留空。
+明确限制：BM25S不是我们的事务型增量索引；批量重建默认debounce30秒。UI展示index_lag。新资料只有当chunk/vector/lexical符合最低合同才显示ready；向量失败可显式lexical_only，不假装完整hybrid。采集作业构建索引时，测量表里已有的向量照常写入。未进入测量表的正文，若本机没有已固定修订的嵌入权重，或 ML 环境不能离线导入，这条作业不下载模型，该段向量留空；词法索引仍用已抽取的文本发布。显式重建仍可启动编码进程。等待上限仍是 90 秒。
 
 删除/撤权立即进入tombstone，所有搜索结果在返回、重排、组装LLM上下文之前再次查权限/有效性；随后重建index并清理磁盘。在V1项目内权限一致，不承诺细粒度每段ACL；跨项目索引绝不合并再先检索后过滤。
 

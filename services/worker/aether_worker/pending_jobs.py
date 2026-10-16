@@ -232,6 +232,7 @@ def _publish_index(
             generation_key=key,
             index_root=index_root,
             force=True,
+            allow_download=False,
         )
     except RetrievalError as exc:
         if exc.code != "generation_key_rejected":

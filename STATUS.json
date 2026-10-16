@@ -14,17 +14,13 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. The PDF ingest failure on push run 38964656426 stayed RUNNING after the text version was stored because unmeasured text started a Hub embedding download inside the 90s poll. Ingestion now skips that download unless the pinned snapshot and the offline ML env are already present, and the poll failure prints the full worker log plus the job rows. CI for this ingest change is not recorded yet. Do not merge. Approval Agent did not approve.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. Push run 38964656426 left the PDF job RUNNING after the text version was stored because unmeasured text started a Hub embedding download. Commit 6cdfa0e skipped every vector and both integration runs failed the measured-vector tests. Worker ingestion now writes measured vectors and skips live encode only for unmeasured text when the pinned snapshot or offline ML import is absent. The 90s poll is unchanged. CI for this narrower change is not recorded yet. Do not merge. Approval Agent did not approve.",
   "last_executed_commands": [
-    "git reset --soft origin/main",
-    "uv lock",
-    "uv run --locked --no-build pytest -q tests/unit",
-    "uv run --locked --no-build pytest -q tests/unit/test_threat_browser_policy.py tests/unit/test_round1_p2_06_ssrf_and_mcp.py tests/unit/test_r8a_libraries.py tests/integration/test_threat_browser_attacks.py::test_child_frame_document_is_not_fetched tests/integration/test_threat_browser_attacks.py::test_playwright_reads_with_javascript_disabled",
-    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration/test_threat_browser_container.py",
     "uv run --locked --no-build python scripts/rebuild_spec.py",
-    "uv run --locked --no-build python scripts/verify_freeze.py"
+    "uv run --locked --no-build python scripts/verify_freeze.py",
+    "uv run --locked --no-build pytest -q tests/unit/test_retrieval.py"
   ],
-  "last_test_result": "Local on 2026-10-16: verify_freeze passed with api_operations 50 and parsed_structured_files 57. tests/unit/test_retrieval.py 14 passed. The bake.pdf phrase is absent from the measured table. CI for the ingest change that skips a missing embedding download is not recorded. Earlier push run 38964656426 failed test_text_pdf_is_indexed_as_extracted_text while RUNNING with a source_version_id already set. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16: verify_freeze passed with api_operations 50 and parsed_structured_files 57. tests/unit/test_retrieval.py 17 passed. Measured vectors stay when download is refused; unmeasured text on the worker path does not start encode. CI for this narrower change is not recorded yet. 6cdfa0e push run 38968650893 and PR run 38968658047 failed three measured-vector tests after skipping the whole batch. Earlier push run 38964656426 failed test_text_pdf_is_indexed_as_extracted_text while RUNNING with a source_version_id already set. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
