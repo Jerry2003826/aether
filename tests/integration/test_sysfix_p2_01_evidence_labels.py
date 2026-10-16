@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from aether_storage.db import Database
 from aether_worker.goal_effect import materialize_goal_effect
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.sysfix_b_helpers import endpoints, key, project, rows, store_for
 from tests.integration.test_audit_round4 import setup_case
 
@@ -46,6 +47,7 @@ def test_scripted_run_report_still_says_scripted_offline(client, role_urls) -> N
     assert uploaded.status_code == 201, uploaded.text
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": "请根据已上传资料回答沸点"})
     payload = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner, project_id=project_id, task_id=payload["task_id"])
     store = store_for(client, role_urls)
     assert materialize_goal_effect(endpoints(role_urls, store.root, provider="scripted"), payload)["status"] == "SUCCEEDED"
     report = _report(store, role_urls, owner, project_id, payload["task_id"])

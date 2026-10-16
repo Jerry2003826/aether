@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from aether_storage.artifacts import ArtifactError
+from aether_storage.db import Database
 from aether_worker.goal_effect import materialize_goal_effect
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.system_audit import FACT_GOAL, answered_task, key, project, store_for
 
 
@@ -25,6 +27,7 @@ def test_uploading_a_previous_answer_gives_a_usable_project_source(client, role_
     )
     assert created.status_code == 202, created.text
     follow = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=_owner, project_id=project_id, task_id=follow["task_id"])
     result = materialize_goal_effect(scripted, follow)
     detail = f"上传返回 id={body['artifact_id']} classification={body['classification']}（原答案 id={answer}）；用它当来源的任务={result}"
     assert body["classification"] == "project_private", detail
@@ -56,6 +59,7 @@ def test_a_deleted_answer_does_not_break_a_later_identical_answer(client, role_u
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": FACT_GOAL})
     assert created.status_code == 202, created.text
     second = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=_owner, project_id=project_id, task_id=second["task_id"])
     error: BaseException | None = None
     result: dict = {}
     try:

@@ -624,6 +624,55 @@ class BudgetLedger:
                 )
         return book_result
 
+    def reconcile_overrun(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, decision: str) -> str:
+        """Confirm or release a bill that exceeded its reservation.
+
+        The same decision can be repeated. A later opposite decision is left as
+        the one already recorded.
+        """
+        if decision not in {"confirm", "release"}:
+            raise BudgetError("invalid_reconciliation")
+        label = "confirmed" if decision == "confirm" else "released"
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text("SELECT id, held_micro_usd FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().one()
+            detail = _detail(request["usage_detail"])
+            if detail.get("book_result") != "overrun":
+                return "not_overrun"
+            current = str(detail.get("reconciliation") or "")
+            if current in {"confirmed", "released"}:
+                return current
+            reserved = int(request["reserved_micro_usd"])
+            reported = detail.get("reported_cost_micro_usd")
+            spend = int(reported) if decision == "confirm" and reported is not None else 0
+            if spend < 0:
+                spend = 0
+            detail["reconciliation"] = label
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                ),
+                {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+            )
+            conn.execute(
+                text(
+                    "UPDATE budget_accounts SET held_micro_usd = GREATEST(held_micro_usd - :reserved, 0), "
+                    "spent_micro_usd = spent_micro_usd + :spend, version = version + 1 WHERE id = :id"
+                ),
+                {"reserved": reserved, "spend": spend, "id": account["id"]},
+            )
+        return label
+
     def snapshot(self, *, owner_id: str, project_id: str, task_id: str, reclaimable_request_key: str | None = None) -> dict:
         """Account totals. A reclaimable request's unsent hold is left out, since a retry reprices it."""
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

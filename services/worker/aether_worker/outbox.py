@@ -38,8 +38,10 @@ def insert_start_command(conn, *, project_id: str, goal: str, command_key: str, 
     return {"task_id": task_id, "workflow_id": workflow_id, "command_key": command_key}
 
 
-def insert_followup_command(conn, *, project_id: str, task_id: str, workflow_id: str, command_key: str, kind: str) -> None:
+def insert_followup_command(conn, *, project_id: str, task_id: str, workflow_id: str, command_key: str, kind: str, extra: dict | None = None) -> None:
     payload = {"task_id": task_id, "workflow_id": workflow_id, "command_id": command_key, "kind": kind}
+    if extra:
+        payload.update(extra)
     digest = sha256_text(json.dumps(payload, sort_keys=True, separators=(",", ":")))
     conn.execute(
         text(

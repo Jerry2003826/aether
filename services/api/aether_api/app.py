@@ -239,7 +239,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             _artifacts(app, resolved).tombstone(owner_id=owner["owner_id"], project_id=project_id, artifact_id=artifact_id)
         except ArtifactError as exc:
-            raise ApiError(404, exc.code, exc.message) from exc
+            status = 409 if exc.code == "evidence_retained" else 404
+            raise ApiError(status, exc.code, exc.message) from exc
         return Response(status_code=204)
 
     register_control_routes(app, resolved)

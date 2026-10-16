@@ -13,9 +13,13 @@ import uuid
 import psycopg
 from psycopg import sql
 
+from sqlalchemy import text
+
 from aether_storage.bootstrap import ensure_database
+from aether_storage.db import Database
 from aether_worker.goal_effect import WorkerEndpoints, materialize_goal_effect
 from aether_worker.supply import SBOM_TABLES, backup_project, restore_project
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 FRESH = "aether_round1_restore"
@@ -53,6 +57,15 @@ def _answered(client, project_id: str, headers: dict[str, str]) -> dict[str, str
 
 
 def _run(client, role_urls, payload: dict[str, str]) -> dict:
+    worker = Database(role_urls["aether_worker"])
+    with worker.transaction(project_id=payload["project_id"]) as conn:
+        owner_id = str(
+            conn.execute(
+                text("SELECT payload->>'owner_id' FROM command_outbox WHERE project_id = :project_id AND command_key = :command_id"),
+                {"project_id": payload["project_id"], "command_id": payload["command_id"]},
+            ).scalar_one()
+        )
+    record_owner_approval(worker, owner_id=owner_id, project_id=payload["project_id"], task_id=payload["task_id"])
     root = client.app.state.settings.artifact_root
     endpoints = WorkerEndpoints(
         worker_url=role_urls["aether_worker"],

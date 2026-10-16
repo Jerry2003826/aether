@@ -155,8 +155,17 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
             ).mappings().first()
             if task is None:
                 raise ApiError(404, "not_found", "任务不存在")
+            extra = _approve_extra(body, owner) if kind == "approve_goal" else None
             try:
-                insert_followup_command(conn, project_id=project_id, task_id=task_id, workflow_id=task["workflow_id"], command_key=command_id, kind=kind)
+                insert_followup_command(
+                    conn,
+                    project_id=project_id,
+                    task_id=task_id,
+                    workflow_id=task["workflow_id"],
+                    command_key=command_id,
+                    kind=kind,
+                    extra=extra,
+                )
             except IntegrityError as exc:
                 raise ApiError(409, "command_exists", "命令已经接收") from exc
             if kind == "cancel":
@@ -257,33 +266,60 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         match = request.headers.get("if-match")
         payload_hash = sha256_text(json.dumps({"decision": decision, "expected_intent_hash": digest}, sort_keys=True, separators=(",", ":")))
         route = f"POST /v1/projects/{project_id}/approvals/{approval_id}/decision"
-        with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
-            existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=payload_hash)
-            if existing is not None:
-                return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
-            row = conn.execute(
-                text("SELECT task_id::text AS task_id, version FROM approvals WHERE project_id = :project_id AND id = :id"),
-                {"project_id": project_id, "id": approval_id},
-            ).mappings().first()
-        if row is None:
-            raise ApiError(404, "not_found", "审批不存在")
-        if match != str(row["version"]):
-            raise ApiError(409, "version_conflict", "审批版本已变化")
+        owned = False
         try:
-            OperationLedger(_db(app)).decide(
-                owner_id=owner,
-                project_id=project_id,
-                task_id=row["task_id"],
-                approval_id=approval_id,
-                decision="approved" if decision == "approve" else "rejected",
-                expected_intent_hash=digest,
-            )
-        except OperationError as exc:
-            raise ApiError(409, exc.code, "审批不能接受") from exc
-        accepted = _accepted(request, str(uuid.uuid4()), approval_id)
-        with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
-            _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
-        return JSONResponse(status_code=202, content=accepted)
+            with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+                existing = _claim_idempotency(
+                    conn,
+                    owner=owner,
+                    project_id=project_id,
+                    route=route,
+                    key=key,
+                    payload_hash=payload_hash,
+                    resume_incomplete=True,
+                )
+                if existing is not None:
+                    return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
+                owned = True
+                row = conn.execute(
+                    text(
+                        "SELECT task_id::text AS task_id, version, requested_payload FROM approvals "
+                        "WHERE project_id = :project_id AND id = :id"
+                    ),
+                    {"project_id": project_id, "id": approval_id},
+                ).mappings().first()
+            if row is None:
+                raise ApiError(404, "not_found", "审批不存在")
+            if match != str(row["version"]):
+                raise ApiError(409, "version_conflict", "审批版本已变化")
+            try:
+                OperationLedger(_db(app)).decide(
+                    owner_id=owner,
+                    project_id=project_id,
+                    task_id=row["task_id"],
+                    approval_id=approval_id,
+                    decision="approved" if decision == "approve" else "rejected",
+                    expected_intent_hash=digest,
+                )
+            except OperationError as exc:
+                raise ApiError(409, exc.code, "审批不能接受") from exc
+            accepted = _accepted(request, str(uuid.uuid4()), approval_id)
+            with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+                _enqueue_review_resolution(
+                    conn,
+                    project_id=project_id,
+                    task_id=row["task_id"],
+                    approval_id=approval_id,
+                    decision=decision,
+                    owner_id=owner,
+                    payload=row["requested_payload"],
+                )
+                _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
+            return JSONResponse(status_code=202, content=accepted)
+        except ApiError as exc:
+            if owned and exc.code != "idempotency_conflict":
+                _store_failed_idempotency(app, owner=owner, project_id=project_id, route=route, key=key, status=exc.status, body=_failure_body(request, exc))
+            raise
 
 
 def _db(app: FastAPI) -> Database:
@@ -332,7 +368,7 @@ def _idempotency_key(request: Request) -> str:
     return key
 
 
-def _claim_idempotency(conn, *, owner: str, project_id: str, route: str, key: str, payload_hash: str) -> dict[str, Any] | None:
+def _claim_idempotency(conn, *, owner: str, project_id: str, route: str, key: str, payload_hash: str, resume_incomplete: bool = False) -> dict[str, Any] | None:
     inserted = conn.execute(
         text(
             "INSERT INTO idempotency_keys (owner_id, project_id, route, idempotency_key, payload_sha256, response_status, response_body) "
@@ -350,9 +386,76 @@ def _claim_idempotency(conn, *, owner: str, project_id: str, route: str, key: st
         ),
         {"owner": owner, "project_id": project_id, "route": route, "key": key},
     ).mappings().one()
-    if existing["payload_sha256"] != payload_hash or existing["response_status"] == 0:
+    if existing["payload_sha256"] != payload_hash:
+        raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容或尚未完成")
+    if int(existing["response_status"]) == 0:
+        if resume_incomplete:
+            return None
         raise ApiError(409, "idempotency_conflict", "同一个幂等键对应了不同内容或尚未完成")
     return dict(existing)
+
+
+def _approve_extra(body: dict[str, Any], owner_id: str) -> dict[str, str]:
+    extra = {"owner_id": owner_id}
+    expected = body.get("expected_contract_sha256")
+    if expected is None:
+        return extra
+    if not isinstance(expected, str) or len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
+        raise ApiError(422, "invalid_command", "命令不合法")
+    extra["expected_contract_sha256"] = expected
+    return extra
+
+
+def _failure_body(request: Request, exc: ApiError) -> dict[str, Any]:
+    return {
+        "code": exc.code,
+        "message": exc.message,
+        "request_id": getattr(request.state, "request_id", ""),
+        "retryable": exc.retryable,
+        "details": exc.details,
+    }
+
+
+def _store_failed_idempotency(app: FastAPI, *, owner: str, project_id: str, route: str, key: str, status: int, body: dict[str, Any]) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE idempotency_keys SET response_status = :status, response_body = CAST(:body AS jsonb) "
+                "WHERE owner_id = :owner AND project_id = :project_id AND route = :route AND idempotency_key = :key "
+                "AND response_status = 0"
+            ),
+            {"status": status, "body": json.dumps(body), "owner": owner, "project_id": project_id, "route": route, "key": key},
+        )
+
+
+def _enqueue_review_resolution(conn, *, project_id: str, task_id: str, approval_id: str, decision: str, owner_id: str, payload: Any) -> None:
+    if not isinstance(payload, dict) or payload.get("action") != "resolve_review":
+        return
+    workflow_id = conn.execute(
+        text("SELECT workflow_id FROM tasks WHERE project_id = :project_id AND id = :id"),
+        {"project_id": project_id, "id": task_id},
+    ).scalar()
+    if workflow_id is None:
+        return
+    try:
+        with conn.begin_nested():
+            insert_followup_command(
+                conn,
+                project_id=project_id,
+                task_id=task_id,
+                workflow_id=str(workflow_id),
+                command_key=f"resolve-{approval_id}",
+                kind="resolve_review",
+                extra={
+                    "decision": decision,
+                    "from_status": payload.get("from_status"),
+                    "code": payload.get("code"),
+                    "owner_id": owner_id,
+                    "approval_id": approval_id,
+                },
+            )
+    except IntegrityError:
+        return
 
 
 def _store_idempotency(conn, *, owner: str, project_id: str, route: str, key: str, body: dict[str, Any], status: int = 202) -> None:

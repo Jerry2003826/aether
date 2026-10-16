@@ -20,6 +20,7 @@ from aether_worker.goal_effect import (
     execute_task_effect, _ensure_contract, _ensure_verification,
 )
 from aether_worker.outbox import enqueue_task
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.test_artifacts import _project
 
 FACT = '实验设备每九十天完成一次保养。'
@@ -45,6 +46,7 @@ def scope(ctx):
 
 def task(ctx, goal):
     created = enqueue_task(ctx[2], **scope(ctx), goal=goal, command_key=str(uuid.uuid4()))
+    record_owner_approval(ctx[2], owner_id=ctx[0], project_id=ctx[1], task_id=created['task_id'], workflow_id=created['workflow_id'])
     return dict(project_id=ctx[1], task_id=created['task_id'], command_id=created['command_key'])
 
 
@@ -53,7 +55,7 @@ def read_one(ctx, sql, **params):
         return dict(conn.execute(text(sql), params).mappings().one())
 
 
-@pytest.mark.parametrize('mutation', ['corrupt_answer', 'delete_answer', 'delete_source'])
+@pytest.mark.parametrize('mutation', ['corrupt_answer', 'delete_source'])
 def test_round3_cached_pass_is_not_current_validation(ctx, mutation):
     _owner, _project_id, worker, store, endpoints = ctx[:5]
     source = store.put(**scope(ctx), data=FACT.encode(), media_type='text/plain')
@@ -66,14 +68,32 @@ def test_round3_cached_pass_is_not_current_validation(ctx, mutation):
     row = read_one(ctx, 'SELECT sha256 FROM artifacts WHERE project_id=:project AND id=:id', project=ctx[1], id=aid)
     if mutation == 'corrupt_answer':
         (store.root / ctx[1] / row['sha256'][:2] / row['sha256']).write_bytes(b'damaged after first PASS')
-    elif mutation == 'delete_answer':
-        store.tombstone(**scope(ctx), artifact_id=aid)
     else:
         store.tombstone(**scope(ctx), artifact_id=str(source['artifact_id']))
     vid = _ensure_verification(endpoints, **scope(ctx), task_id=command['task_id'],
         contract_id=contract_id, contract_sha=digest, artifact_id=aid, goal=goal)
     evidence = read_one(ctx, 'SELECT verdict FROM verification_results WHERE project_id=:project AND id=:id', project=ctx[1], id=vid)
     assert evidence['verdict'] != 'PASS', 'historical PASS overrode failed current observation'
+
+
+def test_round3_succeeded_answer_deletion_is_refused(ctx):
+    _owner, project_id, worker, store, endpoints = ctx[:5]
+    store.put(**scope(ctx), data=FACT.encode(), media_type='text/plain')
+    goal = '请摘录设备保养周期。'
+    command = task(ctx, goal)
+    result = materialize_goal_effect(endpoints, command)
+    assert result['status'] == 'SUCCEEDED'
+    aid = result['artifact_id']
+    with pytest.raises(ArtifactError) as caught:
+        store.tombstone(**scope(ctx), artifact_id=aid)
+    assert caught.value.code == 'evidence_retained'
+    state = read_one(ctx, 'SELECT status FROM tasks WHERE project_id=:project AND id=:id', project=project_id, id=command['task_id'])
+    assert state['status'] == 'SUCCEEDED'
+    contract_id, digest = _ensure_contract(worker, **scope(ctx), task_id=command['task_id'], goal=goal)
+    vid = _ensure_verification(endpoints, **scope(ctx), task_id=command['task_id'],
+        contract_id=contract_id, contract_sha=digest, artifact_id=aid, goal=goal)
+    evidence = read_one(ctx, 'SELECT verdict FROM verification_results WHERE project_id=:project AND id=:id', project=project_id, id=vid)
+    assert evidence['verdict'] == 'PASS'
 
 
 def test_round3_success_requires_actual_goal_satisfaction(ctx):
@@ -234,7 +254,7 @@ def test_round3_wrong_fact_report_separates_integrity_from_goal(ctx):
     ctx[3].put(**scope(ctx), data=(FACT + '\n接口请求上限为每分钟六十次。\n').encode(), media_type='text/plain')
     goal = '根据资料，接口每分钟最多允许多少次请求？只回答请求限额。'
     command = task(ctx, goal)
-    contract_id, digest = _ensure_contract(ctx[2], **scope(ctx), task_id=command['task_id'], goal=goal)
+    contract_id, digest = _ensure_contract(ctx[2], **scope(ctx), task_id=command['task_id'], goal=goal, approved_by=ctx[0])
     wrong = ctx[3].put(**scope(ctx), data=f'资料记载：{FACT}'.encode(), media_type='text/plain', classification='task_answer')
     vid = _ensure_verification(ctx[4], **scope(ctx), task_id=command['task_id'], contract_id=contract_id, contract_sha=digest, artifact_id=str(wrong['artifact_id']), goal=goal)
     row = read_one(ctx, 'SELECT verdict, report_artifact_id::text AS report_id FROM verification_results WHERE project_id=:project AND id=:id', project=ctx[1], id=vid)

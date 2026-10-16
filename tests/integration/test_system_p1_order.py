@@ -66,6 +66,8 @@ def test_dispatcher_keeps_per_task_order_when_one_signal_fails(client, role_urls
     recorder = _Recorder("pause")
     dispatcher = Database(role_urls["aether_dispatcher"])
     asyncio.run(deliver_pending(dispatcher, recorder, task_queue="audit-order"))  # type: ignore[arg-type]
+    with dispatcher.transaction() as conn:
+        conn.execute(text("UPDATE command_outbox SET lease_until = now() - interval '1 second' WHERE status = 'DELIVERING'"))
     asyncio.run(deliver_pending(dispatcher, recorder, task_queue="audit-order"))  # type: ignore[arg-type]
     assert recorder.order == ["start", "pause", "resume"], f"实际送达顺序 {recorder.order}，用户发出的顺序是 start, pause, resume"
 
@@ -81,6 +83,9 @@ class _FlakyHandle:
             raise ConnectionError("transient temporal error")
         self.flaky.order.append(payload["kind"])
         await self.inner.signal(signal, payload)
+
+    async def describe(self):
+        return await self.inner.describe()
 
 
 class _FlakyClient:

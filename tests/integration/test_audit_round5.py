@@ -121,7 +121,10 @@ def test_r504_verifier_retry_checks_deadline(client, role_urls, monkeypatch, exp
     if expire:
         with db.transaction(owner_id=owner, project_id=project) as conn:
             conn.execute(
-                text("UPDATE tasks SET created_at=:created WHERE project_id=:p AND id=:t"),
+                text(
+                    "UPDATE task_events SET created_at=:created "
+                    "WHERE project_id=:p AND task_id=:t AND event_type='task.active' AND payload->>'phase'='start'"
+                ),
                 {"created": datetime.now(UTC) - timedelta(hours=2), "p": project, "t": payload["task_id"]},
             )
     monkeypatch.setattr(ge, "_ensure_verification", original)
@@ -146,7 +149,10 @@ def test_r504_terminal_commit_checks_deadline(client, role_urls, monkeypatch) ->
         verification = original(*args, **kwargs)
         with db.transaction(owner_id=owner, project_id=project) as conn:
             conn.execute(
-                text("UPDATE tasks SET created_at=:created WHERE project_id=:p AND id=:t"),
+                text(
+                    "UPDATE task_events SET created_at=:created "
+                    "WHERE project_id=:p AND task_id=:t AND event_type='task.active' AND payload->>'phase'='start'"
+                ),
                 {"created": datetime.now(UTC) - timedelta(hours=2), "p": project, "t": payload["task_id"]},
             )
         return verification

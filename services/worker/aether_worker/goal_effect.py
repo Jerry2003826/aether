@@ -27,6 +27,7 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
+from aether_storage.operations import OperationLedger
 from aether_worker.research import (
     cites_fact,
     estimate_provider_request_tokens,
@@ -65,6 +66,12 @@ TERMINAL_STATUSES = ("SUCCEEDED", "FAILED", "CANCELLED")
 PAUSEABLE_STATUSES = ("QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL")
 NON_TERMINAL_STATUSES = ("DRAFT", "QUEUED", "RUNNING", "VERIFYING", "WAITING_APPROVAL", "PAUSED", "NEEDS_REVIEW")
 STOP_STATUSES = ("SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED", "PAUSED")
+ACTIVE_STATUSES = {"RUNNING", "VERIFYING"}
+REVIEW_TTL_SECONDS = 72 * 60 * 60
+
+
+class ContractUnapproved(RuntimeError):
+    """The worker must not invent the owner's approval."""
 
 
 @dataclass(frozen=True)
@@ -175,16 +182,38 @@ async def materialize_goal(payload: dict) -> dict[str, str]:
 
 
 def prepare_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> dict[str, str]:
-    command = _start_command(endpoints, payload)
+    project_id = str(payload.get("project_id") or "")
+    task_id = str(payload.get("task_id") or "")
+    command_id = str(payload.get("command_id") or "")
+    if not project_id or not task_id or not command_id:
+        return {"status": "ignored"}
+    worker = Database(endpoints.worker_url)
+    command = _command(worker, project_id, command_id)
     if command is None:
         return {"status": "ignored"}
-    owner_id, project_id, task_id, goal = command
-    worker = Database(endpoints.worker_url)
+    kind = str(command["kind"])
+    if kind == "resolve_review":
+        return _resolve_review(worker, command, project_id, task_id)
+    if kind not in {"start", "approve_goal"}:
+        return {"status": "ignored"}
+    owner_id, goal = _owner_and_goal(worker, project_id, task_id)
+    if not owner_id or not goal:
+        raise RuntimeError("start command is missing owner_id or goal")
     blocked = _block_execution(worker, owner_id, project_id, task_id)
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
+    gate = _open_goal_gate(
+        worker,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        goal=goal,
+        approval=_command_body(command) if kind == "approve_goal" else None,
+        command_id=command_id,
+    )
+    if gate.get("status") != "prepared":
+        return gate
     store = ArtifactStore(endpoints.artifact_root, worker)
-    _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
     _ensure_artifact(
         worker,
         store,
@@ -195,9 +224,6 @@ def prepare_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
         data=goal_document(task_id, goal),
         media_type="text/plain",
     )
-    actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="RUNNING", allowed=("QUEUED", "RUNNING"))
-    if actual != "RUNNING":
-        return {"status": actual, "task_id": task_id}
     _event(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, event_key=f"running-{task_id}", event_type="task.running", payload={"status": "RUNNING"})
     return {"status": "prepared", "task_id": task_id}
 
@@ -225,8 +251,9 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if source_state == "invalid":
         return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源不合法或不可读", code="allowed_sources_invalid", missing=missing_sources)
     if not sources:
-        actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
-        return {"status": actual, "task_id": task_id}
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="没有可读的来源", code="sources_missing")
+    if _active_time_exhausted(worker, owner_id, project_id, task_id):
+        return _mark_budget_exhausted(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
     blocked = _block_execution(worker, owner_id, project_id, task_id)
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
@@ -249,13 +276,15 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if answer is None:
         return {"status": _task_status(worker, owner_id, project_id, task_id), "task_id": task_id}
     if not answer:
-        actual = _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
-        return {"status": actual, "task_id": task_id}
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="没有形成答案", code="answer_missing")
     blocked = _block_execution(worker, owner_id, project_id, task_id)
     if blocked is not None:
         return {"status": blocked, "task_id": task_id, "artifact_id": answer}
     _set_status(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, status="VERIFYING", allowed=("RUNNING", "VERIFYING"))
-    contract_id, contract_sha = _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
+    try:
+        contract_id, contract_sha = _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
+    except ContractUnapproved:
+        return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="合同还没有所有者批准", code="contract_unapproved")
     verification_id = _ensure_verification(
         endpoints,
         owner_id=owner_id,
@@ -378,7 +407,9 @@ def _execution_context(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> t
         return None
     worker = Database(endpoints.worker_url)
     command = _command(worker, project_id, command_id)
-    if command is None or str(command["kind"]) != "resume":
+    if command is None or str(command["kind"]) not in {"resume", "approve_goal", "resolve_review"}:
+        return None
+    if str(command["kind"]) == "resolve_review" and str(_command_body(command).get("decision") or "") != "approve":
         return None
     owner_id, goal = _owner_and_goal(worker, project_id, task_id)
     if not owner_id or not goal:
@@ -419,7 +450,7 @@ def _owner_and_goal(database: Database, project_id: str, task_id: str) -> tuple[
     return str(body.get("owner_id") or ""), str(goal)
 
 
-def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str) -> tuple[str, str]:
+def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str, approved_by: str | None = None) -> tuple[str, str]:
     existing = _load_authoritative_contract(database, owner_id, project_id, task_id)
     if existing is not None:
         with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -431,6 +462,8 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
                 {"contract_id": existing["id"], "project_id": project_id, "task_id": task_id},
             )
         return existing["id"], existing["digest"]
+    if not approved_by:
+        raise ContractUnapproved("contract is not approved")
     content = _frozen_contract(database, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
     raw = canonical_json(content)
     digest = sha256_text(raw)
@@ -440,7 +473,7 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
                 "INSERT INTO goal_contracts (project_id, task_id, contract_version, content, contract_sha256, approved_by, approved_at) "
                 "VALUES (:project_id, :task_id, 1, CAST(:content AS jsonb), :digest, :owner, now()) RETURNING id::text"
             ),
-            {"project_id": project_id, "task_id": task_id, "content": raw, "digest": digest, "owner": owner_id},
+            {"project_id": project_id, "task_id": task_id, "content": raw, "digest": digest, "owner": approved_by},
         ).scalar_one()
         conn.execute(
             text(
@@ -452,10 +485,223 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
     return str(contract_id), digest
 
 
+def _command_body(command: dict[str, Any]) -> dict[str, Any]:
+    payload = command.get("payload")
+    if isinstance(payload, dict):
+        return payload
+    if isinstance(payload, str):
+        loaded = json.loads(payload)
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _is_project_owner(database: Database, owner_id: str, project_id: str) -> bool:
+    if not owner_id:
+        return False
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM projects WHERE id = :id AND owner_id = :owner AND deleted_at IS NULL"),
+            {"id": project_id, "owner": owner_id},
+        ).first()
+    return found is not None
+
+
+def _publish_draft(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str) -> str:
+    frozen = _frozen_contract(database, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
+    digest = sha256_text(canonical_json(frozen))
+    existing = _load_draft(database, owner_id, project_id, task_id)
+    if existing is None:
+        published: dict[str, Any] = {
+            "goal": str(frozen.get("goal") or goal),
+            "contract_sha256": digest,
+            "contract_version": 1,
+            "project_id": project_id,
+            "task_id": task_id,
+        }
+        if "criterion_id" in frozen:
+            published["criterion_id"] = frozen["criterion_id"]
+        if "criteria" in frozen:
+            published["criteria"] = frozen["criteria"]
+        if "required_artifacts" in frozen:
+            published["required_artifacts"] = frozen["required_artifacts"]
+    else:
+        published = dict(existing)
+        published["contract_sha256"] = digest
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text("UPDATE tasks SET draft_contract = CAST(:draft AS jsonb), version = version + 1 WHERE project_id = :project_id AND id = :id"),
+            {"draft": json.dumps(published), "project_id": project_id, "id": task_id},
+        )
+    return digest
+
+
+def _matching_approval(database: Database, *, project_id: str, task_id: str, digest: str) -> dict[str, Any] | None:
+    with database.transaction(project_id=project_id) as conn:
+        rows = conn.execute(
+            text(
+                "SELECT payload FROM command_outbox WHERE project_id = :project_id AND task_id = :task_id AND kind = 'approve_goal' "
+                "ORDER BY created_at"
+            ),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalars().all()
+    for payload in rows:
+        body = payload if isinstance(payload, dict) else json.loads(payload) if isinstance(payload, str) else {}
+        if not isinstance(body, dict):
+            continue
+        owner_id = str(body.get("owner_id") or "")
+        expected = str(body.get("expected_contract_sha256") or "")
+        if expected and expected != digest:
+            continue
+        if _is_project_owner(database, owner_id, project_id):
+            return body
+    return None
+
+
+def _command_was_prepared(database: Database, owner_id: str, project_id: str, task_id: str, command_id: str) -> bool:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id AND event_key = :event_key"),
+            {"project_id": project_id, "task_id": task_id, "event_key": f"prepared-{command_id}"},
+        ).first()
+    return found is not None
+
+
+def _open_goal_gate(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    goal: str,
+    approval: dict[str, Any] | None,
+    command_id: str,
+) -> dict[str, str]:
+    digest = _publish_draft(database, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
+    chosen = approval
+    if chosen is None:
+        chosen = _matching_approval(database, project_id=project_id, task_id=task_id, digest=digest)
+    else:
+        expected = str(chosen.get("expected_contract_sha256") or "")
+        owner = str(chosen.get("owner_id") or "")
+        if expected and expected != digest:
+            return {"status": "hash_mismatch", "task_id": task_id}
+        if not _is_project_owner(database, owner, project_id):
+            return {"status": "ignored", "task_id": task_id}
+    if chosen is None:
+        actual = _set_status(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="WAITING_APPROVAL",
+            allowed=("DRAFT", "QUEUED", "WAITING_APPROVAL"),
+        )
+        if actual == "WAITING_APPROVAL":
+            return {"status": "waiting_approval", "task_id": task_id}
+        return {"status": actual, "task_id": task_id}
+    approver = str(chosen.get("owner_id") or "")
+    if _command_was_prepared(database, owner_id, project_id, task_id, command_id):
+        return {"status": "prepared", "task_id": task_id}
+    state, _resume = _control_state(database, owner_id, project_id, task_id)
+    if state not in {"QUEUED", "WAITING_APPROVAL", "RUNNING"}:
+        return {"status": state, "task_id": task_id}
+    if state == "RUNNING" and _load_authoritative_contract(database, owner_id, project_id, task_id) is not None:
+        return {"status": state, "task_id": task_id}
+    _ensure_contract(database, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, approved_by=approver)
+    actual = _set_status(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        status="RUNNING",
+        allowed=("QUEUED", "WAITING_APPROVAL", "RUNNING"),
+        prepared_command_id=command_id,
+    )
+    if actual != "RUNNING":
+        return {"status": actual, "task_id": task_id}
+    return {"status": "prepared", "task_id": task_id}
+
+
+def _resolve_review(database: Database, command: dict[str, Any], project_id: str, task_id: str) -> dict[str, str]:
+    body = _command_body(command)
+    decision = str(body.get("decision") or "")
+    approval_id = str(body.get("approval_id") or "")
+    owner_id = str(body.get("owner_id") or "")
+    code = str(body.get("code") or "")
+    from_status = str(body.get("from_status") or "")
+    if decision not in {"approve", "reject"} or not approval_id or not _is_project_owner(database, owner_id, project_id):
+        return {"status": "ignored", "task_id": task_id}
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        row = conn.execute(
+            text(
+                "SELECT decision, owner_id::text AS owner_id, requested_payload FROM approvals "
+                "WHERE project_id = :project_id AND id = :id AND task_id = :task_id"
+            ),
+            {"project_id": project_id, "id": approval_id, "task_id": task_id},
+        ).mappings().first()
+    if row is None or str(row["owner_id"]) != owner_id:
+        return {"status": "ignored", "task_id": task_id}
+    expected = "approved" if decision == "approve" else "rejected"
+    payload = row["requested_payload"] if isinstance(row["requested_payload"], dict) else {}
+    if str(row["decision"]) != expected or payload.get("action") != "resolve_review":
+        return {"status": "ignored", "task_id": task_id}
+    stage = from_status if from_status in {"QUEUED", "RUNNING", "VERIFYING"} else str(payload.get("from_status") or "")
+    if stage not in {"QUEUED", "RUNNING", "VERIFYING"}:
+        stage = "RUNNING"
+    review_code = code or str(payload.get("code") or "")
+    if review_code == "budget_unreconciled":
+        _reconcile_overruns(database, owner_id, project_id, task_id, "confirm" if decision == "approve" else "release")
+    if decision == "reject":
+        actual = _set_status(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            status="CANCELLED",
+            allowed=NON_TERMINAL_STATUSES,
+            resume_state="cancel_requested",
+        )
+        BudgetLedger(database).revoke_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id)
+        return {"status": actual, "task_id": task_id}
+    actual = _set_status(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        status=stage,
+        allowed=("NEEDS_REVIEW",),
+        clear_resume=True,
+    )
+    if actual != stage:
+        return {"status": actual, "task_id": task_id}
+    return {"status": "prepared", "task_id": task_id}
+
+
+def _reconcile_overruns(database: Database, owner_id: str, project_id: str, task_id: str, decision: str) -> None:
+    ledger = BudgetLedger(database)
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        keys = conn.execute(
+            text(
+                "SELECT request_key FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND usage_detail->>'book_result' = 'overrun' AND usage_detail->>'reconciliation' = 'unreconciled'"
+            ),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalars().all()
+    for request_key in keys:
+        ledger.reconcile_overrun(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=str(request_key),
+            decision=decision,
+        )
+
+
 def _frozen_contract(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str) -> dict[str, Any]:
     """Freeze the owner's draft criteria. Do not replace them with the automatic goal check."""
     draft = _load_draft(database, owner_id, project_id, task_id)
-    if draft is None:
+    # A published hash preview has no owner criteria. Only a draft that names criteria is frozen.
+    if draft is None or "criteria" not in draft:
         return {"criterion_id": CRITERION_ID, "goal": goal}
     frozen: dict[str, Any] = {"goal": goal, "criteria": _freeze_criteria(draft, goal)}
     required = draft.get("required_artifacts")
@@ -1008,7 +1254,25 @@ def _missing_live_settings(endpoints: WorkerEndpoints) -> list[str]:
 
 
 def _needs_review(database: Database, *, owner_id: str, project_id: str, task_id: str, reason: str, code: str, missing: list[str] | None = None) -> dict[str, str]:
-    actual = _set_status(database, owner_id=owner_id, project_id=project_id, task_id=task_id, status="NEEDS_REVIEW", allowed=("QUEUED", "RUNNING", "VERIFYING"))
+    state, resume = _control_state(database, owner_id, project_id, task_id)
+    if resume in {"pause_requested", "cancel_requested"} or state == "PAUSED" or state in TERMINAL_STATUSES:
+        return {"status": state, "task_id": task_id, "stop_reason": code}
+    origin = state if state in {"QUEUED", "RUNNING", "VERIFYING"} else ""
+    if resume.startswith("review:"):
+        recorded = resume.split(":", 1)[1]
+        if recorded in {"QUEUED", "RUNNING", "VERIFYING"}:
+            origin = recorded
+    if origin not in {"QUEUED", "RUNNING", "VERIFYING"}:
+        origin = "RUNNING"
+    actual = _set_status(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        status="NEEDS_REVIEW",
+        allowed=("QUEUED", "RUNNING", "VERIFYING"),
+        resume_state=None if resume.startswith("review:") else f"review:{origin}",
+    )
     _event(
         database,
         owner_id=owner_id,
@@ -1016,9 +1280,34 @@ def _needs_review(database: Database, *, owner_id: str, project_id: str, task_id
         task_id=task_id,
         event_key=f"needs-review-{code}-{task_id}",
         event_type="task.needs_review",
-        payload={"reason": reason, "code": code, "missing": missing or []},
+        payload={"reason": reason, "code": code, "missing": missing or [], "from_status": origin},
     )
+    if actual == "NEEDS_REVIEW":
+        _ensure_review_approval(database, owner_id=owner_id, project_id=project_id, task_id=task_id, from_status=origin, code=code, reason=reason)
     return {"status": actual, "task_id": task_id, "stop_reason": code}
+
+
+def _ensure_review_approval(database: Database, *, owner_id: str, project_id: str, task_id: str, from_status: str, code: str, reason: str) -> None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        existing = conn.execute(
+            text(
+                "SELECT id FROM approvals WHERE project_id = :project_id AND task_id = :task_id "
+                "AND decision = 'pending' AND expires_at > now() "
+                "AND requested_payload->>'action' = 'resolve_review' AND requested_payload->>'code' = :code "
+                "LIMIT 1"
+            ),
+            {"project_id": project_id, "task_id": task_id, "code": code},
+        ).first()
+    if existing is not None:
+        return
+    OperationLedger(database).request_approval(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        intent={"action": "resolve_review", "task_id": task_id, "from_status": from_status, "code": code, "reason": reason},
+        risk="R2",
+        ttl_seconds=REVIEW_TTL_SECONDS,
+    )
 
 
 def _task_start_payload(database: Database, project_id: str, task_id: str) -> dict[str, Any]:
@@ -1094,18 +1383,47 @@ def _mark_budget_exhausted(database: Database, *, owner_id: str, project_id: str
     return {"status": actual, "task_id": task_id, "stop_reason": "budget_exhausted"}
 
 
+def _aware(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value
+
+
+def _active_elapsed_seconds(conn: Any, project_id: str, task_id: str) -> float:
+    """Sum RUNNING and VERIFYING spans. Queue, approval, pause, and review stay outside the sum."""
+    rows = conn.execute(
+        text(
+            "SELECT created_at, payload FROM task_events "
+            "WHERE project_id = :project_id AND task_id = :task_id AND event_type = 'task.active' "
+            "ORDER BY sequence"
+        ),
+        {"project_id": project_id, "task_id": task_id},
+    ).mappings().all()
+    total = 0.0
+    opened: datetime | None = None
+    now = datetime.now(UTC)
+    for row in rows:
+        payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"]) if isinstance(row["payload"], str) else {}
+        phase = str(payload.get("phase") or "")
+        created = _aware(row["created_at"])
+        if phase == "start":
+            opened = created
+        elif phase == "stop" and opened is not None:
+            total += max(0.0, (created - opened).total_seconds())
+            opened = None
+    if opened is not None:
+        total += max(0.0, (now - opened).total_seconds())
+    return total
+
+
 def _deadline_exceeded_on(conn: Any, project_id: str, task_id: str) -> bool:
-    created = conn.execute(
-        text("SELECT created_at FROM tasks WHERE project_id = :project_id AND id = :id"),
-        {"project_id": project_id, "id": task_id},
-    ).scalar_one()
     active = conn.execute(
         text("SELECT active_seconds FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id"),
         {"project_id": project_id, "task_id": task_id},
     ).scalar()
     if active is None:
         return False
-    return (datetime.now(UTC) - created).total_seconds() > int(active)
+    return _active_elapsed_seconds(conn, project_id, task_id) > int(active)
 
 
 def _past_deadline(database: Database, owner_id: str, project_id: str, task_id: str) -> bool:
@@ -1115,11 +1433,18 @@ def _past_deadline(database: Database, owner_id: str, project_id: str, task_id: 
 
 def _task_age_seconds(database: Database, owner_id: str, project_id: str, task_id: str) -> float:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        created = conn.execute(
-            text("SELECT created_at FROM tasks WHERE project_id = :project_id AND id = :id"),
-            {"project_id": project_id, "id": task_id},
-        ).scalar_one()
-    return (datetime.now(UTC) - created).total_seconds()
+        return _active_elapsed_seconds(conn, project_id, task_id)
+
+
+def _active_time_exhausted(database: Database, owner_id: str, project_id: str, task_id: str) -> bool:
+    payload = _task_start_payload(database, project_id, task_id)
+    budget = payload.get("budget") if isinstance(payload.get("budget"), dict) else None
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        if _deadline_exceeded_on(conn, project_id, task_id):
+            return True
+        if budget is None or budget.get("active_seconds") is None:
+            return False
+        return _active_elapsed_seconds(conn, project_id, task_id) > int(budget["active_seconds"])
 
 
 def _book_truncated_call(
@@ -1193,7 +1518,6 @@ def _ensure_live_answer(
         )
     except IntegrityError:
         pass
-    # active_seconds is wall time from tasks.created_at, including queue and pause.
     age = _task_age_seconds(database, owner_id, project_id, task_id)
     if age > int(spec["active_seconds"]):
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
@@ -1324,6 +1648,7 @@ def _ensure_live_answer(
             "upstream_model": result.get("upstream_model"),
             "requested_alias": result.get("requested_alias"),
             "book_result": book_result,
+            "reconciliation": "unreconciled" if book_result == "overrun" else "booked",
         }
     else:
         recorded = dict(prepared.get("response") or {})
@@ -1340,7 +1665,7 @@ def _ensure_live_answer(
         output = str(recorded.get("output") or "").strip()
         if not output:
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型调用结果未能对账", code="live_call_unreconciled")
-    if book_result == "overrun":
+    if book_result == "overrun" and str(recorded.get("reconciliation") or "unreconciled") != "confirmed":
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型回报超出预留，需要对账", code="budget_unreconciled")
     if _task_age_seconds(database, owner_id, project_id, task_id) > int(spec["active_seconds"]):
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
@@ -1698,6 +2023,7 @@ def _set_status(
     allowed: tuple[str, ...],
     resume_state: str | None = None,
     clear_resume: bool = False,
+    prepared_command_id: str | None = None,
 ) -> str:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         updated = _update_status(
@@ -1708,6 +2034,7 @@ def _set_status(
             allowed=allowed,
             resume_state=resume_state,
             clear_resume=clear_resume,
+            prepared_command_id=prepared_command_id,
         )
         if updated is not None:
             return updated
@@ -1727,7 +2054,12 @@ def _update_status(
     allowed: tuple[str, ...],
     resume_state: str | None = None,
     clear_resume: bool = False,
+    prepared_command_id: str | None = None,
 ) -> str | None:
+    previous = conn.execute(
+        text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"),
+        {"project_id": project_id, "id": task_id},
+    ).scalar()
     names = [f"allowed_{index}" for index in range(len(allowed))]
     clause = ", ".join(f":{name}" for name in names)
     extra = ""
@@ -1755,15 +2087,44 @@ def _update_status(
             ),
             {"project_id": project_id, "task_id": task_id},
         )
+    new_status = str(updated)
+    previous_status = str(previous or "")
     _insert_task_event(
         conn,
         project_id=project_id,
         task_id=task_id,
-        event_key=f"status-{task_id}-{updated}-{uuid.uuid4()}",
+        event_key=f"status-{task_id}-{new_status}-{uuid.uuid4()}",
         event_type="task.status",
-        payload={"status": str(updated)},
+        payload={"status": new_status},
     )
-    return str(updated)
+    if previous_status not in ACTIVE_STATUSES and new_status in ACTIVE_STATUSES:
+        _insert_task_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            event_key=f"active-start-{task_id}-{uuid.uuid4()}",
+            event_type="task.active",
+            payload={"phase": "start", "status": new_status},
+        )
+    elif previous_status in ACTIVE_STATUSES and new_status not in ACTIVE_STATUSES:
+        _insert_task_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            event_key=f"active-stop-{task_id}-{uuid.uuid4()}",
+            event_type="task.active",
+            payload={"phase": "stop", "status": new_status},
+        )
+    if prepared_command_id:
+        _insert_task_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            event_key=f"prepared-{prepared_command_id}",
+            event_type="task.prepared",
+            payload={"command_id": prepared_command_id},
+        )
+    return new_status
 
 
 def _event(database: Database, *, owner_id: str, project_id: str, task_id: str, event_key: str, event_type: str, payload: dict[str, Any]) -> None:

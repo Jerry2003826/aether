@@ -7,6 +7,7 @@ from sqlalchemy import text
 from aether_storage.db import Database
 from aether_worker.goal_effect import materialize_goal_effect
 from aether_worker.memory import apply_memory_commands, remember
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.system_audit import endpoints, fake_transport, key, project, rows, scalar, store_for
 
 
@@ -22,10 +23,12 @@ def _memory(client, role_urls, owner: str, project_id: str, headers: dict[str, s
     return next(item for item in listed if item["claim"] == claim)
 
 
-def _task(client, project_id: str, headers: dict[str, str], goal: str, **extra) -> dict:
+def _task(client, role_urls, owner: str, project_id: str, headers: dict[str, str], goal: str, **extra) -> dict:
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": goal, **extra})
     assert created.status_code == 202, created.text
-    return {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    payload = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner, project_id=project_id, task_id=payload["task_id"])
+    return payload
 
 
 def test_deleted_memory_claim_never_reaches_the_model_or_the_verifier(client, role_urls, monkeypatch) -> None:
@@ -41,7 +44,7 @@ def test_deleted_memory_claim_never_reaches_the_model_or_the_verifier(client, ro
     assert client.get(f"/v1/projects/{project_id}/memories").json()["items"] == []
 
     state = fake_transport(monkeypatch, output=claim)
-    payload = _task(client, project_id, headers, "根据资料，乙服务的请求超时时间是多少秒？")
+    payload = _task(client, role_urls, owner, project_id, headers, "根据资料，乙服务的请求超时时间是多少秒？")
     result = materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     verifications = rows(
         Database(role_urls["aether_verifier"]),
@@ -72,7 +75,7 @@ def test_corrected_memory_old_claim_is_not_ground_truth(client, role_urls, monke
     assert visible == [right]
 
     state = fake_transport(monkeypatch, output=wrong)
-    payload = _task(client, project_id, headers, "根据资料，丙接口每分钟最多接受多少次请求？")
+    payload = _task(client, role_urls, owner, project_id, headers, "根据资料，丙接口每分钟最多接受多少次请求？")
     result = materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     leaked = [prompt for prompt in state["prompts"] if wrong in prompt]
     detail = f"status={result.get('status')} prompt_has_superseded_claim={bool(leaked)}"
@@ -108,7 +111,7 @@ def test_high_sensitivity_memory_is_not_sent_to_the_cloud_model(client, role_url
     )
     assert classification == "memory_claim"
     state = fake_transport(monkeypatch, output="资料记载：丁服务每天凌晨两点备份一次。")
-    payload = _task(client, project_id, headers, "根据资料，丁服务什么时候备份？")
+    payload = _task(client, role_urls, owner, project_id, headers, "根据资料，丁服务什么时候备份？")
     materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     leaked = [prompt for prompt in state["prompts"] if private in prompt]
     assert not leaked, f"高敏记忆进入了发往云端模型的提示词：calls={state['calls']}"
@@ -120,7 +123,7 @@ def test_proposed_memory_is_not_verification_evidence(client, role_urls, monkeyp
     memory = _memory(client, role_urls, owner, project_id, headers, claim)
     assert memory["epistemic_status"] == "proposed"
     state = fake_transport(monkeypatch, output=claim)
-    payload = _task(client, project_id, headers, "根据资料，庚服务每分钟的配额是多少次？")
+    payload = _task(client, role_urls, owner, project_id, headers, "根据资料，庚服务每分钟的配额是多少次？")
     result = materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     leaked = [prompt for prompt in state["prompts"] if claim in prompt]
     detail = f"status={result.get('status')} leaked={bool(leaked)}"
@@ -140,7 +143,7 @@ def test_explicit_memory_claim_is_not_an_allowed_source(client, role_urls, monke
         id=memory["id"],
     )
     state = fake_transport(monkeypatch, output=claim)
-    payload = _task(client, project_id, headers, "根据资料，辛服务的超时是多少秒？", allowed_source_ids=[claim_id])
+    payload = _task(client, role_urls, owner, project_id, headers, "根据资料，辛服务的超时是多少秒？", allowed_source_ids=[claim_id])
     result = materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     leaked = [prompt for prompt in state["prompts"] if claim in prompt]
     detail = f"status={result.get('status')} stop={result.get('stop_reason')} leaked={bool(leaked)}"

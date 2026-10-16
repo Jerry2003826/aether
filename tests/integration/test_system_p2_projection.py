@@ -11,6 +11,7 @@ from sqlalchemy import text
 from aether_api.control import _append_event
 from aether_storage.db import Database
 from aether_worker.goal_effect import materialize_goal_effect
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.system_audit import endpoints, key, project, scalar, store_for
 
 
@@ -25,6 +26,7 @@ def test_public_contract_hash_matches_the_authoritative_contract(client, role_ur
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": "请根据已上传资料回答沸点"})
     task_id = created.json()["resource_id"]
     payload = {"project_id": project_id, "task_id": task_id, "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner, project_id=project_id, task_id=task_id)
     assert materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root, provider="scripted"), payload)["status"] == "SUCCEEDED"
     before = client.get(f"/v1/projects/{project_id}/tasks/{task_id}").json()
     forged = "f" * 64
@@ -70,6 +72,7 @@ def test_terminal_status_is_visible_in_the_event_stream(client, role_urls) -> No
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": "请根据已上传资料回答沸点"})
     task_id = created.json()["resource_id"]
     payload = {"project_id": project_id, "task_id": task_id, "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=_owner, project_id=project_id, task_id=task_id)
     assert materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root, provider="scripted"), payload)["status"] == "SUCCEEDED"
     stream = client.get(f"/v1/projects/{project_id}/tasks/{task_id}/events")
     assert stream.status_code == 200, stream.text

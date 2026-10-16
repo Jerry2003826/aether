@@ -1,22 +1,8 @@
-# P2-09 公开采集、工具执行、检索可见性与只读推荐
+# P2-09 复核出口、所有者批准、活动时间与工作流投递
 
-任务：从 `cc471e3` 做本路四项。GitHub 与 arXiv 采集走真实抓取并进入检索；已批准工具经注册表、MCP 和操作账本执行（S-060）；来源删除递增 visibility epoch，检索缓存不再返回已删来源（S-048）；推荐 GET 不写画像和曝光（S-006）。
+任务：从 `6f223f7` 做本路六项。ADR-F34 已被 PR #24 占用，决定记为 ADR-F35。NEEDS_REVIEW 有所有者出口；worker 不以所有者名义自动批准；active elapsed 不计排队、审批、暂停和复核；工作流可结束并 continue-as-new，ID 复用为 REJECT_DUPLICATE，投递有租约；审批失败不把幂等键留在 0；超额可对账；已成功任务的答案和验收报告不能删除。
 
-相关合同：不改 `contracts/`、`reference/`、验收标准或 `STATUS.json`。不改变 `live_ready`。不新增 OpenAPI 操作。决定记为 ADR-F34。
-
-拟改路径：
-
-- `services/worker/aether_worker/remote_sources.py`
-- `services/worker/aether_worker/pending_jobs.py`、`ingest.py`、`rss_isolate.py`
-- `services/worker/aether_worker/tool_gateway.py`、`service.py`
-- `packages/storage/aether_storage/operations.py`
-- `services/worker/aether_worker/console_commands.py`、`retention.py`
-- `services/worker/aether_worker/recommendations.py`、`services/api/aether_api/console_routes.py`
-- `config/tools.example.yaml`、`tests/fixtures/mcp_fixture.py`
-- `docs/08_api_ui.md`、`docs/DECISIONS.md` 与由此重建的 `MASTER_SPEC.md`
-- `tests/unit/test_remote_sources.py`
-- `tests/integration/test_r7_public_sources.py`、`tests/integration/test_r7_tool_dispatch.py`
-- `tests/integration/test_console_api.py`（GET 不再写曝光，见 ADR-F34）
+相关合同：不改 `contracts/`、`reference/` 或验收标准。不把 `live_ready` 改成 passed。不新增 OpenAPI 操作。没有预批准模板登记，因此不实现低风险自动批准。
 
 测试命令：
 
@@ -25,12 +11,11 @@ uv run --locked --no-build python scripts/verify_freeze.py
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
 uv run --locked --no-build pytest -q tests/unit
 AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
-  PATH="$HOME/.local/bin:.hermes/.venv/bin:$PATH" uv run --locked --no-build pytest -q tests/integration
-uv run --locked --no-build python scripts/doctor.py --require-services
+  uv run --locked --no-build pytest -q tests/integration
 ```
 
-进度：四项产品路径已接到 worker。先失败的采集单测在实现前无法收集（缺少 `aether_worker.remote_sources`）。
+进度：产品路径和本路测试已接上。先失败的用例是 `test_worker_does_not_approve_the_contract_as_the_owner`：没有批准时不得写入 `goal_contracts.approved_by`。
 
-结果：冻结检查通过。参考套件 76。单元 231。集成在 Hermes 不在 PATH 时 347 passed、1 failed（`test_pinned_hermes_cli_prints_its_real_version`，`hermes_cli_missing`）。把 `.hermes/.venv/bin` 放入 PATH 后，该探针与本路 5 条集成用例一起 6 passed。doctor exit 0。`reports/doctor.json` 的本机探测差异没有提交。
+结果：冻结检查通过。参考套件 76。单元 231 passed。集成 320 passed、38 failed、1 warning。38 条失败都是本机没有 Docker、Playwright Chromium 和 Hermes，没有 skip。本路定向 16 passed，worker 进程、p0 批准和历史回放 13 passed。
 
-阻塞：无。不改 `live_ready`。BM25 文件里可能仍留已删除文本的字节，返回前按 tombstone 过滤。本路径不发放 capability。probe 仍不打开传输。编码作业和技能评测仍是 unsupported。
+阻塞：本机缺 Docker、浏览器和 Hermes，交给 CI。不改 `live_ready`。已被终止且任务尚未终态的 workflow 不会重新启动。
