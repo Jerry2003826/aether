@@ -21,6 +21,7 @@ from aether_worker.outbox import enqueue_task
 from aether_worker.research import EFFECTS, record_research_effect, record_verification, scripted_research
 from aether_worker.research_workflow import ResearchWorkflow
 from aether_worker.dispatcher import deliver_pending
+from tests.integration.sysfix_b_helpers import booked_token
 from tests.integration.test_auth import ORIGIN, _bootstrap
 from tests.integration.test_operations import _digest, _intent, _ledger
 
@@ -75,7 +76,15 @@ def test_scripted_loop_records_hash_and_gateway_calls(client, api_db, role_urls,
         from aether_gateway.model import ModelGateway
 
         gateway = ModelGateway(Database(role_urls["aether_worker"]), upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1", provider_key="sk-scripted")
-        token = gateway.issue_token(owner_id=owner_id, project_id=project_id, capabilities=["knowledge:read"], aliases=["actor"], egress=["https://example.test"])
+        _task, token = booked_token(
+            gateway,
+            Database(role_urls["aether_worker"]),
+            owner_id=owner_id,
+            project_id=project_id,
+            prompt=document.decode(),
+            alias="actor",
+            egress=["https://example.test"],
+        )
         result = scripted_research(store=store, gateway=gateway, token=token, owner_id=owner_id, project_id=project_id, artifact_id=str(stored["artifact_id"]))
     finally:
         server.shutdown()

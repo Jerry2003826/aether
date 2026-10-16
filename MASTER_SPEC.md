@@ -429,7 +429,7 @@ RRF top30交 `BAAI/bge-reranker-v2-m3`，返回top8；每份文档最多2段，�
 
 把网页、RSS、PDF、代码仓库、MCP响应、第三方skill和LLM输出全部视为不可信。攻击可能诱导泄露API key、读取其他项目、修改验收/日志、扩大权限、反复花钱、运行恶意依赖或伪造完成报告。提示词过滤只能辅助，不是边界；隔离容器也不是无条件安全承诺。
 
-评分器在子进程里跑绑定套件。pytest 返回后立刻把通过数和退出码写进父进程事先打开的管道，然后 `os._exit`，所以候选注册的 `atexit` 来不及再打印假的 `N passed` 或改退出码。父进程只认这根管道，不认子进程标准输出。同进程里仍有剩余风险：导入候选模块时就可以 `os._exit`，也可以在管道写入之前扫到那个文件描述符并抢先写入；候选如果在被 import 时挂上 pytest 钩子，仍可能影响当次收集。这些情况一律不能当成通过。
+评分器的父进程以 root 运行，从不导入候选代码。它先静态解析受信套件得到测试清单，再降权到 nobody（`no-new-privileges`）跑 pytest，JUnit 报告写到随机路径。pytest 返回后杀掉降权用户的残留进程，再读报告：至少一个用例，没有失败、错误或跳过，清单里每个测试都通过，并且退出码为 0。宿主只接受恰好一行 `ISOLATION` 和一行 `GRADE`；降权进程打不开父进程的标准输出，伪造的 `N passed` 或抢先写入都不会被当成结论。剩余风险：候选仍与 pytest 同进程，被 import 时若改写 pytest 内部的结果对象，JUnit 仍可能把失败记成通过；跳过或少跑测试会被清单核对挡住，这类改写挡不住，要靠断言与候选分进程才能消除。容器边界本身也不是对恶意代码的无条件承诺。
 
 可信域：owner身份系统、policy/tool registry、gateway、runner-manager、verifier控制进程、release evaluator。应用开发者能修改这些代码，因此自我进化只允许改skill/受限workflow DSL，不允许Agent自动替换可信控制代码。
 
@@ -996,6 +996,7 @@ skills先加载name/description，再读取被选中的指令，再按需读取�
 | ADR-F23 | 目标完成要绑住对象、单位、时段和比较关系；来源身份不因字节去重消失 | 2026-10-15：第五轮审计 `aedbdd5`。同一组数字对调对象、每分钟改成每秒、最多改成超过，都不能成功。目标明确要两件事而资料只支持一件时，结论是 `unverifiable`，不是强 PASS。正确转述仍然可以成功；十二字引用继续写在报告的 `citation` 里，但不单独否决已经对上的转述。验收版本改为 `goal-artifact-7`。空正文和 token 超额都把已知 token 计入 `tokens_used`。令牌发出之后、传输之前若任务已是 PAUSED 或 CANCELLED，就不发送，并释放未发出的预留。已有答案的重试和最终 SUCCEEDED 提交都再核对 `active_seconds`。`project_private` 资料在被任务引用后仍可被来源选择读到。不改变 `live_ready` |
 | ADR-F24 | 多对象答案必须带主语；停发许可在真正派发前可以被取消 | 2026-10-16：PR #11 合入 `967b55f` 后 Codex 仍指出的 P1。两个对象的事实不能被没有主语的数字对上。目标拆开的每一部分要碰到自己的对象，共享的「限额」不算。控制命令排在非控制命令后面时仍要抽出来处理。`apply_task_control` 使用单独的控制线程池。派发先取得 `permitted`，暂停或取消提交后把它撤销，`consume` 失败就不再调用供应商。尚未派发就到期的预留改为释放，而不是标成 unknown。输出上限按剩余金额缩小。验收版本改为 `goal-artifact-8`。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run` |
 | ADR-F25 | 记忆 claim 不是资料；逻辑产物可以共享字节；一条坏命令不能停掉 worker；终态不能改写 | 2026-10-16：系统审计第一轮里本批负责的项。记忆 claim 使用 `memory_claim`，删除和更正会给旧字节打 tombstone，来源发现和显式名单只接受 `project_private`。显式把记忆 id 当资料会得到 `allowed_sources_invalid`，不把记忆文本送去当证据。同一 `storage_key` 的活行按分类和媒体类型区分，tombstone 不挡住以后的新行；第一次绑定仍会写 `artifacts.task_id`，以保持既有的任务引用测试。命令应用按条使用 savepoint，非暂时错误标 FAILED，`route_pending` 和 `serve` 吞掉单次失败后继续。同一任务的信号失败时，后面的命令回到 PENDING。`resume` 不清除 `cancel_requested`。公开合同哈希取自 `current_contract_id`，终态任务不能改草案。状态变化和 `task.status` 事件在同一事务里写入。事件序号在锁住任务行后分配，冲突则重试。新工作流用 `bounded-activity-retry` 把活动重试限制为 3 次并设置心跳超时，`ArtifactError` 记成 `NEEDS_REVIEW` 而不再抛出。数据库拒绝离开 SUCCEEDED、FAILED、CANCELLED。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run`。活动超时后两次尝试互相改写预算的部分留给派发状态机那一批 |
+| ADR-F26 | 未发出的预留可以接管或释放；验收只看模型当时看到的资料；评分不取自候选进程；令牌绑定账本中的单个请求；作业取消要确认容器已停 | 2026-10-16：系统审计第一轮 P1-04、P1-05、P1-06、P2-01、P2-05、P2-07，基线 `d6ed382`。每次执行带 `attempt_id`，只有 `sending` 的预留才记为 unknown；`dispatched`/`permitted` 由重试重新定价接管，网关在联系供应商前拒绝时释放并转人工复核。生成记录写入 `source_manifest`，验收器按清单重读资料，清单缺失、字节变化或提示哈希不符都是 `UNVERIFIABLE`；同一主语、单位、时段、比较关系的资料数值不同（中文数字归一化后）为 `conflicting_sources`，不判 PASS。验收版本改为 `goal-artifact-9`。评分器父进程不导入候选代码，pytest 在降权到 nobody 的子进程里跑，以退出码和随机路径 JUnit 报告为准，每个受信测试都要通过。报告的模式取自生成记录；未报用量是 unknown 并继续冻结，不判超额；LiteLLM 金额标为 `local_price_estimate` 并带 `pricing_version`。模型令牌要有 `task_id`、`request_key`、`attempt_id`，网关在同一事务核对账本后单次作废，任务停止即撤销。作业取消删除令牌和容器，核对标签下无残留才是 `confirmed`，已取消作业不再启动。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run` |
 
 实施时确需改架构：追加日期、具体失败证据、最小变更、风险、迁移与新增/修订测试。不因个人偏好换栈；不得删除失败记录。
 

@@ -176,6 +176,14 @@ def release_containers(key: str) -> None:
             _docker(["rm", "-f", item])
 
 
+def _labelled_containers(key: str) -> list[str] | None:
+    """Every container of this job in any state; None when Docker cannot answer."""
+    completed = _docker(["ps", "-aq", "--filter", f"label=aether.job={_job_label(key)}"])
+    if completed.returncode != 0:
+        return None
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
 def _ensure_running(container_id: str) -> None:
     state = _docker(["inspect", "-f", "{{.State.Running}}", container_id])
     if state.returncode != 0:
@@ -289,6 +297,10 @@ class LinuxRunner:
     def start(self, request: CodingJobRequest, *, token: str, gateway_url: str, provider_key: str) -> CodingJobResult:
         key = self._key(request)
         existing = self._jobs.get(key)
+        if existing is not None and existing.get("status") == "CANCELLED":
+            if existing.get("cancel_state") != "confirmed":
+                self._stop(key, existing)
+            return _result(existing)
         found = _container_id(key) if docker_available() else None
         if existing is not None:
             if found and not existing.get("container_id"):
@@ -337,11 +349,34 @@ class LinuxRunner:
         return _result(record)
 
     def cancel(self, project_id: str, job_id: str) -> CodingJobResult:
-        record = self._find(project_id, job_id)
+        """Revoke the job token, remove the job and gateway containers, then confirm none remain.
+
+        cancel_state stays "requested" and RunnerError("cancel_unconfirmed") is raised while a
+        container may still be running. Cancellation is not rollback: external_effect stays unknown.
+        """
+        for key, record in self._jobs.items():
+            if record["project_id"] == project_id and record["job_id"] == job_id:
+                self._stop(key, record)
+                return _result(record)
+        raise RunnerError("job_missing")
+
+    def _stop(self, key: str, record: dict[str, Any]) -> None:
+        environment = record.get("environment") or {}
+        if environment.pop("AETHER_JOB_TOKEN", None) is not None:
+            record["token_revoked"] = True
         record["status"] = "CANCELLED"
         record["external_effect"] = "unknown"
+        record["cancel_state"] = "requested"
         self._save()
-        return _result(record)
+        if docker_available():
+            release_containers(key)
+            stopped = _labelled_containers(key) == []
+        else:
+            stopped = not record.get("container_id")
+        if not stopped:
+            raise RunnerError("cancel_unconfirmed")
+        record["cancel_state"] = "confirmed"
+        self._save()
 
     def _find(self, project_id: str, job_id: str) -> dict[str, Any]:
         for record in self._jobs.values():

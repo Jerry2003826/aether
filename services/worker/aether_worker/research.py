@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import re
 from datetime import datetime
+from decimal import Decimal
 from typing import Any
 
 import tiktoken
@@ -315,6 +316,62 @@ def _bindings(text: str) -> list[tuple[str, str, str, str, frozenset[str]]]:
     return found
 
 
+_CN_DIGITS = {"零": 0, "〇": 0, "一": 1, "二": 2, "三": 3, "四": 4, "五": 5, "六": 6, "七": 7, "八": 8, "九": 9}
+_CN_SMALL_UNITS = {"十": 10, "百": 100, "千": 1000}
+_CN_LARGE_UNITS = {"万": 10_000, "亿": 100_000_000}
+
+
+def numeric_value(token: str) -> Decimal | None:
+    """60 and 六十 are one value. Digit-by-digit numerals such as 二〇二四 read as digits."""
+    if token[0].isdigit():
+        return Decimal(token)
+    if not any(char in _CN_SMALL_UNITS or char in _CN_LARGE_UNITS for char in token):
+        if not all(char in _CN_DIGITS for char in token):
+            return None
+        return Decimal("".join(str(_CN_DIGITS[char]) for char in token))
+    total = 0
+    section = 0
+    digit = 0
+    largest = 0
+    for char in token:
+        if char in _CN_DIGITS:
+            digit = _CN_DIGITS[char]
+        elif char in _CN_SMALL_UNITS:
+            section += (digit or 1) * _CN_SMALL_UNITS[char]
+            digit = 0
+        elif char in _CN_LARGE_UNITS:
+            unit = _CN_LARGE_UNITS[char]
+            section += digit
+            if unit > largest:
+                total = (total + section) * unit
+                largest = unit
+            else:
+                total += section * unit
+            section = 0
+            digit = 0
+        else:
+            return None
+    return Decimal(total + section + digit)
+
+
+def conflicting_facts(facts: list[str]) -> bool:
+    """Two source lines give different values for the same subject, unit, period and comparison.
+
+    A binding without a subject is not compared; it may be about anything.
+    """
+    seen: dict[tuple[str, str, str, frozenset[str]], list[tuple[Decimal, int]]] = {}
+    for index, fact in enumerate(facts):
+        for number, unit, period, polarity, subjects in _bindings(fact):
+            value = numeric_value(number)
+            if not subjects or value is None:
+                continue
+            others = seen.setdefault((unit, period, polarity, subjects), [])
+            if any(line != index and other != value for other, line in others):
+                return True
+            others.append((value, index))
+    return False
+
+
 def _binding_covered(
     binding: tuple[str, str, str, str, frozenset[str]],
     answers: list[tuple[str, str, str, str, frozenset[str]]],
@@ -390,6 +447,8 @@ def goal_completion_detail(*, answer: str, goal: str, source_text: str) -> str:
     facts = required_facts(source_text=source_text, goal=goal)
     if not facts:
         return "no_supported_fact"
+    if conflicting_facts(facts):
+        return "conflicting_sources"
     if not answer or answer.strip() == goal.strip():
         return "empty_answer"
     allowed = set(_numbers(goal))
@@ -412,7 +471,7 @@ def goal_completion_detail(*, answer: str, goal: str, source_text: str) -> str:
 def goal_completion_state(*, answer: str, goal: str, source_text: str) -> str:
     """Separate goal satisfaction from a short citation overlap."""
     detail = goal_completion_detail(answer=answer, goal=goal, source_text=source_text)
-    if detail in {"no_supported_fact", "unsupported_goal_part"}:
+    if detail in {"no_supported_fact", "unsupported_goal_part", "conflicting_sources"}:
         return "unverifiable"
     if detail:
         return "fail"

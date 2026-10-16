@@ -10,6 +10,7 @@ import pytest
 from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_gateway.registry import ToolDenied, admit_tool, load_registry
 from aether_storage.db import Database
+from tests.integration.sysfix_b_helpers import booked_token
 from tests.integration.test_auth import _bootstrap
 
 PROVIDER_KEY = "sk-test-secret-not-for-logs"
@@ -79,11 +80,13 @@ def _gateway(client, api_db, role_urls, aether_admin, upstream, *, timeout=5):
     assert project.status_code == 201, project.text
     project_id = project.json()["id"]
     issuer = ModelGateway(Database(role_urls["aether_worker"]), upstream_base=upstream, provider_key=PROVIDER_KEY, timeout=timeout)
-    token = issuer.issue_token(
+    _task_id, token = booked_token(
+        issuer,
+        Database(role_urls["aether_worker"]),
         owner_id=session["owner_id"],
         project_id=project_id,
-        capabilities=["knowledge:read"],
-        aliases=["actor"],
+        prompt="hello",
+        alias="actor",
         egress=["https://example.test"],
     )
     gateway = ModelGateway(Database(role_urls["aether_worker"]), upstream_base=upstream, provider_key=PROVIDER_KEY, timeout=timeout)

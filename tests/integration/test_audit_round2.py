@@ -15,7 +15,7 @@ from sqlalchemy import text
 from aether_domain.security import sha256_text
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
-from aether_worker.goal_effect import WorkerEndpoints, _ensure_verification
+from aether_worker.goal_effect import WorkerEndpoints, _ensure_verification, _read_sources, _record_scripted_generation
 from tests.integration.test_artifacts import _project
 
 
@@ -54,6 +54,13 @@ def _contract(worker: Database, owner: str, project: str, task_id: str) -> tuple
             ).scalar_one()
         )
     return contract_id, digest
+
+
+def _answered_from_current_sources(worker: Database, store: ArtifactStore, owner: str, project: str, task_id: str) -> None:
+    """What a real run records before it writes the answer: the sources the generation saw."""
+    _texts, manifest, _snapshot, state, _missing = _read_sources(worker, store, owner, project)
+    assert state == "ok"
+    _record_scripted_generation(worker, owner_id=owner, project_id=project, task_id=task_id, manifest=manifest)
 
 
 def _task(worker: Database, project: str, goal: str) -> str:
@@ -167,6 +174,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     source = store.put(owner_id=owner, project_id=project, data="事实：水在标准大气压下于一百摄氏度沸腾\n".encode(), media_type="text/plain")
     goal = "请根据已上传资料回答沸点"
     task_id = _task(worker, project, goal)
+    _answered_from_current_sources(worker, store, owner, project, task_id)
     answer = store.put(
         owner_id=owner,
         project_id=project,
@@ -203,6 +211,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     path = store.root / project / str(answer["sha256"])[:2] / str(answer["sha256"])
     path.write_bytes(b"corrupt document!")
     fresh_task = _task(worker, project, goal)
+    _answered_from_current_sources(worker, store, owner, project, fresh_task)
     fresh_contract, fresh_digest = _contract(worker, owner, project, fresh_task)
     corrupt_answer = str(answer["artifact_id"])
     # The corrupt bytes belong to the first answer. A second candidate is stored intact, then we point
@@ -235,6 +244,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     assert failed != first
 
     tombstone_task = _task(worker, project, goal)
+    _answered_from_current_sources(worker, store, owner, project, tombstone_task)
     tombstone_contract, tombstone_digest = _contract(worker, owner, project, tombstone_task)
     hidden = store.put(owner_id=owner, project_id=project, data="资料记载：事实：水在标准大气压下于一百摄氏度沸腾。".encode(), media_type="text/plain", classification="task_answer")
     with worker.transaction(owner_id=owner, project_id=project) as conn:
@@ -268,6 +278,7 @@ def test_goal_verification_reads_bytes_and_does_not_reuse_another_candidate(clie
     # Put a second source line by uploading another unbound document before verification.
     store.put(owner_id=owner, project_id=project, data="事实：冰点在标准大气压下为零摄氏度\n".encode(), media_type="text/plain")
     other_task = _task(worker, project, "请回答冰点")
+    _answered_from_current_sources(worker, store, owner, project, other_task)
     with worker.transaction(owner_id=owner, project_id=project) as conn:
         conn.execute(
             text("UPDATE artifacts SET task_id = :task_id WHERE project_id = :project_id AND id = :id"),

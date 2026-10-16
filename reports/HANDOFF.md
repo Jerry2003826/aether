@@ -1,5 +1,32 @@
 # 交接
 
+系统审计第一轮（PR #13 `reports/audits/system_round1/`）中 P1-04、P1-05、P1-06、P2-01、P2-05、P2-07 修在 `cursor/sysfix-b-d9aa`，最初基线 main `d6ed382`，PR #14（A 组）合入后已变基到 main `80f1d39`。P0、P1-01~03、P1-07~09、P2-04、P2-06、P2-08 由另外两个分支负责，本分支没有改。复现用例先作为一个提交移植进 `tests/integration/test_sysfix_*.py`，在修复前的代码上 20 个失败、8 个通过（通过的是对照组和保护性用例），之后每条一个提交。没有 skip、xfail 或放宽断言。ADR-F25 已被 A 组使用，本分支的裁决是 ADR-F26。本分支没有新增迁移。
+
+- P1-04：每次执行带 `attempt_id`。只有 `sending` 的预留才记为 unknown；`dispatched`/`permitted` 的预留由重试重新定价并接管；网关在联系供应商前拒绝时释放预留并转人工复核。测试 `test_sysfix_p1_04_unsent_reservation.py`。
+- P1-05：生成记录写入 `source_manifest`，验收器只按清单重读资料，清单缺失、字节变化、资料被删或提示哈希不符都是 `UNVERIFIABLE`。同一主语、单位、时段、比较关系的资料数值不同（中文数字归一化后）为 `conflicting_sources`，不判 PASS。验收版本 `goal-artifact-9`。测试 `test_sysfix_p1_05_verifier_evidence.py`。
+- P1-06：评分器父进程不导入候选代码，pytest 在降权到 nobody 的子进程里跑，以退出码和随机路径 JUnit 报告为准，受信套件静态解析出的每个测试都要通过。剩余风险写在 `docs/06_security.md` §1：候选与 pytest 同进程，导入时改写 pytest 结果对象仍挡不住。测试 `test_sysfix_p1_06_grader_forgery.py`。
+- P2-01：报告的 `model_mode`/`offline` 取自生成记录；未报用量为 unknown 并继续冻结，不判超额；LiteLLM 金额标为 `local_price_estimate` 并带 `pricing_version`。测试 `test_sysfix_p2_01_evidence_labels.py`。
+- P2-05：模型令牌必须带 `task_id`、`request_key`、`attempt_id`；网关在同一事务里核对账本行、提示哈希、别名和输出上限后单次作废；任务停止即撤销。测试 `test_sysfix_p2_05_gateway_token.py`，`test_gateway.py`、`test_kernel.py` 改用已预留的令牌。
+- P2-07：取消删除作业令牌和 job/gateway 容器，核对标签下无残留才是 `confirmed`，否则保持 requested 并报 `cancel_unconfirmed`；已取消作业再 start 直接返回 CANCELLED。测试 `test_sysfix_p2_07_runner_cancel.py`。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q -p no:cacheprovider tests/unit tests/integration
+400 passed, 1 warning in 313.26s
+EXIT:0
+uv run --locked --no-build python scripts/verify_freeze.py              -> exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'   -> Ran 76 tests, OK
+uv run --locked --no-build python scripts/doctor.py --require-services  -> exit 0
+```
+
+本机没有 live model key。`live_ready` 和 `product_engineering` 没有改动。验收版本、令牌绑定和用量标注都动了 live 路径，合入前需要监督者用真实 key 重跑：
+
+```sh
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+重跑时重点看：真实供应商没回报 usage 时任务是否停在 unknown 而不是超额；`cost_source` 是否为 `local_price_estimate`；`goal-artifact-9` 的验收报告是否带 `source_manifest`。
+
 系统审计第一轮里，本批在 `cursor/sysfix-a-p0-p1-7618` 修了 P0-01、P0-02、P1-01、P1-02、P1-03，以及 P2-02、P2-03、P2-06 的终态数据库约束。基线是 main `d6ed382`。细节在 `reports/audits/system_round1/REPAIR_RESULT.md`。P1-04 至 P1-09 和其余 P2 不在本批。`live_ready` 与 `product_engineering` 没有改成通过。`comparative_evidence` 仍是 `not_run`。
 
 本机没有 live model key。不把 F26 或 `live_task_check` 标成失败。合入后仍要监督者用真实 key 重跑：
