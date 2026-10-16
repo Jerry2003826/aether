@@ -83,10 +83,18 @@ CONTENT_TABLES = frozenset(
     }
 )
 MONOTONIC_COLUMNS = frozenset({"visibility_epoch"})
+# Lifecycle and security decisions inside content tables keep their live value:
+# a superseded memory, a retired index generation, a reclassified artifact.
+LIVE_COLUMNS = {
+    "artifacts": frozenset({"classification"}),
+    "task_artifacts": frozenset({"classification"}),
+    "index_generations": frozenset({"state", "activated_at"}),
+    "memories": frozenset({"epistemic_status"}),
+}
 TOMBSTONE_COLUMNS = ("deleted_at", "revoked_at")
 # Artifact-store bookkeeping written after the backup describes the live store.
 LIVE_ARTIFACT_DIRECTORIES = frozenset({"journal", "locks", "tmp"})
-if not CONTENT_TABLES <= set(SBOM_TABLES) or not set(DEFERRED_COLUMNS) <= set(SBOM_TABLES):
+if not CONTENT_TABLES <= set(SBOM_TABLES) or not set(DEFERRED_COLUMNS) | set(LIVE_COLUMNS) <= set(SBOM_TABLES):
     raise RuntimeError("restore_order_mismatch")
 
 
@@ -183,38 +191,49 @@ def backup_project(database_url: str, artifact_root: Path, destination: Path) ->
     return manifest
 
 
+def _sibling(path: Path, label: str) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return path.parent / f".{path.name}.{label}-{uuid4().hex}"
+
+
 def _install_tree(source: Path, destination: Path) -> None:
     """Copy into a sibling directory, then rename it into place.
 
     The live tree stays until that copy has a name on the same filesystem.
     """
-    parent = destination.parent
-    parent.mkdir(parents=True, exist_ok=True)
-    token = uuid4().hex
-    staging = parent / f".{destination.name}.restore-{token}"
-    previous = parent / f".{destination.name}.previous-{token}"
+    staging = _sibling(destination, "restore")
     try:
         shutil.copytree(source, staging)
     except Exception:
-        if staging.exists():
-            shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
     try:
-        if destination.exists():
-            destination.rename(previous)
-        staging.rename(destination)
+        previous = _swap_in(staging, destination)
     except Exception:
-        if not destination.exists() and previous.exists():
-            previous.rename(destination)
-        if staging.exists():
-            shutil.rmtree(staging)
+        shutil.rmtree(staging, ignore_errors=True)
         raise
-    if previous.exists():
+    if previous is not None:
         shutil.rmtree(previous)
 
 
+def _stage_artifacts(snapshot: Path, artifact_root: Path) -> tuple[Path, dict[str, int]]:
+    """Build the merged tree in a sibling directory; the live tree is not touched until it is swapped in."""
+    staging = _sibling(artifact_root, "restore")
+    try:
+        if artifact_root.exists():
+            shutil.copytree(artifact_root, staging, symlinks=True)
+            counts = _merge_tree(snapshot, staging)
+        else:
+            shutil.copytree(snapshot, staging, symlinks=True)
+            counts = {"restored_files": sum(1 for path in staging.rglob("*") if path.is_file()), "kept_live_files": 0}
+    except Exception:
+        shutil.rmtree(staging, ignore_errors=True)
+        raise
+    return staging, counts
+
+
 def _merge_tree(source: Path, destination: Path) -> dict[str, int]:
-    """Put snapshot bytes back file by file; files that exist only in the live tree stay."""
+    """Put snapshot bytes into a staged copy file by file; files that exist only in the live tree stay."""
     restored = 0
     kept = 0
     for path in sorted(source.rglob("*")):
@@ -222,6 +241,8 @@ def _merge_tree(source: Path, destination: Path) -> dict[str, int]:
             continue
         relative = path.relative_to(source)
         target = destination / relative
+        if target.exists() and not target.is_file():
+            raise RuntimeError(f"restore_path_conflict:{relative}")
         if target.is_file():
             if target.read_bytes() == path.read_bytes():
                 continue
@@ -229,15 +250,32 @@ def _merge_tree(source: Path, destination: Path) -> dict[str, int]:
                 kept += 1
                 continue
         target.parent.mkdir(parents=True, exist_ok=True)
-        staging = target.parent / f".{target.name}.restore-{uuid4().hex}"
-        try:
-            shutil.copy2(path, staging)
-            os.replace(staging, target)
-        finally:
-            if staging.exists():
-                staging.unlink()
+        shutil.copy2(path, target)
         restored += 1
     return {"restored_files": restored, "kept_live_files": kept}
+
+
+def _swap_in(staging: Path, artifact_root: Path) -> Path | None:
+    """Rename the staged tree into place and return where the live tree went, so a failed commit can put it back."""
+    previous = None
+    if artifact_root.exists():
+        previous = _sibling(artifact_root, "previous")
+        artifact_root.rename(previous)
+    try:
+        staging.rename(artifact_root)
+    except Exception:
+        if previous is not None:
+            previous.rename(artifact_root)
+        raise
+    return previous
+
+
+def _swap_back(artifact_root: Path, previous: Path | None) -> None:
+    discarded = _sibling(artifact_root, "discarded")
+    artifact_root.rename(discarded)
+    if previous is not None:
+        previous.rename(artifact_root)
+    shutil.rmtree(discarded, ignore_errors=True)
 
 
 def _columns(conn: psycopg.Connection, table: str) -> list[str]:
@@ -327,7 +365,7 @@ def _overwrite_content(conn: psycopg.Connection, table: str, columns: list[str],
             else sql.SQL("{column} = snapshot.{column}")
         ).format(column=sql.Identifier(column))
         for column in columns
-        if column not in primary_key
+        if column not in primary_key and column not in LIVE_COLUMNS.get(table, ())
     )
     statement = sql.SQL(
         "UPDATE {table} AS live SET {assignments} FROM {rows} AS snapshot "
@@ -356,11 +394,14 @@ def _differing(conn: psycopg.Connection, table: str, primary_key: list[str], row
 
 
 def restore_project(database_url: str, artifact_root: Path, source: Path, *, confirm: str) -> dict[str, Any]:
-    """Merge the snapshot into an empty or a live database, stop unfinished commands, then put artifact bytes back.
+    """Merge the snapshot into an empty or a live database, stop unfinished commands, and put artifact bytes back.
 
     Missing rows are inserted. Content rows go back to the snapshot unless they were deleted
-    since. Ledger and lifecycle rows that changed after the backup keep their live value,
-    so a task that finished after the backup stays finished. Nothing is deleted.
+    since; their lifecycle and security columns keep the live value. Ledger and lifecycle rows
+    that changed after the backup keep their live value, so a task that finished after the
+    backup stays finished. Nothing is deleted. Artifact bytes are merged into a staged copy
+    first and swapped in just before the database commit, so a failure on either side leaves
+    both as they were.
     """
     if confirm != "restore-aether":
         raise RuntimeError("restore_not_confirmed")
@@ -372,62 +413,76 @@ def restore_project(database_url: str, artifact_root: Path, source: Path, *, con
     snapshot = json.loads(raw_tables)
     if set(snapshot) != set(SBOM_TABLES):
         raise RuntimeError("backup_tables_missing")
+    copied = source / "artifacts"
+    staging, files = _stage_artifacts(copied, artifact_root) if copied.is_dir() else (None, {"restored_files": 0, "kept_live_files": 0})
+    previous = None
+    swapped = False
+    try:
+        with psycopg.connect(database_url) as conn:
+            with conn.transaction():
+                merged = _merge_tables(conn, snapshot)
+                if staging is not None:
+                    previous = _swap_in(staging, artifact_root)
+                    swapped = True
+    except Exception:
+        if swapped:
+            _swap_back(artifact_root, previous)
+        elif staging is not None:
+            shutil.rmtree(staging, ignore_errors=True)
+        raise
+    if previous is not None:
+        shutil.rmtree(previous, ignore_errors=True)
+    return {
+        "dispatch": "stopped",
+        "restored_tables": {table: len(snapshot[table]) for table in RESTORE_ORDER},
+        **merged,
+        **files,
+        "volume_deleted": False,
+    }
+
+
+def _merge_tables(conn: psycopg.Connection, snapshot: dict[str, list[dict[str, Any]]]) -> dict[str, Any]:
     inserted: dict[str, int] = {}
     overwritten: dict[str, int] = {}
     kept_live: dict[str, int] = {}
     kept_tasks: list[str] = []
-    with psycopg.connect(database_url) as conn:
-        with conn.transaction():
-            _assert_schema_covered(conn)
-            shapes = {table: (_columns(conn, table), _primary_key(conn, table)) for table in RESTORE_ORDER}
-            for table, (columns, primary_key) in shapes.items():
-                if not columns or not primary_key:
-                    raise RuntimeError(f"restore_table_rejected:{table}")
-            added: dict[str, set[tuple[str, ...]]] = {}
-            for table in RESTORE_ORDER:
-                columns, primary_key = shapes[table]
-                added[table] = _insert_missing(conn, table, columns, primary_key, snapshot[table])
-                inserted[table] = len(added[table])
-            for table in DEFERRED_COLUMNS:
-                primary_key = shapes[table][1]
-                _fill_deferred(conn, table, primary_key, [row for row in snapshot[table] if _key_of(row, primary_key) in added[table]])
-            for table in RESTORE_ORDER:
-                columns, primary_key = shapes[table]
-                if table in CONTENT_TABLES:
-                    overwritten[table] = _overwrite_content(conn, table, columns, primary_key, snapshot[table])
-                differing = _differing(conn, table, primary_key, snapshot[table])
-                if differing:
-                    kept_live[table] = len(differing)
-                if table == "tasks":
-                    kept_tasks = sorted(key[primary_key.index("id")] for key in differing)
-            # Stop after the snapshot write. Restored PENDING rows would be dispatchable again.
-            stopped = conn.execute(
-                """
-                UPDATE command_outbox
-                SET status = 'STOPPED'
-                WHERE status IN ('PENDING', 'DELIVERING')
-                RETURNING id::text
-                """
-            ).fetchall()
-            pending = conn.execute(
-                "SELECT count(*) FROM command_outbox WHERE status IN ('PENDING', 'DELIVERING')"
-            ).fetchone()
-    copied = source / "artifacts"
-    files = {"restored_files": 0, "kept_live_files": 0}
-    if copied.is_dir():
-        if artifact_root.exists():
-            files = _merge_tree(copied, artifact_root)
-        else:
-            _install_tree(copied, artifact_root)
+    _assert_schema_covered(conn)
+    shapes = {table: (_columns(conn, table), _primary_key(conn, table)) for table in RESTORE_ORDER}
+    for table, (columns, primary_key) in shapes.items():
+        if not columns or not primary_key:
+            raise RuntimeError(f"restore_table_rejected:{table}")
+    added: dict[str, set[tuple[str, ...]]] = {}
+    for table in RESTORE_ORDER:
+        columns, primary_key = shapes[table]
+        added[table] = _insert_missing(conn, table, columns, primary_key, snapshot[table])
+        inserted[table] = len(added[table])
+    for table in DEFERRED_COLUMNS:
+        primary_key = shapes[table][1]
+        _fill_deferred(conn, table, primary_key, [row for row in snapshot[table] if _key_of(row, primary_key) in added[table]])
+    for table in RESTORE_ORDER:
+        columns, primary_key = shapes[table]
+        if table in CONTENT_TABLES:
+            overwritten[table] = _overwrite_content(conn, table, columns, primary_key, snapshot[table])
+        differing = _differing(conn, table, primary_key, snapshot[table])
+        if differing:
+            kept_live[table] = len(differing)
+        if table == "tasks":
+            kept_tasks = sorted(key[primary_key.index("id")] for key in differing)
+    # Stop after the snapshot write. Restored PENDING rows would be dispatchable again.
+    stopped = conn.execute(
+        """
+        UPDATE command_outbox
+        SET status = 'STOPPED'
+        WHERE status IN ('PENDING', 'DELIVERING')
+        RETURNING id::text
+        """
+    ).fetchall()
+    pending = conn.execute("SELECT count(*) FROM command_outbox WHERE status IN ('PENDING', 'DELIVERING')").fetchone()
     return {
-        "dispatch": "stopped",
         "stopped_commands": [row[0] for row in stopped],
         "pending_after_restore": int(pending[0]) if pending else 0,
-        "restored_tables": {table: len(snapshot[table]) for table in RESTORE_ORDER},
         "inserted_rows": inserted,
         "overwritten_rows": overwritten,
         "kept_live_rows": kept_live,
         "kept_live_tasks": kept_tasks,
-        **files,
-        "volume_deleted": False,
     }
