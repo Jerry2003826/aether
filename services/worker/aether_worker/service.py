@@ -53,16 +53,30 @@ def route_pending(
     seen: dict[str, str] | None = None,
 ) -> None:
     """Apply non-temporal outbox rows. Temporal kinds are left for deliver_pending."""
+    remembered = {} if seen is None else seen
+    before = dict(remembered)
+    grouped = _group_pending(_pending_command_rows(dispatcher), remembered)
+    _apply_grouped(grouped, worker, verifier, store)
+    root = index_root_from_env()
+    if seen is not None and remembered != before:
+        save_projects(root, remembered)
+    if not _defer_progress():
+        _execute_remembered(remembered, worker, store, root)
+
+
+def _pending_command_rows(dispatcher: Database) -> list[Any]:
     excluded = ", ".join(f"'{kind}'" for kind in TEMPORAL_COMMAND_KINDS)
     with dispatcher.transaction() as conn:
-        rows = conn.execute(
+        found = conn.execute(
             text(
                 "SELECT project_id::text AS project_id, kind, payload FROM command_outbox "
                 f"WHERE status = 'PENDING' AND kind NOT IN ({excluded})"
             )
         ).mappings().all()
-    remembered = seen if seen is not None else {}
-    before = dict(remembered)
+    return found
+
+
+def _group_pending(rows: list[Any], remembered: dict[str, str]) -> dict[str, dict[str, Any]]:
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         project_id = str(row["project_id"])
@@ -75,6 +89,17 @@ def route_pending(
         owner_id = str(bucket["owner_id"])
         if owner_id:
             remembered[project_id] = owner_id
+    return grouped
+
+
+def _apply_grouped(
+    grouped: dict[str, dict[str, Any]],
+    worker: Database,
+    verifier: Database,
+    store: ArtifactStore,
+) -> None:
+    for project_id, bucket in grouped.items():
+        owner_id = str(bucket["owner_id"])
         kinds: set[str] = bucket["kinds"]
         try:
             if kinds & set(CONSOLE_KINDS):
@@ -85,12 +110,10 @@ def route_pending(
                 apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
             print(f"aether-route-failed project={project_id} error={type(exc).__name__}", flush=True)
-    root = index_root_from_env()
-    if seen is not None and remembered != before:
-        save_projects(root, remembered)
-    if _defer_progress():
-        return
-    for project_id, owner_id in list(remembered.items()):
+
+
+def _execute_remembered(remembered: dict[str, str], worker: Database, store: ArtifactStore, root: Path) -> None:
+    for project_id, owner_id in remembered.items():
         try:
             execute_queued_ingestions(worker, store, owner_id=owner_id, project_id=project_id, index_root=root)
         except Exception as exc:

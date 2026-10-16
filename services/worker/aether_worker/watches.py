@@ -135,7 +135,7 @@ async def ensure_watch_schedules(
     task_queue: str,
 ) -> None:
     """Create a missing Temporal schedule for each ACTIVE watch on this worker's queue."""
-    for project_id, owner_id in list(projects.items()):
+    for project_id, owner_id in projects.items():
         for watch in _active_watches(database, owner_id=owner_id, project_id=project_id):
             await _ensure_watch_schedule(client, watch, project_id=project_id, owner_id=owner_id, task_queue=task_queue)
 
