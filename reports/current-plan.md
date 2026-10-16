@@ -26,7 +26,7 @@ AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration
 
 进度：失败用例、报告与快照已经接在 PR #21 之上。这次再变基到 PR #22，两边都留着。
 
-结果：报告区分 pass、fail、not_run、blocked。空套件、全跳过、后段失败、计数不符、以及没有当前绑定的证据都不会变成 live_ready。三条快照路径拒绝符号链接。目录是 `0o750` 加 uid 65534 的命名用户 ACL。`readiness.live_ready` 是 pending。变基到 `76fd71c` 之后的全量结果待重跑。
+结果：报告区分 pass、fail、not_run、blocked。空套件、全跳过、后段失败、计数不符、以及没有当前绑定的证据都不会变成 live_ready。三条快照路径拒绝符号链接。目录是 `0o750` 加 uid 65534 的命名用户 ACL。`readiness.live_ready` 是 pending。变基到 `76fd71c` 之后 `verify_freeze` 通过，unit 226，integration 340。
 
 阻塞：本机没有 live model key。所有者重跑 `scripts/run_f26_acceptance.py` 之前，live 保持 pending。
 

@@ -8,9 +8,20 @@ SYS-08：`build_report` 读完整棵 JUnit。suite 计数必须和实际用例�
 
 SYS-03：`export_candidate`、`prepare_workspace`、`_stage` 只通过 `O_NOFOLLOW` 和目录描述符读取授权根里的普通文件。指向外部、指向内部、目录链接、fifo、以及根目录本身是符号链接，都会拒绝。合法项目树仍能导出和复制。评分器的协议发布和套件收紧仍在 `_publish_protocol`。
 
-失败用例在变基后的第一笔提交，当时相对 `8b90363` 是 23 失败、1 个合法对照通过。决定见 ADR-F32。写出的目录是 `0o750`，uid 65534 只靠命名用户 ACL 进入；协议套件随后由 `_publish_protocol` 收成 `0o700`，nobody 读不到期望值。变基到 `76fd71c` 之后的全量结果待重跑。
+失败用例在变基后的第一笔提交，当时相对 `8b90363` 是 23 失败、1 个合法对照通过。决定见 ADR-F32。写出的目录是 `0o750`，uid 65534 只靠命名用户 ACL 进入；协议套件随后由 `_publish_protocol` 收成 `0o700`，nobody 读不到期望值。
 
-下一步：全量套件重跑，PR 保持 ready，不合并。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
+变基到 `76fd71c` 之后的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0
+uv run --locked --no-build pytest -q tests/unit
+# 226 passed
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration
+# 340 passed, 1 warning
+```
+
+下一步：PR 保持 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
 
 ## SYS-06 记忆来源与 SYS-04 验收条款（分支 `cursor/r6-memory-provenance-110a`）
 
