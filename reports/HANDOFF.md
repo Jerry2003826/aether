@@ -27,7 +27,9 @@ uv run --locked --no-build python scripts/doctor.py --require-services          
 
 环境变量：`AETHER_REQUIRE_SERVICES=1`，`AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres`，`AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233`。
 
-下一步：PR 标为 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。所有者在有 live key 的机器上重跑 F26 验收和 live 任务检查。
+CI：`bfca959` 的 pack-and-unit、integration 和 SonarCloud 都通过。随后只改交接的 `9dddf59` 与上一轮同时跑集成，`test_pinned_hermes_identity_and_local_protocol` 再次在负载下失败（第一次身份探测已通过，`run_four_way` 里的第二次没有通过）。本分支没有改 Hermes 身份代码。
+
+下一步：PR #18 已标为 ready，不合并。所有者在有 live key 的机器上重跑 F26 验收和 live 任务检查。
 
 ## 系统审计第一轮 · C 组 P2-04 收紧（分支 `cursor/sysfix-c2-f4de`）
 
