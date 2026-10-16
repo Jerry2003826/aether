@@ -19,6 +19,7 @@ from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
+from aether_worker.pending_jobs import execute_queued_ingestions, run_activated_watches
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
 from aether_worker.memory import apply_memory_commands
@@ -36,7 +37,17 @@ async def run_control(executor: concurrent.futures.Executor, func, /, *args):
     return await loop.run_in_executor(executor, functools.partial(func, *args))
 
 
-def route_pending(dispatcher: Database, worker: Database, verifier: Database, store: ArtifactStore) -> None:
+def index_root_from_env() -> Path:
+    return Path(os.environ.get("AETHER_INDEX_ROOT", "data/indexes"))
+
+
+def route_pending(
+    dispatcher: Database,
+    worker: Database,
+    verifier: Database,
+    store: ArtifactStore,
+    seen: dict[str, str] | None = None,
+) -> None:
     """Apply non-temporal outbox rows. Temporal kinds are left for deliver_pending."""
     excluded = ", ".join(f"'{kind}'" for kind in TEMPORAL_COMMAND_KINDS)
     with dispatcher.transaction() as conn:
@@ -46,6 +57,7 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
                 f"WHERE status = 'PENDING' AND kind NOT IN ({excluded})"
             )
         ).mappings().all()
+    remembered = seen if seen is not None else {}
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         project_id = str(row["project_id"])
@@ -56,6 +68,8 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
         bucket["kinds"].add(str(row["kind"]))
     for project_id, bucket in grouped.items():
         owner_id = str(bucket["owner_id"])
+        if owner_id:
+            remembered[project_id] = owner_id
         kinds: set[str] = bucket["kinds"]
         try:
             if kinds & set(CONSOLE_KINDS):
@@ -66,6 +80,13 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
                 apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
             print(f"aether-route-failed project={project_id} error={type(exc).__name__}", flush=True)
+    root = index_root_from_env()
+    for project_id, owner_id in list(remembered.items()):
+        try:
+            execute_queued_ingestions(worker, store, owner_id=owner_id, project_id=project_id, index_root=root)
+            run_activated_watches(worker, store, owner_id=owner_id, project_id=project_id)
+        except Exception as exc:
+            print(f"aether-progress-failed project={project_id} error={type(exc).__name__}", flush=True)
 
 
 def _intake_pause_seconds() -> float:
@@ -136,6 +157,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     database = Database(resolved.worker_url)
     verifier = Database(resolved.verifier_url)
     store = ArtifactStore(resolved.artifact_root, database)
+    seen: dict[str, str] = {}
     stop = asyncio.Event()
     for signame in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signame, stop.set)
@@ -154,7 +176,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
                 except Exception as exc:
                     print(f"aether-deliver-failed error={type(exc).__name__}", flush=True)
                 try:
-                    await run_control(control_executor, route_pending, dispatcher, database, verifier, store)
+                    await run_control(control_executor, route_pending, dispatcher, database, verifier, store, seen)
                 except Exception as exc:
                     print(f"aether-route-failed error={type(exc).__name__}", flush=True)
                 try:

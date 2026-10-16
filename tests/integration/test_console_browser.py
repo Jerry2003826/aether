@@ -4,6 +4,7 @@ import socket
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -118,10 +119,26 @@ def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db
             page.get_by_role("button", name="知识").click()
             expect(page.get_by_text(HTML)).to_be_visible()
             assert page.locator("img").count() == 0
+            page.get_by_role("button", name="技能").click()
+            expect(page.get_by_text("技能评测不支持，不会进入排队，也不能据此晋升。")).to_be_visible()
+            code = desktop.new_page()
+            code.goto(f"{web_origin}/code", wait_until="networkidle")
+            expect(code.get_by_text("编码作业不支持。这个页面提交后会显示 unsupported，不会把它显示成已排队。")).to_be_visible()
+            code.get_by_label("项目编号").fill(project_id)
+            code.get_by_label("任务编号").fill(str(uuid.uuid4()))
+            code.get_by_label("基线产物").fill(str(uuid.uuid4()))
+            code.get_by_label("作业键").fill("edit")
+            code.get_by_label("目标").fill("改一处")
+            code.get_by_role("button", name="提交编码作业").click()
+            expect(code.get_by_role("status")).to_have_text("编码作业不支持，不会进入排队。")
             mobile = browser.new_context(viewport={"width": 390, "height": 800})
             narrow = mobile.new_page()
             narrow.goto(f"{web_origin}/console", wait_until="networkidle")
             expect(narrow.get_by_role("button", name="总览")).to_be_visible()
+            narrow.goto(f"{web_origin}/code", wait_until="networkidle")
+            expect(narrow.get_by_text("编码作业不支持。这个页面提交后会显示 unsupported，不会把它显示成已排队。")).to_be_visible()
+            narrow.get_by_role("button", name="提交编码作业").click()
+            expect(narrow.get_by_role("status")).to_have_text("还没有登录。")
             page.context.set_offline(True)
             page.get_by_role("button", name="刷新").click()
             expect(page.get_by_text("API 未连接。进程恢复前这里保持空状态。")).to_be_visible()

@@ -71,6 +71,7 @@ def client(role_urls: dict[str, str], clean_db: None, tmp_path: Path) -> Iterato
         origins=frozenset({"http://127.0.0.1:3000"}),
         cookie_secure=False,
         artifact_root=tmp_path / "artifacts",
+        index_root=tmp_path / "indexes",
     )
     app = create_app(settings)
     with TestClient(app) as test_client:

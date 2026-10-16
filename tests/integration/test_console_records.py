@@ -101,22 +101,20 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
             "objective": objective,
         },
     )
-    assert created.status_code == 202, created.text
+    assert created.status_code == 422, created.text
+    assert created.json()["code"] == "unsupported"
+    assert "不支持" in CODE
     worker = Database(role_urls["aether_worker"])
     apply_console_commands(worker, owner_id=owner_id, project_id=project_id)
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        row = conn.execute(
-            text(
-                "SELECT j.id::text AS id, j.task_id::text AS task_id, j.base_artifact_id::text AS base_artifact_id, "
-                "j.job_key, j.state, o.normalized_arguments->>'objective' AS objective "
-                "FROM coding_jobs j JOIN operations o ON o.project_id = j.project_id AND o.id = j.operation_id "
-                "WHERE j.project_id = :project_id AND j.id = :id"
-            ),
-            {"project_id": project_id, "id": created.json()["resource_id"]},
-        ).mappings().one()
-    assert row["id"] == created.json()["resource_id"]
-    assert row["task_id"] == task.json()["resource_id"]
-    assert row["base_artifact_id"] == uploaded.json()["artifact_id"]
-    assert row["job_key"] == job_key
-    assert row["objective"] == objective
-    assert row["state"] == "QUEUED"
+        count = conn.execute(
+            text("SELECT COUNT(*) FROM coding_jobs WHERE project_id = :project_id AND job_key = :job_key"),
+            {"project_id": project_id, "job_key": job_key},
+        ).scalar_one()
+        queued = conn.execute(
+            text("SELECT COUNT(*) FROM command_outbox WHERE project_id = :project_id AND kind = 'coding.create'"),
+            {"project_id": project_id},
+        ).scalar_one()
+    assert int(count) == 0
+    assert int(queued) == 0
+    assert objective not in created.text

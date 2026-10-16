@@ -15,6 +15,7 @@ class Settings:
     origins: frozenset[str]
     cookie_secure: bool
     artifact_root: Path = Path("data/artifacts")
+    index_root: Path = Path("data/indexes")
     session_hours: int = 12
     idle_minutes: int = 30
     login_failure_limit: int = 5
@@ -31,6 +32,7 @@ class Settings:
             origins=frozenset(item.strip() for item in origins.split(",") if item.strip()),
             cookie_secure=os.environ.get("AETHER_COOKIE_SECURE") == "1",
             artifact_root=Path(os.environ.get("AETHER_ARTIFACT_ROOT", "data/artifacts")),
+            index_root=Path(os.environ.get("AETHER_INDEX_ROOT", "data/indexes")),
             trust_forwarded_for=os.environ.get("AETHER_TRUST_FORWARDED_FOR") == "1",
         )
 

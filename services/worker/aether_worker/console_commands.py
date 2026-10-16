@@ -587,20 +587,19 @@ def _watch_create(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
 
 def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
     current = conn.execute(
-        text("SELECT version, status, schedule_spec FROM watches WHERE project_id = :project_id AND id = :id"),
+        text("SELECT version, status, schedule_spec, source_ids FROM watches WHERE project_id = :project_id AND id = :id"),
         {"project_id": project_id, "id": payload["watch_id"]},
     ).mappings().first()
     if current is None or str(current["version"]) != str(payload["expected_version"]):
         raise ConsoleCommandError("version_conflict")
-    if payload.get("status") == "ACTIVE":
+    sources = current["source_ids"] if isinstance(current["source_ids"], list) else json.loads(current["source_ids"])
+    if payload.get("status") == "ACTIVE" and not _same_ids(payload.get("expected_source_ids"), sources):
         raise ConsoleCommandError("schedule_requires_approval")
     schedule = current["schedule_spec"] if isinstance(current["schedule_spec"], dict) else json.loads(current["schedule_spec"])
     if "interval_seconds" in payload:
         schedule["interval_seconds"] = int(payload["interval_seconds"])
         schedule["every_seconds"] = int(payload["interval_seconds"])
     status = payload.get("status") or current["status"]
-    if status == "ACTIVE":
-        raise ConsoleCommandError("schedule_requires_approval")
     updated = conn.execute(
         text(
             "UPDATE watches SET status = :status, schedule_spec = CAST(:schedule AS jsonb), version = version + 1 "
@@ -616,6 +615,12 @@ def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
     ).rowcount
     if updated != 1:
         raise ConsoleCommandError("schedule_requires_approval")
+
+
+def _same_ids(expected: object, stored: object) -> bool:
+    if not isinstance(expected, list) or not isinstance(stored, list):
+        return False
+    return {str(item) for item in expected} == {str(item) for item in stored}
 
 
 def _watch_delete(conn: Any, project_id: str, payload: dict[str, Any]) -> None:

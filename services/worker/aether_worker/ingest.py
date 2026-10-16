@@ -338,3 +338,62 @@ def store_text_version(
                 },
             )
     return {"source_id": str(source_id), "source_version_id": str(version_id), "content_sha256": content_hash}
+
+
+def attach_text_version(
+    database: Database,
+    store: ArtifactStore,
+    *,
+    owner_id: str,
+    project_id: str,
+    source_id: str,
+    raw: bytes,
+    text_value: str,
+    width: int = 2000,
+) -> dict[str, str]:
+    """Store one version of an existing source. Empty text fails before any write."""
+    chunks = chunk_text(text_value, width=width)
+    canonical = canonical_text(text_value).encode()
+    raw_ref = store.put(owner_id=owner_id, project_id=project_id, data=raw, media_type="text/plain")
+    text_ref = store.put(owner_id=owner_id, project_id=project_id, data=canonical, media_type="text/plain")
+    content_hash = hashlib.sha256(canonical).hexdigest()
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        version_id = conn.execute(
+            text(
+                "INSERT INTO source_versions (project_id, source_id, raw_artifact_id, canonical_artifact_id, content_sha256, parser_version, fetched_at) "
+                "VALUES (:project_id, :source_id, :raw_id, :text_id, :content_hash, :parser, now()) "
+                "ON CONFLICT (project_id, source_id, content_sha256, parser_version) DO UPDATE SET fetched_at = source_versions.fetched_at "
+                "RETURNING id::text"
+            ),
+            {
+                "project_id": project_id,
+                "source_id": source_id,
+                "raw_id": raw_ref["artifact_id"],
+                "text_id": text_ref["artifact_id"],
+                "content_hash": content_hash,
+                "parser": PARSER_VERSION,
+            },
+        ).scalar_one()
+        for chunk in chunks:
+            conn.execute(
+                text(
+                    "INSERT INTO chunks (project_id, source_version_id, ordinal, text_content, start_offset, end_offset, chunker_version) "
+                    "VALUES (:project_id, :version_id, :ordinal, :text_content, :start_offset, :end_offset, :chunker) "
+                    "ON CONFLICT (project_id, source_version_id, ordinal, chunker_version) DO NOTHING"
+                ),
+                {
+                    "project_id": project_id,
+                    "version_id": version_id,
+                    "ordinal": chunk["ordinal"],
+                    "text_content": chunk["text"],
+                    "start_offset": chunk["start_offset"],
+                    "end_offset": chunk["end_offset"],
+                    "chunker": CHUNKER_VERSION,
+                },
+            )
+    return {
+        "source_version_id": str(version_id),
+        "content_sha256": content_hash,
+        "raw_artifact_id": str(raw_ref["artifact_id"]),
+        "canonical_artifact_id": str(text_ref["artifact_id"]),
+    }
