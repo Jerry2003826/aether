@@ -22,6 +22,8 @@
 
 2026-10-16 修正真实 DeepSeek 编码中继。`99411ce` 在有 key 时公开编码作业停在 `held_micro_usd=8192`，作业却是 FINISHED，结果 `model_requests=0`。沙箱别名 `coder` 被原样发给 `deepseek-chat` 的上游；4xx 没有记状态，没有 usage 时预留保持 unknown，候选文件仍判完成。现在 `AETHER_LIVE_MODEL_ALIAS` 才是上游模型名，准入仍核对 `coder`。`stream=true` 时强制 `stream_options.include_usage=true`。JSON 和 SSE（含只在末块带 usage 的 DeepSeek 形状）都计量 `prompt_tokens`/`completion_tokens`。4xx/5xx 记下 `upstream_http_<status>`，不保存错误正文，作业不能 FINISHED。没有成功的模型调用（`model_requests<1` 且没有网关用量，或响应没有可用 usage）也不能 FINISHED。`edit_calls>0` 的补丁来自 Agent，事件 `patch_source` 为 `agent_edit`，否则是 `candidate_files`。没有上游时脚本化 finish 仍是 8/4，候选文件仍可决定通过。日志不含密钥和正文。本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.408s），单元 327 passed、1 warning（46.06s）。本机没有 Docker、Postgres 和 Temporal，integration 没有跑。这次提交的 CI 还没有记入。`live_ready` 仍是 pending。没有合并。
 
+2026-10-16 再变基到 `origin/main` 的 `ab1ebef`（PR #29，ADR-F43）。ADR-F42 没有改号。`playwright` 改为 `==1.64.0`，pydantic-evals、pydantic-settings、detect-secrets、docker、psutil 仍在控制面依赖里。威胁情报浏览器的 SOCKS 绑定、审计和默认关闭没有撤掉。编码准入仍不改任务状态。这次变基后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.299s），单元 360 passed、1 warning（44.23s）。本机没有 Docker、Postgres 和 Temporal，integration 没有跑。这次变基后的提交还没有 CI。
+
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 
 `b40ce32` 的 CI 已绿：`pack-and-unit`、`integration`、SonarCloud（workflow `38937123243` 与 `38937117126`）。随后按 PR #30 的 Codex P1 收紧，没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
