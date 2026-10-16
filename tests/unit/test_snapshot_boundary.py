@@ -3,6 +3,8 @@
 import hashlib
 import os
 import signal
+import stat
+import struct
 from pathlib import Path
 
 import pytest
@@ -78,6 +80,32 @@ def test_regular_project_files_are_exported_and_copied(tmp_path: Path) -> None:
     assert (staged / "suite" / "test_bound.py").is_file()
     assert not (staged / "suite" / "conftest.py").exists()
     assert (staged / "src" / "app.py").stat().st_mode & 0o777 == 0o644
+    for directory in (
+        workspace,
+        workspace / "pkg",
+        staged,
+        staged / "src",
+        staged / "src" / "pkg",
+        staged / "suite",
+    ):
+        mode = directory.stat().st_mode
+        assert stat.S_ISDIR(mode)
+        assert mode & 0o007 == 0
+        assert _named_user_perm(directory, 65534) == 0o5
+
+
+def _named_user_perm(path: Path, uid: int) -> int | None:
+    raw = os.getxattr(path, "system.posix_acl_access", follow_symlinks=False)
+    version = struct.unpack_from("<I", raw)[0]
+    assert version == 2
+    offset = 4
+    found: int | None = None
+    while offset + 8 <= len(raw):
+        tag, perm, ident = struct.unpack_from("<HHI", raw, offset)
+        if tag == 0x02 and ident == uid:
+            found = perm
+        offset += 8
+    return found
 
 
 def _raises_without_secret(action, outside: Path) -> None:

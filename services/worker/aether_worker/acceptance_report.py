@@ -39,7 +39,7 @@ def _count_attr(element: Any, name: str, *, required: bool) -> tuple[int, bool]:
 
 
 def _kind(case: Any) -> str:
-    tags = {_local(child.tag) for child in list(case)}
+    tags = {_local(child.tag) for child in case}
     if "error" in tags:
         return "error"
     if "failure" in tags:
@@ -76,23 +76,30 @@ def _direct_cases(root: Any) -> tuple[list[Any], bool]:
     suites = [element for element in root.iter() if _local(element.tag) == "testsuite"]
     if not suites:
         return [], False
-    direct = [child for suite in suites for child in list(suite) if _local(child.tag) == "testcase"]
+    direct = [child for suite in suites for child in suite if _local(child.tag) == "testcase"]
     every = [element for element in root.iter() if _local(element.tag) == "testcase"]
     return direct, len(direct) == len(every)
 
 
-def _suite_counts_match(root: Any, cases: list[Any]) -> bool:
-    suites = [element for element in root.iter() if _local(element.tag) == "testsuite"]
-    for suite in suites:
-        own = [child for child in list(suite) if _local(child.tag) == "testcase"]
-        kinds = [_kind(case) for case in own]
-        declared_tests, tests_ok = _count_attr(suite, "tests", required=True)
-        if not tests_ok or declared_tests != len(own):
-            return False
-        for name, kind in (("failures", "failure"), ("errors", "error"), ("skipped", "skipped")):
-            declared, ok = _count_attr(suite, name, required=False)
-            if not ok or declared != kinds.count(kind):
-                return False
+def _attr_equals(element: Any, name: str, actual: int, *, required: bool) -> bool:
+    declared, ok = _count_attr(element, name, required=required)
+    return ok and declared == actual
+
+
+def _suite_case_counts(suite: Any) -> bool:
+    own = [child for child in suite if _local(child.tag) == "testcase"]
+    kinds = [_kind(case) for case in own]
+    if not _attr_equals(suite, "tests", len(own), required=True):
+        return False
+    expected = (
+        ("failures", kinds.count("failure")),
+        ("errors", kinds.count("error")),
+        ("skipped", kinds.count("skipped")),
+    )
+    return all(_attr_equals(suite, name, actual, required=False) for name, actual in expected)
+
+
+def _aggregate_matches(root: Any, cases: list[Any]) -> bool:
     if _local(root.tag) != "testsuites":
         return True
     kinds = [_kind(case) for case in cases]
@@ -103,12 +110,14 @@ def _suite_counts_match(root: Any, cases: list[Any]) -> bool:
         "skipped": kinds.count("skipped"),
     }
     for name, actual in totals.items():
-        if name not in root.attrib:
-            continue
-        declared, ok = _count_attr(root, name, required=True)
-        if not ok or declared != actual:
+        if name in root.attrib and not _attr_equals(root, name, actual, required=True):
             return False
     return True
+
+
+def _suite_counts_match(root: Any, cases: list[Any]) -> bool:
+    suites = [element for element in root.iter() if _local(element.tag) == "testsuite"]
+    return all(_suite_case_counts(suite) for suite in suites) and _aggregate_matches(root, cases)
 
 
 def _required(properties: Mapping[str, str], required_cases: Sequence[str] | None) -> list[str]:

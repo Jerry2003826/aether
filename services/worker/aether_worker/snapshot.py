@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import stat
+import struct
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,14 @@ class _Node:
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _FILE_FLAGS = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
 _WRITE_FLAGS = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC
+_DIR_MODE = 0o750
+_SANDBOX_TRAVERSE_UID = 65534
+_ACL_USER_OBJ = 0x01
+_ACL_USER = 0x02
+_ACL_GROUP_OBJ = 0x04
+_ACL_MASK = 0x10
+_ACL_OTHER = 0x20
+_ACL_UNDEFINED_ID = 0xFFFFFFFF
 
 
 def _open_directory(path: str | Path, dir_fd: int | None = None) -> int:
@@ -112,7 +121,7 @@ def _descend(dir_fd: int, name: str, root_dev: int, parts: tuple[str, ...], skip
         child_stat = os.fstat(child)
         if not stat.S_ISDIR(child_stat.st_mode) or child_stat.st_dev != root_dev:
             raise _reject()
-        found.append(_Node(parts, None, 0o755))
+        found.append(_Node(parts, None, _DIR_MODE))
         _walk(child, root_dev, parts, skip, found)
     finally:
         os.close(child)
@@ -201,27 +210,53 @@ def _ensure_named_dir(parent_fd: int, name: str, *, replace: bool) -> None:
     child = _open_directory(name, parent_fd)
     try:
         _clear_directory(child)
-        os.fchmod(child, 0o755)
+        _grant_sandbox_traverse(child)
     finally:
         os.close(child)
 
 
 def _mkdir(parent_fd: int, name: str) -> None:
-    os.mkdir(name, 0o755, dir_fd=parent_fd)
+    os.mkdir(name, _DIR_MODE, dir_fd=parent_fd)
     child = _open_directory(name, parent_fd)
     try:
-        os.fchmod(child, 0o755)
+        _grant_sandbox_traverse(child)
     finally:
         os.close(child)
 
 
+def _sandbox_acl() -> bytes:
+    entries = (
+        (_ACL_USER_OBJ, 0o7, _ACL_UNDEFINED_ID),
+        (_ACL_USER, 0o5, _SANDBOX_TRAVERSE_UID),
+        (_ACL_GROUP_OBJ, 0o0, _ACL_UNDEFINED_ID),
+        (_ACL_MASK, 0o5, _ACL_UNDEFINED_ID),
+        (_ACL_OTHER, 0o0, _ACL_UNDEFINED_ID),
+    )
+    header = struct.pack("<I", 2)
+    body = b"".join(struct.pack("<HHI", tag, perm, ident) for tag, perm, ident in entries)
+    return header + body
+
+
+def _grant_sandbox_traverse(dir_fd: int) -> None:
+    """Owner and group can walk the directory. Other users cannot.
+
+    The grader child is uid 65534 and is not in the owner's group, so it receives
+    a named-user ACL instead of a world execute bit.
+    """
+    os.fchmod(dir_fd, _DIR_MODE)
+    try:
+        os.setxattr(f"/proc/self/fd/{dir_fd}", "system.posix_acl_access", _sandbox_acl(), follow_symlinks=True)
+    except OSError as exc:
+        raise _reject() from exc
+
+
 def _open_created_dir(dir_fd: int, name: str) -> int:
     try:
-        os.mkdir(name, 0o755, dir_fd=dir_fd)
+        os.mkdir(name, _DIR_MODE, dir_fd=dir_fd)
     except FileExistsError:
         pass
     child = _open_directory(name, dir_fd)
-    os.fchmod(child, 0o755)
+    _grant_sandbox_traverse(child)
     return child
 
 
