@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import psycopg
+import pytest
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -290,43 +291,39 @@ def test_promotion_without_an_evaluation_report_is_rejected(client, role_urls) -
     assert _unconsumed(worker, owner, project_id, approval), detail
 
 
-def test_promotion_with_a_forged_report_is_rejected(client, role_urls) -> None:
+FORGERIES = {
+    "borrowed": "另一份评测报告的真实哈希",
+    "relabelled": "工作者改写了报告账本里的哈希",
+    "tampered": "磁盘上的报告字节被替换",
+}
+
+
+@pytest.mark.parametrize("forgery", list(FORGERIES))
+def test_promotion_with_a_forged_report_is_rejected(client, role_urls, forgery: str) -> None:
     owner, project_id, headers, worker, skill_id, v1, v2, task_id = _canary_setup(client, role_urls)
     approval = _approved(role_urls, owner, project_id, task_id, {"action": "promote", "skill_id": skill_id, "version_id": v2})
-    borrowed, _borrowed_report = _evaluated(client, role_urls, owner, project_id, v2)
-    _other, other_report = _evaluated(client, role_urls, owner, project_id, v2)
-    relabelled, _relabelled_report = _evaluated(client, role_urls, owner, project_id, v2)
-    tampered, tampered_report = _evaluated(client, role_urls, owner, project_id, v2)
-
-    forged_hash = hashlib.sha256(b'{"forged": true}').hexdigest()
-    with worker.transaction(owner_id=owner, project_id=project_id) as conn:
-        conn.execute(
-            text("UPDATE artifacts SET sha256 = :sha WHERE project_id = :p AND id = :id"),
-            {"sha": forged_hash, "p": project_id, "id": _report(worker, owner, project_id, relabelled)["id"]},
-        )
-    on_disk = _root(client) / _report(worker, owner, project_id, tampered)["storage_key"]
-    original = on_disk.read_bytes()
-    forged = json.loads(original)
-    forged["metrics"] = {**forged["metrics"], "success_delta": 0.99}
-    on_disk.write_bytes(json.dumps(forged, sort_keys=True, separators=(",", ":")).encode())
-
-    attempts = {
-        "另一份评测报告的真实哈希": (borrowed, other_report),
-        "工作者改写了报告账本里的哈希": (relabelled, forged_hash),
-        "磁盘上的报告字节被替换": (tampered, tampered_report),
-    }
-    commands = {
-        name: _deploy(client, project_id, skill_id, headers, "0", {
-            "action": "promote", "target_version_id": v2, "evaluation_id": evaluation, "expected_previous_version_id": None,
-            "approval_id": approval, "report_sha256": claimed,
-        })
-        for name, (evaluation, claimed) in attempts.items()
-    }
+    evaluation, claimed = _evaluated(client, role_urls, owner, project_id, v2)
+    report = _report(worker, owner, project_id, evaluation)
+    if forgery == "borrowed":
+        _other, claimed = _evaluated(client, role_urls, owner, project_id, v2)
+    elif forgery == "relabelled":
+        claimed = hashlib.sha256(b'{"forged": true}').hexdigest()
+        with worker.transaction(owner_id=owner, project_id=project_id) as conn:
+            conn.execute(text("UPDATE artifacts SET sha256 = :sha WHERE project_id = :p AND id = :id"), {"sha": claimed, "p": project_id, "id": report["id"]})
+    else:
+        on_disk = _root(client) / report["storage_key"]
+        forged = json.loads(on_disk.read_bytes())
+        forged["metrics"] = {**forged["metrics"], "success_delta": 0.99}
+        on_disk.write_bytes(json.dumps(forged, sort_keys=True, separators=(",", ":")).encode())
+    promote = _deploy(client, project_id, skill_id, headers, "0", {
+        "action": "promote", "target_version_id": v2, "evaluation_id": evaluation, "expected_previous_version_id": None,
+        "approval_id": approval, "report_sha256": claimed,
+    })
     _apply(client, role_urls)
-    statuses = {name: _status(worker, owner, project_id, command) for name, command in commands.items()}
+    status = _status(worker, owner, project_id, promote)
     canary = _canary(worker, owner, project_id, skill_id)
-    detail = f"伪造报告晋升 v2：{statuses} canary={canary}"
-    assert statuses == {name: "FAILED" for name in attempts}, detail
+    detail = f"{FORGERIES[forgery]}，晋升 v2：命令={status} canary={canary}"
+    assert status == "FAILED", detail
     assert canary == [], detail
     assert _versions(worker, owner, project_id, skill_id)[v2] == "ELIGIBLE", detail
     assert _unconsumed(worker, owner, project_id, approval), detail
