@@ -20,7 +20,14 @@ Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所�
 
 `6cdfa0e` 把整批向量都跳过，并且让编码进程强制离线。push run https://github.com/Jerry2003826/aether/actions/runs/38968650893 和 PR run https://github.com/Jerry2003826/aether/actions/runs/38968658047 的 integration 都失败：`test_measured_revision_and_grouped_channels`、`test_github_and_arxiv_are_fetched_indexed_and_searchable`、`test_source_filter_keeps_chunks_outside_the_global_window`。日志是 `aether-embedding-skipped reason=weights_absent`，已测量的苹果派和铁路短语也被丢掉。
 
-现在只在采集作业里对未测量正文跳过实时编码（`allow_download=False`，且本机没有该修订快照或不能离线导入）。测量表里的向量照常写入。显式 `build_generation` 仍默认允许编码进程访问 Hub。90 秒轮询没有加长。失败时测试仍打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。这次收窄的 CI 还没有记录。`live_ready` 仍是 pending。没有合并。
+`6a44eb5` 只在采集作业里对未测量正文跳过实时编码（`allow_download=False`，且本机没有该修订快照或不能离线导入）。测量表里的向量照常写入。显式 `build_generation` 仍默认允许编码进程访问 Hub。90 秒轮询没有加长。失败时测试仍打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。
+
+`6a44eb5` 的 push 与 pull_request 都通过。两次 integration 都是 `392 passed, 4 warnings`，没有 skipped，也没有 xfail：
+
+- push https://github.com/Jerry2003826/aether/actions/runs/38971544094 ：`392 passed, 4 warnings in 708.88s (0:11:48)`
+- pull_request https://github.com/Jerry2003826/aether/actions/runs/38971552108 ：`392 passed, 4 warnings in 762.14s (0:12:42)`
+
+SonarCloud 质量门通过，`new_security_rating` 的 actualValue 是 1。Security Reviewer（https://cursor.com/agents/bc-f764c355-fe6e-434b-9dcd-7f0b3c0f2b83）对这个 head 没有新的 MEDIUM 及以上问题。Approval Agent 仍是未批准。`live_ready` 仍是 pending。没有合并。
 
 本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
 
