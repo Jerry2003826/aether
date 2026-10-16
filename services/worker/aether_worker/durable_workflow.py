@@ -17,6 +17,8 @@ from datetime import timedelta
 from temporalio import workflow
 
 with workflow.unsafe.imports_passed_through():
+    from temporalio.common import RetryPolicy
+
     from aether_worker.goal_effect import apply_task_control, execute_task, prepare_task
 
 _CONTROL = {"pause", "resume", "cancel"}
@@ -59,7 +61,7 @@ class DurableTaskWorkflow:
             controlled = await workflow.execute_activity(
                 apply_task_control,
                 _activity_input(task_id, item),
-                start_to_close_timeout=timedelta(seconds=60),
+                **_activity_kwargs(),
             )
             if kind in {"pause", "cancel"} and controlled.get("status") in {"PAUSED", "CANCELLED"}:
                 blocked = True
@@ -79,11 +81,11 @@ class DurableTaskWorkflow:
                 kind = str(item.get("kind") or "start")
                 activity_input = _activity_input(task_id, item)
                 if kind in _CONTROL:
-                    controlled = await workflow.execute_activity(apply_task_control, activity_input, start_to_close_timeout=timedelta(seconds=60))
+                    controlled = await workflow.execute_activity(apply_task_control, activity_input, **_activity_kwargs())
                     if kind == "resume" and controlled.get("resumed") is True:
                         await self._execute_task(activity_input)
                     continue
-                prepared = await workflow.execute_activity(prepare_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+                prepared = await workflow.execute_activity(prepare_task, activity_input, **_activity_kwargs())
                 if prepared.get("status") == "prepared" and pause > timedelta(0):
                     if workflow.patched("intake-pause-interruptible"):
                         try:
@@ -107,8 +109,8 @@ class DurableTaskWorkflow:
             handle = workflow.start_activity(
                 execute_task,
                 activity_input,
-                start_to_close_timeout=timedelta(seconds=60),
                 cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+                **_activity_kwargs(),
             )
             while not handle.done():
                 await workflow.wait_condition(lambda: handle.done() or self._has_control())
@@ -117,7 +119,7 @@ class DurableTaskWorkflow:
                 await self._drain_controls(activity_input["task_id"])
             await handle
             return
-        await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+        await workflow.execute_activity(execute_task, activity_input, **_activity_kwargs())
 
 
 def extract_pending_controls(pending: list[dict]) -> list[dict]:
@@ -131,6 +133,20 @@ def extract_pending_controls(pending: list[dict]) -> list[dict]:
             kept.append(item)
     pending[:] = kept
     return controls
+
+
+def _activity_kwargs() -> dict[str, object]:
+    """Bound retries on new runs. Histories recorded before this patch keep the old options."""
+    if workflow.patched("bounded-activity-retry"):
+        return {
+            "start_to_close_timeout": timedelta(seconds=60),
+            "heartbeat_timeout": timedelta(seconds=20),
+            "retry_policy": RetryPolicy(
+                maximum_attempts=3,
+                non_retryable_error_types=["ArtifactError"],
+            ),
+        }
+    return {"start_to_close_timeout": timedelta(seconds=60)}
 
 
 def _activity_input(task_id: str, item: dict) -> dict[str, str]:

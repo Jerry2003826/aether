@@ -12,6 +12,7 @@ import concurrent.futures
 import functools
 import hashlib
 import json
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -143,7 +144,10 @@ async def prepare_task(payload: dict) -> dict[str, str]:
 async def execute_task(payload: dict) -> dict[str, str]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
-    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+    try:
+        return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+    except ArtifactError:
+        return await _run_blocking(_review_artifact_error, ENDPOINTS, payload)
 
 
 @activity.defn
@@ -276,7 +280,7 @@ def apply_task_control_effect(endpoints: WorkerEndpoints, payload: dict[str, Any
     if command is None or str(command["kind"]) not in {"pause", "resume", "cancel"}:
         return {"status": "ignored", "resumed": False}
     owner_id, _goal = _owner_and_goal(worker, project_id, task_id)
-    state, _resume = _control_state(worker, owner_id, project_id, task_id)
+    state, resume = _control_state(worker, owner_id, project_id, task_id)
     kind = str(command["kind"])
     if kind == "pause":
         if state in TERMINAL_STATUSES:
@@ -295,6 +299,20 @@ def apply_task_control_effect(endpoints: WorkerEndpoints, payload: dict[str, Any
         BudgetLedger(worker).revoke_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id)
         return {"status": actual, "task_id": task_id, "resumed": False}
     if kind == "resume":
+        if resume == "cancel_requested" or state == "CANCELLED":
+            if state in TERMINAL_STATUSES:
+                return {"status": state, "task_id": task_id, "resumed": False}
+            actual = _set_status(
+                worker,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                status="CANCELLED",
+                allowed=NON_TERMINAL_STATUSES,
+                resume_state="cancel_requested",
+            )
+            BudgetLedger(worker).revoke_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id)
+            return {"status": actual, "task_id": task_id, "resumed": False}
         if state != "PAUSED":
             return {"status": state, "task_id": task_id, "resumed": False}
         actual = _set_status(
@@ -1390,7 +1408,17 @@ def _update_status(
         ),
         params,
     ).scalar()
-    return None if updated is None else str(updated)
+    if updated is None:
+        return None
+    _insert_task_event(
+        conn,
+        project_id=project_id,
+        task_id=task_id,
+        event_key=f"status-{task_id}-{updated}-{uuid.uuid4()}",
+        event_type="task.status",
+        payload={"status": str(updated)},
+    )
+    return str(updated)
 
 
 def _event(database: Database, *, owner_id: str, project_id: str, task_id: str, event_key: str, event_type: str, payload: dict[str, Any]) -> None:
@@ -1401,21 +1429,55 @@ def _event(database: Database, *, owner_id: str, project_id: str, task_id: str, 
         ).first()
         if existing is not None:
             return
+        _insert_task_event(conn, project_id=project_id, task_id=task_id, event_key=event_key, event_type=event_type, payload=payload)
+
+
+def _insert_task_event(conn: Any, *, project_id: str, task_id: str, event_key: str, event_type: str, payload: dict[str, Any]) -> None:
+    """Allocate the next sequence while the task row is locked, and retry a unique collision."""
+    conn.execute(
+        text("SELECT id FROM tasks WHERE project_id = :project_id AND id = :task_id FOR UPDATE"),
+        {"project_id": project_id, "task_id": task_id},
+    )
+    for _attempt in range(5):
         sequence = conn.execute(
             text("SELECT coalesce(max(sequence), 0) + 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id"),
             {"project_id": project_id, "task_id": task_id},
         ).scalar_one()
-        conn.execute(
-            text(
-                "INSERT INTO task_events (project_id, task_id, sequence, event_key, event_type, payload) "
-                "VALUES (:project_id, :task_id, :sequence, :event_key, :event_type, CAST(:payload AS jsonb))"
-            ),
-            {
-                "project_id": project_id,
-                "task_id": task_id,
-                "sequence": sequence,
-                "event_key": event_key,
-                "event_type": event_type,
-                "payload": json.dumps(payload),
-            },
-        )
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    text(
+                        "INSERT INTO task_events (project_id, task_id, sequence, event_key, event_type, payload) "
+                        "VALUES (:project_id, :task_id, :sequence, :event_key, :event_type, CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "sequence": sequence,
+                        "event_key": event_key,
+                        "event_type": event_type,
+                        "payload": json.dumps(payload),
+                    },
+                )
+            return
+        except IntegrityError:
+            continue
+    raise RuntimeError("event sequence conflict")
+
+
+def _review_artifact_error(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> dict[str, str]:
+    """A deterministic artifact rejection ends the task. It is not a reason to retry the activity."""
+    command = _execution_context(endpoints, payload)
+    task_id = str(payload.get("task_id") or "")
+    if command is None:
+        return {"status": "ignored", "task_id": task_id}
+    owner_id, project_id, task_id, _goal = command
+    worker = Database(endpoints.worker_url)
+    return _needs_review(
+        worker,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        reason="产物无法写入",
+        code="artifact_rejected",
+    )

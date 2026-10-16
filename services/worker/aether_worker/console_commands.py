@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import bindparam, text
+from sqlalchemy.exc import OperationalError
 
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
@@ -56,7 +57,10 @@ def apply_console_commands(database: Database, *, owner_id: str, project_id: str
                 _apply(conn, owner_id=owner_id, project_id=project_id, outbox_id=str(row["id"]), kind=str(row["kind"]), payload=payload)
                 nested.commit()
                 status = "DELIVERED"
-            except ConsoleCommandError:
+            except OperationalError:
+                nested.rollback()
+                raise
+            except Exception:
                 nested.rollback()
                 status = "FAILED"
             conn.execute(
@@ -93,7 +97,10 @@ def apply_verifier_commands(database: Database, *, owner_id: str, project_id: st
                 _queue_evaluation(conn, project_id=project_id, kind=str(row["kind"]), payload=payload, identity=identity)
                 nested.commit()
                 status = "DELIVERED"
-            except ConsoleCommandError:
+            except OperationalError:
+                nested.rollback()
+                raise
+            except Exception:
                 nested.rollback()
                 status = "FAILED"
             conn.execute(

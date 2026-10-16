@@ -1,5 +1,20 @@
 # 交接
 
+系统审计第一轮里，本批在 `cursor/sysfix-a-p0-p1-7618` 修了 P0-01、P0-02、P1-01、P1-02、P1-03，以及 P2-02、P2-03、P2-06 的终态数据库约束。基线是 main `d6ed382`。细节在 `reports/audits/system_round1/REPAIR_RESULT.md`。P1-04 至 P1-09 和其余 P2 不在本批。`live_ready` 与 `product_engineering` 没有改成通过。`comparative_evidence` 仍是 `not_run`。
+
+本机没有 live model key。不把 F26 或 `live_task_check` 标成失败。合入后仍要监督者用真实 key 重跑：
+
+```sh
+uv run --locked --no-build python scripts/run_live_task_check.py --out reports/live_task_check.json
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+372 passed, 1 warning in 278.77s
+EXIT:0
+```
+
 PR #10 与 PR #11 已由用户合并进 main，合并提交 `967b55f691af0559308a1c7d33d100d47ffde388`。main 上 pack-and-unit 与 integration 均为 success。F00–F27 仍是 done。`live_ready` 与 `comparative_evidence` 没有改成假绿；`comparative_evidence` 仍是 `not_run`。
 
 PR #11 合并后 Codex 仍有未解决的 P1，修在 `cursor/audit-round5-codex-p1-7618`。多对象答案不能靠空主语通过；目标的每一部分要有自己的对象，不能只共享「限额」。pause/cancel 即使排在非控制命令后面也会被抽出来。`apply_task_control` 走独立控制线程池。派发许可在 `permitted` 阶段可以被已提交的停止撤销，撤销后不再调用供应商。尚未派发就到期的预留会释放。输出上限按剩余金额缩小。验收版本是 `goal-artifact-8`。细节在 `reports/audits/gpt_round5/REPAIR_RESULT.md`。

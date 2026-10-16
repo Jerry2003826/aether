@@ -117,6 +117,14 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         match = request.headers.get("if-match")
         draft = _draft_contract(body, project_id, task_id)
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+            status = conn.execute(
+                text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :id"),
+                {"project_id": project_id, "id": task_id},
+            ).scalar()
+            if status is None:
+                raise ApiError(404, "not_found", "任务不存在")
+            if status in {"SUCCEEDED", "FAILED", "CANCELLED"}:
+                raise ApiError(409, "contract_locked", "终态任务不能改合同")
             updated = conn.execute(
                 text(
                     "UPDATE tasks SET draft_contract = CAST(:draft AS jsonb), version = version + 1, projection_updated_at = now() "
@@ -168,7 +176,8 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
                 conn.execute(
                     text(
                         "UPDATE tasks SET resume_state = NULL, version = version + 1 "
-                        "WHERE id = :id AND (status = 'PAUSED' OR resume_state = 'pause_requested')"
+                        "WHERE id = :id AND resume_state IS DISTINCT FROM 'cancel_requested' "
+                        "AND (status = 'PAUSED' OR resume_state = 'pause_requested')"
                     ),
                     {"id": task_id},
                 )
@@ -358,10 +367,25 @@ def _store_idempotency(conn, *, owner: str, project_id: str, route: str, key: st
 
 def _append_event(conn, *, project_id: str, task_id: str, event_type: str, payload: dict[str, Any]) -> None:
     event_id = f"evt-{uuid.uuid4()}"
-    sequence = conn.execute(
-        text("SELECT coalesce(max(sequence), 0) + 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id"),
+    conn.execute(
+        text("SELECT id FROM tasks WHERE project_id = :project_id AND id = :task_id FOR UPDATE"),
         {"project_id": project_id, "task_id": task_id},
-    ).scalar_one()
+    )
+    for _attempt in range(5):
+        sequence = conn.execute(
+            text("SELECT coalesce(max(sequence), 0) + 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar_one()
+        try:
+            with conn.begin_nested():
+                _insert_event(conn, project_id=project_id, task_id=task_id, sequence=sequence, event_key=event_id, event_type=event_type, payload=payload)
+            return
+        except IntegrityError:
+            continue
+    raise ApiError(409, "event_conflict", "事件序号冲突")
+
+
+def _insert_event(conn, *, project_id: str, task_id: str, sequence: int, event_key: str, event_type: str, payload: dict[str, Any]) -> None:
     conn.execute(
         text(
             "INSERT INTO task_events (project_id, task_id, sequence, event_key, event_type, payload) "
@@ -371,7 +395,7 @@ def _append_event(conn, *, project_id: str, task_id: str, event_type: str, paylo
             "project_id": project_id,
             "task_id": task_id,
             "sequence": sequence,
-            "event_key": event_id,
+            "event_key": event_key,
             "event_type": event_type,
             "payload": json.dumps(payload),
         },
@@ -385,8 +409,11 @@ def _append_event(conn, *, project_id: str, task_id: str, event_type: str, paylo
 def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
     task = conn.execute(
         text(
-            "SELECT id::text AS id, status, version, projection_updated_at, created_at, draft_contract "
-            "FROM tasks WHERE project_id = :project_id AND id = :id"
+            "SELECT t.id::text AS id, t.status, t.version, t.projection_updated_at, t.created_at, t.draft_contract, "
+            "g.contract_sha256 AS authoritative_sha256 "
+            "FROM tasks AS t "
+            "LEFT JOIN goal_contracts AS g ON g.project_id = t.project_id AND g.task_id = t.id AND g.id = t.current_contract_id "
+            "WHERE t.project_id = :project_id AND t.id = :id"
         ),
         {"project_id": project_id, "id": task_id},
     ).mappings().first()
@@ -431,13 +458,14 @@ def _snapshot(conn, project_id: str, task_id: str) -> dict[str, Any] | None:
         {"project_id": project_id, "task_id": task_id},
     ).mappings().all()
     draft = task["draft_contract"] if isinstance(task["draft_contract"], dict) else {}
+    authoritative = task["authoritative_sha256"]
     return {
         "id": task["id"],
         "project_id": project_id,
         "status": task["status"],
         "version": int(task["version"]),
         "contract_version": draft.get("contract_version"),
-        "contract_sha256": draft.get("contract_sha256"),
+        "contract_sha256": authoritative or draft.get("contract_sha256"),
         "projection_updated_at": task["projection_updated_at"],
         "created_at": task["created_at"],
         "budget": budget,

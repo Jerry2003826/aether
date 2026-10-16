@@ -1,0 +1,30 @@
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/integration/test_codegraph.py::test_fixed_release_telemetry_and_blocked_network
+FAILED tests/integration/test_codegraph.py::test_indexes_snapshot_copy_and_hash_expires
+FAILED tests/integration/test_codegraph.py::test_cross_project_rejected_and_actor_path_discarded
+FAILED tests/integration/test_codegraph.py::test_cancel_clears_snapshot_and_fallback_stays_inside
+FAILED tests/integration/test_codegraph.py::test_cold_index_and_graph_on_off_do_not_claim_vendor_savings
+FAILED tests/integration/test_codegraph.py::test_trusted_suite_unchanged_and_affected_is_advisory
+FAILED tests/integration/test_codegraph.py::test_callers_and_callees_match_the_fixture_source
+FAILED tests/integration/test_console_browser.py::test_console_shows_real_states_and_does_not_execute_html
+FAILED tests/integration/test_hermes_compare_protocol.py::test_pinned_hermes_identity_and_local_protocol
+FAILED tests/integration/test_hermes_probe.py::test_pinned_hermes_cli_prints_its_real_version
+FAILED tests/integration/test_ingest.py::test_playwright_profile_renders_javascript
+FAILED tests/integration/test_runner.py::test_container_is_single_isolated_and_reattaches
+FAILED tests/integration/test_security_regression.py::test_probes_block_release_even_when_the_classifier_score_is_high
+FAILED tests/integration/test_security_regression.py::test_fault_matrix_checks_effects
+FAILED tests/integration/test_skill_sandbox.py::test_tampered_sibling_is_rejected
+FAILED tests/integration/test_skill_sandbox.py::test_host_secrets_are_not_visible
+FAILED tests/integration/test_verification.py::test_changed_candidate_invalidates_the_previous_pass
+FAILED tests/integration/test_verification.py::test_candidate_vacuous_tests_fail
+FAILED tests/integration/test_verification.py::test_candidate_conftest_cannot_rewrite_the_report
+FAILED tests/integration/test_verification.py::test_candidate_cannot_forge_the_isolation_line
+FAILED tests/integration/test_verification.py::test_candidate_atexit_cannot_forge_a_pass
+FAILED tests/integration/test_verification.py::test_grader_cannot_read_host_files_or_credentials
+FAILED tests/integration/test_verification.py::test_empty_or_skipped_suite_does_not_pass
+FAILED tests/integration/test_verification.py::test_worker_death_runner_death_and_cancel_do_not_pass
+24 failed, 215 passed, 1 warning in 160.45s (0:02:40)
+INTEG_EXIT=1
