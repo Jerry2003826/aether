@@ -632,6 +632,8 @@ def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any], owner_id: 
     if current_status == "ACTIVE" and status != "PAUSED":
         raise ConsoleCommandError("schedule_requires_approval")
     activating = status == "ACTIVE" and current_status != "ACTIVE"
+    if current_status == "ACTIVE" or activating:
+        schedule.pop("schedule_removed", None)
     if activating and not _same_ids(payload.get("expected_source_ids"), sources):
         raise ConsoleCommandError("schedule_requires_approval")
     params = {

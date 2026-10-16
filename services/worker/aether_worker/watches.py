@@ -138,8 +138,15 @@ async def ensure_watch_schedules(
     for project_id, owner_id in projects.items():
         for watch in _active_watches(database, owner_id=owner_id, project_id=project_id):
             await _ensure_watch_schedule(client, watch, project_id=project_id, owner_id=owner_id, task_queue=task_queue)
-        for schedule_id in _stopped_schedule_ids(database, owner_id=owner_id, project_id=project_id):
-            await _delete_schedule(client, schedule_id)
+        for watch in _stopped_watches(database, owner_id=owner_id, project_id=project_id):
+            if await _delete_schedule(client, str(watch["schedule_id"])):
+                _mark_schedule_removed(
+                    database,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    watch_id=str(watch["id"]),
+                    version=int(watch["version"]),
+                )
 
 
 def _active_watches(database: Database, *, owner_id: str, project_id: str) -> list[dict[str, Any]]:
@@ -166,26 +173,54 @@ def _active_watches(database: Database, *, owner_id: str, project_id: str) -> li
     return loaded
 
 
-def _stopped_schedule_ids(database: Database, *, owner_id: str, project_id: str) -> list[str]:
+def _stopped_watches(database: Database, *, owner_id: str, project_id: str) -> list[dict[str, Any]]:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         rows = conn.execute(
             text(
-                "SELECT schedule_id FROM watches "
+                "SELECT id::text AS id, schedule_id, schedule_spec, version FROM watches "
                 "WHERE project_id = :project_id AND status IN ('PAUSED', 'DELETED') ORDER BY id"
             ),
             {"project_id": project_id},
-        ).scalars().all()
-    return [str(item) for item in rows]
+        ).mappings().all()
+    pending: list[dict[str, Any]] = []
+    for row in rows:
+        spec = row["schedule_spec"]
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        if isinstance(spec, dict) and spec.get("schedule_removed") is True:
+            continue
+        pending.append({"id": str(row["id"]), "schedule_id": str(row["schedule_id"]), "version": int(row["version"])})
+    return pending
 
 
-async def _delete_schedule(client: Client, schedule_id: str) -> None:
+def _mark_schedule_removed(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    watch_id: str,
+    version: int,
+) -> None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE watches SET schedule_spec = jsonb_set(schedule_spec, '{schedule_removed}', 'true'::jsonb, true) "
+                "WHERE project_id = :project_id AND id = :id AND version = :version AND status IN ('PAUSED', 'DELETED')"
+            ),
+            {"project_id": project_id, "id": watch_id, "version": version},
+        )
+
+
+async def _delete_schedule(client: Client, schedule_id: str) -> bool:
+    """Return true only after Temporal no longer has this schedule."""
     if await _schedule_missing(client, schedule_id):
-        return
+        return True
     try:
         await client.get_schedule_handle(schedule_id).delete()
     except RPCError as exc:
         if exc.status != RPCStatusCode.NOT_FOUND:
             raise
+    return True
 
 
 def _every_seconds(spec: Any) -> int | None:
@@ -248,7 +283,11 @@ async def stop_watch(database: Database, client: Client, *, owner_id: str, proje
     await handle.delete()
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
-            text("UPDATE watches SET status = 'PAUSED', version = version + 1 WHERE project_id = :project_id AND id = :id"),
+            text(
+                "UPDATE watches SET status = 'PAUSED', version = version + 1, "
+                "schedule_spec = jsonb_set(schedule_spec, '{schedule_removed}', 'true'::jsonb, true) "
+                "WHERE project_id = :project_id AND id = :id"
+            ),
             {"project_id": project_id, "id": watch_id},
         )
     return {"id": watch_id, "status": "PAUSED"}

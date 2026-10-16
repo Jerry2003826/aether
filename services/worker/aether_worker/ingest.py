@@ -418,11 +418,12 @@ def attach_text_version(
     raw: bytes,
     text_value: str,
     width: int = 2000,
+    raw_media_type: str = TEXT_MEDIA,
 ) -> dict[str, str]:
     """Store one version of an existing source. Empty text fails before any write."""
     chunks = chunk_text(text_value, width=width)
     canonical = canonical_text(text_value).encode()
-    raw_ref = store.put(owner_id=owner_id, project_id=project_id, data=raw, media_type=TEXT_MEDIA)
+    raw_ref = store.put(owner_id=owner_id, project_id=project_id, data=raw, media_type=raw_media_type)
     text_ref = store.put(owner_id=owner_id, project_id=project_id, data=canonical, media_type=TEXT_MEDIA)
     content_hash = hashlib.sha256(canonical).hexdigest()
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:

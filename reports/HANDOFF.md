@@ -65,13 +65,33 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 - 词法检索：`test_lexical_search_ignores_a_missing_embedding_process`。
 - 来源过滤：`test_source_filter_keeps_chunks_outside_the_global_window`。
 
-变基前的本机数字不再沿用。变基后的命令和结果在重跑后写入本节。
+Codex 的三条 P2 已接上，断言没有放宽，`live_ready` 没有改。下面的本机数字来自变基到 `cfbc65d` 之前的头，不覆盖这次变基。
 
-变基前的头 `517cd74` 上，`pack-and-unit`、`integration` 与 SonarCloud 质量门曾通过。Cursor Security Reviewer 没有安全发现。Approval Agent 判定高风险、需要人工评审，没有代码级 P0/P1。PR #23 的八条线程已回复并附上该提交。那一轮 CI 不覆盖这次变基。
+- 文本 PDF 按媒体类型抽出 `Tj`/`TJ`/`'` 的正文再索引，原始字节仍按 `application/pdf` 保存。ZIP 等其他媒体是 `parse_rejected`。证明：`test_text_pdf_is_indexed_as_extracted_text`、`test_text_pdf_extracts_shown_text_and_ignores_the_container`。
+- 已暂停或已删除的跟踪在确认 schedule 不存在后，于当时的 `version` 写入 `schedule_removed`。worker 循环跳过这些行，不再每 250ms `describe`。从 ACTIVE 暂停或再次激活时清掉标记。证明：`test_stopped_schedule_is_reconciled_once`。
+- 非空 `source_ids` 只给允许的 chunk 位置累加 BM25 分，不再向检索器请求整库的 k。证明：`test_filtered_lexical_does_not_rank_the_whole_corpus`。`test_source_filter_keeps_chunks_outside_the_global_window` 仍要求被全局窗口截掉的片段能在过滤后出现。
 
-Codex 在变基前另留了三条 P2，未改代码：过滤检索时 BM25 先对全量清单取 k；`local_document` 未按媒体类型解析 PDF；暂停或删除后的跟踪每次轮询仍向 Temporal 查询已删除的 schedule。按本次范围只修 P0/P1。
+本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 29.1.3，Hermes v0.22.1）：
 
-下一步：PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。变基后重跑本机测试，再等新的 `pack-and-unit`、`integration` 与 SonarCloud。三条 P2 留给后续。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit
+# 238 passed in 103.71s
+PATH="$HOME/.local/bin:/workspace/.hermes/.venv/bin:$PATH" \
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+  uv run --locked --no-build pytest -q tests/integration
+# 367 passed, 1 warning in 378.46s
+# 没有 skip，没有 xfail
+```
+
+`reports/doctor.json` 的本机探测差异没有提交。
+
+变基前的头 `517cd74` 上，`pack-and-unit`、`integration` 与 SonarCloud 质量门曾通过。Cursor Security Reviewer 没有安全发现。Approval Agent 判定高风险、需要人工评审，没有代码级 P0/P1。PR #23 的八条线程已回复并附上该提交。那一轮 CI 不覆盖 `cfbc65d` 上的这次变基。
+
+下一步：PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。等本 head 的 `pack-and-unit`、`integration` 与 SonarCloud。通过之前不把这三项记成通过。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
 
 ## P2-09 复核出口、所有者批准、活动时间与工作流投递（分支 `cursor/r7-workflow-review-budget-f3e3`）
 

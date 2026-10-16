@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import bm25s
+import numpy as np
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -521,8 +522,48 @@ def _dense_ids(conn: Any, project_id: str, chunk_ids: list[str], query_vector: l
 
 
 def _bounded_lexical(index_dir: Path, manifest_ids: list[str], query: str, allowed: dict[str, dict[str, Any]], *, wide: bool) -> list[str]:
-    ranked = _lexical_ids(index_dir, manifest_ids, query, limit=len(manifest_ids) if wide else None)
+    if wide:
+        return _filtered_lexical(index_dir, manifest_ids, query, allowed)
+    ranked = _lexical_ids(index_dir, manifest_ids, query, limit=None)
     return [chunk_id for chunk_id in ranked if chunk_id in allowed][:TOP_K]
+
+
+def _filtered_lexical(index_dir: Path, manifest_ids: list[str], query: str, allowed: dict[str, dict[str, Any]]) -> list[str]:
+    """Score only chunk positions the caller already allowed. Do not rank the rest of the generation."""
+    positions = [index for index, chunk_id in enumerate(manifest_ids) if chunk_id in allowed]
+    if not positions:
+        return []
+    retriever = bm25s.BM25.load(str(index_dir), load_corpus=False, mmap=False)
+    token_ids = [int(token_id) for token_id in retriever.get_tokens_ids([token for token in tokenize(query)])]
+    if not token_ids:
+        return []
+    scores = _scores_at_positions(retriever, token_ids, positions)
+    order = sorted(range(len(positions)), key=lambda slot: (-scores[slot], positions[slot]))
+    return [manifest_ids[positions[slot]] for slot in order[:TOP_K]]
+
+
+def _scores_at_positions(retriever: bm25s.BM25, token_ids: list[int], positions: list[int]) -> list[float]:
+    data = retriever.scores["data"]
+    indices = retriever.scores["indices"]
+    indptr = retriever.scores["indptr"]
+    sorted_pos = np.sort(np.asarray(positions, dtype=np.int64))
+    slot_of = {int(doc): slot for slot, doc in enumerate(positions)}
+    acc = np.zeros(len(positions), dtype=np.float64)
+    for token_id in token_ids:
+        start = int(indptr[token_id])
+        end = int(indptr[token_id + 1])
+        if start == end:
+            continue
+        docs = np.asarray(indices[start:end], dtype=np.int64)
+        values = np.asarray(data[start:end], dtype=np.float64)
+        found = np.searchsorted(sorted_pos, docs)
+        clipped = np.minimum(found, len(sorted_pos) - 1)
+        matched = (found < len(sorted_pos)) & (sorted_pos[clipped] == docs)
+        if not matched.any():
+            continue
+        for doc, value in zip(docs[matched].tolist(), values[matched].tolist(), strict=True):
+            acc[slot_of[int(doc)]] += float(value)
+    return [float(item) for item in acc]
 
 
 def _order_rerank(query: str, fused: list[str], allowed: dict[str, dict[str, Any]]) -> tuple[list[str], bool]:

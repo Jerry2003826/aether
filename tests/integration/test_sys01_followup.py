@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import sys
 import threading
 import time
 import uuid
+import zipfile
+import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -296,6 +299,57 @@ def test_local_document_indexes_the_uploaded_artifact(role_urls, clean_db, tmp_p
         assert foreign["status"] == "FAILED", foreign
         assert foreign["error_code"] == "not_found", foreign
         leaked = running.search("artifact-leak", "苹果派")
+        assert leaked.status_code == 200, leaked.text
+        assert all(SECRET not in hit["text"] for hit in leaked.json()["hits"])
+
+
+def _text_pdf(shown: str) -> bytes:
+    content = zlib.compress(f"BT ({shown}) Tj ET".encode())
+    stream = f"<< /Filter /FlateDecode /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
+    return b"%PDF-1.4\n1 0 obj\n" + stream + b"\nendobj\n%%EOF"
+
+
+def test_text_pdf_is_indexed_as_extracted_text(role_urls, clean_db, tmp_path: Path) -> None:
+    with _services(role_urls, tmp_path, "pdf") as running:
+        running.bootstrap("pdf-project", "文本")
+        uploaded = running.http.post(
+            f"/v1/projects/{running.project_id}/artifacts",
+            headers=_headers(running.csrf, "pdf-upload"),
+            files={"file": ("note.pdf", _text_pdf("苹果派烘烤说明"), "application/pdf")},
+        )
+        assert uploaded.status_code == 201, uploaded.text
+        assert uploaded.json()["media_type"] == "application/pdf"
+        source_id = running.create_source("pdf-source", "local_document", str(uploaded.json()["artifact_id"]), ["example.test"])
+        job = running.ingest("pdf-ingest", source_id)
+        assert job["status"] == "SUCCEEDED", job
+        found = running.http.post(
+            f"/v1/projects/{running.project_id}/search",
+            headers=_headers(running.csrf, "pdf-search"),
+            json={"project_id": running.project_id, "query": "苹果派", "mode": "lexical"},
+        )
+        assert found.status_code == 200, found.text
+        text = found.json()["hits"][0]["text"]
+        assert "苹果派烘烤说明" in text
+        assert "%PDF" not in text
+        assert "endstream" not in text
+        archive = io.BytesIO()
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("secret.txt", SECRET)
+        zipped = running.http.post(
+            f"/v1/projects/{running.project_id}/artifacts",
+            headers=_headers(running.csrf, "zip-upload"),
+            files={"file": ("notes.zip", archive.getvalue(), "application/zip")},
+        )
+        assert zipped.status_code == 201, zipped.text
+        zip_source = running.create_source("zip-source", "local_document", str(zipped.json()["artifact_id"]), [])
+        rejected = running.ingest("zip-ingest", zip_source)
+        assert rejected["status"] == "FAILED", rejected
+        assert rejected["error_code"] == "parse_rejected", rejected
+        leaked = running.http.post(
+            f"/v1/projects/{running.project_id}/search",
+            headers=_headers(running.csrf, "zip-search"),
+            json={"project_id": running.project_id, "query": "机密句子", "mode": "lexical"},
+        )
         assert leaked.status_code == 200, leaked.text
         assert all(SECRET not in hit["text"] for hit in leaked.json()["hits"])
 
