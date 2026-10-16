@@ -59,7 +59,7 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
         kinds: set[str] = bucket["kinds"]
         try:
             if kinds & set(CONSOLE_KINDS):
-                apply_console_commands(worker, owner_id=owner_id, project_id=project_id)
+                apply_console_commands(worker, owner_id=owner_id, project_id=project_id, store=store)
             if kinds & set(VERIFIER_KINDS):
                 apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
             if any(kind.startswith("memory.") for kind in kinds):

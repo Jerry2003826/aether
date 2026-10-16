@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+import uuid
 from typing import Any
 
 from sqlalchemy import text
 
+from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 
 THRESHOLDS = {"min_families": 30, "min_success_delta": 0.05, "min_ci_lower": 0.0, "max_cost_ratio": 1.10}
+REPORT_CLASSIFICATION = "skill_evaluation_report"
 
 
 class SkillEvalError(Exception):
@@ -43,34 +46,89 @@ def record_evaluation(
     split: str,
     metrics: dict[str, Any],
     synthetic: bool,
+    report_store: ArtifactStore | None = None,
 ) -> str:
+    """Record a verifier evaluation. With a report store, the report is written in the same transaction.
+
+    Only the verifier can insert evaluation_runs and nobody can update them, so the report hash kept in
+    ``configuration`` is the reference a promotion checks the artifact ledger and the bytes against.
+    """
     if split == "holdout" and purpose != "release":
         raise SkillEvalError("dataset_isolated")
     verdict = judge(metrics, synthetic=synthetic)
+    evaluation_id = str(uuid.uuid4())
+    recorded = {**metrics, "synthetic": synthetic, "label": verdict["label"]}
+    configuration: dict[str, Any] = {"split": split, "label": verdict["label"]}
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         identity = str(conn.execute(text("SELECT current_user")).scalar_one())
         if identity != "aether_verifier":
             raise SkillEvalError("grader_required")
-        row = conn.execute(
+        report_artifact_id = None
+        if report_store is not None:
+            report = evaluation_report(
+                evaluation_id=evaluation_id,
+                candidate_version_id=candidate_version_id,
+                dataset_sha256=dataset_sha256,
+                purpose=purpose,
+                split=split,
+                status=verdict["decision"],
+                metrics=recorded,
+                evaluator_identity=identity,
+            )
+            stored = report_store.put(
+                owner_id=owner_id, project_id=project_id, data=report, media_type="application/json",
+                classification=REPORT_CLASSIFICATION, conn=conn,
+            )
+            report_artifact_id = str(stored["artifact_id"])
+            configuration["report_sha256"] = str(stored["sha256"])
+        conn.execute(
             text(
-                "INSERT INTO evaluation_runs (project_id, purpose, dataset_manifest_sha256, model_manifest, "
-                "candidate_version_id, configuration, status, metrics, evaluator_identity) "
-                "VALUES (:project_id, :purpose, :dataset, CAST(:model AS jsonb), :candidate, CAST(:configuration AS jsonb), "
-                ":status, CAST(:metrics AS jsonb), :identity) RETURNING id::text"
+                "INSERT INTO evaluation_runs (id, project_id, purpose, dataset_manifest_sha256, model_manifest, "
+                "candidate_version_id, configuration, status, metrics, report_artifact_id, evaluator_identity) "
+                "VALUES (:id, :project_id, :purpose, :dataset, CAST(:model AS jsonb), :candidate, CAST(:configuration AS jsonb), "
+                ":status, CAST(:metrics AS jsonb), :report, :identity)"
             ),
             {
+                "id": evaluation_id,
                 "project_id": project_id,
                 "purpose": purpose,
                 "dataset": dataset_sha256,
                 "model": json.dumps({"scripted": True}),
                 "candidate": candidate_version_id,
-                "configuration": json.dumps({"split": split, "label": verdict["label"]}),
+                "configuration": json.dumps(configuration),
                 "status": verdict["decision"],
-                "metrics": json.dumps({**metrics, "synthetic": synthetic, "label": verdict["label"]}),
+                "metrics": json.dumps(recorded),
+                "report": report_artifact_id,
                 "identity": identity,
             },
-        ).scalar_one()
-    return str(row)
+        )
+    return evaluation_id
+
+
+def evaluation_report(
+    *,
+    evaluation_id: str,
+    candidate_version_id: str,
+    dataset_sha256: str,
+    purpose: str,
+    split: str,
+    status: str,
+    metrics: dict[str, Any],
+    evaluator_identity: str,
+) -> bytes:
+    report = {
+        "kind": REPORT_CLASSIFICATION,
+        "evaluation_id": evaluation_id,
+        "candidate_version_id": candidate_version_id,
+        "dataset_manifest_sha256": dataset_sha256,
+        "purpose": purpose,
+        "split": split,
+        "status": status,
+        "metrics": metrics,
+        "thresholds": THRESHOLDS,
+        "evaluator_identity": evaluator_identity,
+    }
+    return json.dumps(report, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
 def apply_verdict(database: Database, *, owner_id: str, project_id: str, version_id: str, verdict: dict[str, Any]) -> str:
