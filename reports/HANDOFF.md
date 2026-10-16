@@ -19,7 +19,18 @@ PR #16 已合入 main `b735f28`。所有者批准了 P2-04 的三项收紧，并
 
 「借用另一份报告的真实哈希」在旧代码上就被拒（旧代码只在有报告时比对哈希），作为反例保留。验收用例原有两条断言（回滚命令 DELIVERED、canary 指向 v1）不变，另加两个版本状态的断言；其余 P2-04 用例在需要晋升成功的位置改用真实报告哈希，这样每条用例失败的原因只剩它要测的那一项。
 
-全量回归：待填。
+全量回归（head `a8013b4`，本机 Postgres 17 + Temporal dev server，环境变量同下一节）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit                                   # 129 passed
+PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 323 passed
+uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
+(cd apps/web && pnpm typecheck)                                                    # exit 0
+```
+
+integration 比 main 的 318 多 5 条：新增「从未部署的回滚」「无报告晋升」两条，以及「伪造报告」按三种伪造参数化的 3 条。下一步：等 CI 绿后把 PR 标为 ready，不合并。
 
 ## 系统审计第一轮 · C 组修复（分支 `cursor/sysfix-c-f4de`）
 
