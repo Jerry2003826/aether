@@ -35,11 +35,12 @@ FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
 HISTORIES = FIXTURES / "workflow_histories"
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾\n"
 # The workflow module shipped by each later merge to main, with the patch marker its history must carry:
-# e1cc9e5 (PR #7) = 75ec05b, 967b55f (PR #11) = 0359da5, d6ed382 (PR #12) = 48281f3.
+# e1cc9e5 (PR #7) = 75ec05b, 967b55f (PR #11) = 0359da5, d6ed382 (PR #12) = 48281f3, 80f1d39 (PR #14).
 LATER_RELEASES = {
     "75ec05b": {"intake-pause-interruptible"},
     "0359da5": {"execute-interruptible"},
     "48281f3": {"execute-interruptible"},
+    "80f1d39": {"bounded-activity-retry", "execute-interruptible"},
 }
 
 
@@ -204,6 +205,22 @@ def test_current_workflow_replays_recorded_histories_from_later_releases(revisio
     except Exception as exc:
         error = f"{type(exc).__name__}: {str(exc)[:240]}"
     assert error is None, f"{revision} 的历史（start / pause / resume / cancel）用当前工作流回放失败：{error}"
+
+
+def test_current_workflow_replays_a_pause_queued_with_the_start_under_bounded_retry() -> None:
+    """80f1d39 drained a pause queued with the start right after prepare; only bounded-activity-retry marks that release."""
+    recorded = json.loads((HISTORIES / "durable_workflow_80f1d39_pause_at_intake.json").read_text(encoding="utf-8"))
+    history = WorkflowHistory.from_json("recorded-80f1d39-pause-at-intake", recorded)
+    assert _scheduled(history, "prepare_task") == 1
+    assert _scheduled(history, "apply_task_control") == 1
+    assert _scheduled(history, "execute_task") == 0
+    assert _patches(history) == {"bounded-activity-retry"}
+    error = None
+    try:
+        asyncio.run(Replayer(workflows=[DurableTaskWorkflow]).replay_workflow(history))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {str(exc)[:240]}"
+    assert error is None, f"80f1d39 的历史（start 与 pause 同时排队）用当前工作流回放失败：{error}"
 
 
 def test_a_workflow_started_by_the_first_release_applies_new_controls_after_the_upgrade(client, role_urls, tmp_path) -> None:
