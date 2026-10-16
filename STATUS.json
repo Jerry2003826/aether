@@ -14,14 +14,14 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true. Ingest parsing stays ADR-F41. R8-B is ADR-F42. Coding model admission uses the coding job lease and fencing token. It does not change tasks.status. 9dbe90b CI is green: pack-and-unit, integration 385 passed, SonarCloud. Workflows 38969500944 and 38969494717. Do not merge.",
+  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true. Ingest parsing stays ADR-F41. R8-B is ADR-F42. Coding relay sends AETHER_LIVE_MODEL_ALIAS upstream, meters JSON and SSE usage, and does not mark FINISHED after an upstream HTTP error or a run with no successful model call. Local verify_freeze, unittest, and unit pytest passed. CI for this commit is not recorded yet. Do not merge.",
   "last_executed_commands": [
     "python3 scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-16 after coding admission moved to the job lease and fencing token. verify_freeze passed with api_operations 50. unittest 76 OK in 1.375s. unit 321 passed, 1 warning in 40.74s. CI for 9dbe90b passed: pack-and-unit, integration 385 passed in 747.82s, SonarCloud. Workflows 38969500944 and 38969494717. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after the DeepSeek coding relay usage fix. verify_freeze passed with api_operations 50. unittest 76 OK in 1.408s. unit 327 passed, 1 warning in 46.06s. Integration was not run: no Docker, Postgres, or Temporal. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

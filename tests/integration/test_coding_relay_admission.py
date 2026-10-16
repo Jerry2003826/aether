@@ -28,6 +28,7 @@ class _Upstream(BaseHTTPRequestHandler):
         payload = json.dumps(
             {
                 "id": "chatcmpl-coding",
+                "model": "coder-upstream",
                 "choices": [{"message": {"role": "assistant", "content": "ok"}}],
                 "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
             }
@@ -123,13 +124,15 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
     forwarded = _Upstream.bodies[0]
     assert forwarded["max_tokens"] == CODING_CALL_OUTPUT_CAP
     assert "timeout" not in forwarded
-    assert "stream" not in forwarded
+    assert forwarded["stream"] is True
+    assert forwarded["stream_options"] == {"include_usage": True}
     assert "user" not in forwarded
     assert "aether_job_token" not in forwarded
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         requests = conn.execute(
             text(
-                "SELECT role, usage_status, actual_micro_usd, usage_detail, request_key "
+                "SELECT role, usage_status, actual_micro_usd, usage_detail, request_key, "
+                "input_tokens, output_tokens, model_revision "
                 "FROM model_requests WHERE project_id = :project_id AND task_id = :task_id ORDER BY role"
             ),
             {"project_id": project_id, "task_id": task_id},
@@ -155,8 +158,12 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
     assert detail["measured_input_tokens"] == 3
     assert detail["measured_output_tokens"] == 2
     assert detail["pending_tokens"] == 0
+    assert by_role["coding"]["model_revision"] == "coder-upstream"
     assert by_role["coding_call"]["usage_status"] == "known"
     assert int(by_role["coding_call"]["actual_micro_usd"]) == 0
+    assert int(by_role["coding_call"]["input_tokens"]) == 3
+    assert int(by_role["coding_call"]["output_tokens"]) == 2
+    assert by_role["coding_call"]["model_revision"] == "coder-upstream"
     assert int(account["held_micro_usd"]) == 4096
     assert int(account["requests_admitted"]) == 1
     assert int(account["tokens_held"]) == CODING_CALL_OUTPUT_CAP
@@ -382,3 +389,126 @@ def _leased_job(
             },
         )
     return {"job_id": job_id, "operation_id": operation_id}
+
+
+def test_sse_final_chunk_usage_is_stored_on_the_parent_and_the_call(client, role_urls, monkeypatch) -> None:
+    monkeypatch.setenv("AETHER_LIVE_MODEL_ALIAS", "deepseek-chat")
+    seen: list[dict] = []
+
+    class Stream(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length") or "0")
+            seen.append(json.loads(self.rfile.read(length).decode()))
+            payload = (
+                'data: {"id":"chatcmpl-ds","model":"deepseek-chat","choices":[{"index":0,"delta":{"content":"ok"},"finish_reason":"stop"}]}\n\n'
+                'data: {"id":"chatcmpl-ds","model":"deepseek-chat","choices":[],"usage":{"prompt_tokens":18,"completion_tokens":9,"total_tokens":27,"prompt_cache_hit_tokens":0,"prompt_cache_miss_tokens":18,"prompt_tokens_details":{"cached_tokens":0}}}\n\n'
+                "data: [DONE]\n\n"
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "text/event-stream")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Stream)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    owner_id, project_id, _headers = project(client)
+    database = Database(role_urls["aether_worker"])
+    gateway = ModelGateway(database, upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1", provider_key=_KEY, timeout=5)
+    try:
+        binding = _prepare_task(database, owner_id=owner_id, project_id=project_id, status="WAITING_APPROVAL", fencing=3, lease_seconds=300)
+        token = _session_token(gateway, owner_id=owner_id, project_id=project_id, binding=binding, fencing=3)
+        result = gateway.relay_chat(token, {"model": "coder", "messages": [{"role": "user", "content": "edit"}], "stream": True})
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert result["usage"]["prompt_tokens"] == 18
+    assert result["usage"]["prompt_cache_miss_tokens"] == 18
+    assert seen[0]["model"] == "deepseek-chat"
+    assert seen[0]["stream"] is True
+    assert seen[0]["stream_options"] == {"include_usage": True}
+    rows = _request_rows(database, owner_id, project_id, binding["task_id"])
+    assert rows["coding"]["usage_detail"]["measured_input_tokens"] == 18
+    assert rows["coding"]["usage_detail"]["measured_output_tokens"] == 9
+    assert rows["coding"]["model_revision"] == "deepseek-chat"
+    assert int(rows["coding_call"]["input_tokens"]) == 18
+    assert int(rows["coding_call"]["output_tokens"]) == 9
+    assert rows["coding_call"]["model_revision"] == "deepseek-chat"
+    assert _task_status(database, owner_id, project_id, binding["task_id"]) == "WAITING_APPROVAL"
+
+
+def test_upstream_http_errors_are_stored_without_the_provider_message(client, role_urls) -> None:
+    message = "Model Not Exist"
+
+    class Denied(BaseHTTPRequestHandler):
+        status = 400
+
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length") or "0")
+            self.rfile.read(length)
+            payload = json.dumps({"error": {"message": message, "type": "invalid_request_error", "code": "invalid_request_error"}}).encode()
+            if Denied.status == 500:
+                payload = json.dumps({"error": {"message": "upstream exploded", "type": "server_error", "code": "server_error"}}).encode()
+            self.send_response(Denied.status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Denied)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    owner_id, project_id, _headers = project(client)
+    database = Database(role_urls["aether_worker"])
+    gateway = ModelGateway(database, upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1", provider_key=_KEY, timeout=5)
+    try:
+        binding = _prepare_task(database, owner_id=owner_id, project_id=project_id, status="WAITING_APPROVAL", fencing=5, lease_seconds=300)
+        token = _session_token(gateway, owner_id=owner_id, project_id=project_id, binding=binding, fencing=5)
+        with pytest.raises(GatewayDenied) as rejected:
+            gateway.relay_chat(token, {"model": "coder", "messages": [{"role": "user", "content": "bad-model"}]})
+        assert rejected.value.code == "upstream_http_400"
+        assert rejected.value.sent is True
+        Denied.status = 500
+        with pytest.raises(GatewayDenied) as failed:
+            gateway.relay_chat(token, {"model": "coder", "messages": [{"role": "user", "content": "later"}]})
+        assert failed.value.code == "upstream_http_500"
+    finally:
+        server.shutdown()
+        server.server_close()
+    rows = _request_rows(database, owner_id, project_id, binding["task_id"])
+    detail = rows["coding"]["usage_detail"]
+    stored = json.dumps(detail)
+    assert detail["upstream_error"] == "upstream_http_500"
+    assert detail["upstream_status"] == 500
+    assert detail["provider_error"] == "server_error"
+    assert detail["pending_tokens"] == 0
+    assert rows["coding"]["usage_status"] == "reserved"
+    assert "Model Not Exist" not in stored
+    assert "exploded" not in stored
+    calls = [row for row in _all_requests(database, owner_id, project_id, binding["task_id"]) if row["role"] == "coding_call"]
+    assert len(calls) == 2
+    assert all(call["usage_detail"]["upstream_error"].startswith("upstream_http_") for call in calls)
+    assert all(int(call["input_tokens"]) == 0 and int(call["output_tokens"]) == 0 for call in calls)
+    assert _task_status(database, owner_id, project_id, binding["task_id"]) == "WAITING_APPROVAL"
+
+
+def _request_rows(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, dict]:
+    rows = _all_requests(database, owner_id, project_id, task_id)
+    return {row["role"]: row for row in rows if row["role"] in {"coding", "coding_call"}}
+
+
+def _all_requests(database: Database, owner_id: str, project_id: str, task_id: str) -> list[dict]:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        found = conn.execute(
+            text(
+                "SELECT role, usage_status, input_tokens, output_tokens, model_revision, usage_detail "
+                "FROM model_requests WHERE project_id = :project_id AND task_id = :task_id ORDER BY created_at"
+            ),
+            {"project_id": project_id, "task_id": task_id},
+        ).mappings().all()
+    return [dict(row) for row in found]

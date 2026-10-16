@@ -148,6 +148,9 @@ def _gateway_env(token: str) -> dict[str, str]:
             _LOOPBACK_TOKEN: token,
         }
     )
+    alias = os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip()
+    if alias:
+        env["AETHER_LIVE_MODEL_ALIAS"] = alias
     return env
 
 

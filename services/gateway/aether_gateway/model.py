@@ -3,7 +3,11 @@
 from __future__ import annotations
 
 import json
+import logging
+import os
+import re
 import secrets
+import sys
 import urllib.error
 import urllib.request
 import uuid
@@ -32,6 +36,8 @@ CODING_MAX_MODEL_CALLS = 4
 _CHAT_FIELDS = ("model", "messages", "tools", "tool_choice")
 _CODING_LEASE_STATES = ("STARTING", "ACTIVE", "EXPORTING")
 _MAX_FENCING = 9223372036854775807
+_SAFE_ERROR = re.compile(r"^[a-z0-9_]{1,64}$")
+_LOG = logging.getLogger("aether.gateway.model")
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -82,7 +88,7 @@ def _chat_url(base: str) -> str:
 
 
 def accepted_chat_body(body: dict[str, Any], *, max_tokens: int | None = None) -> dict[str, Any]:
-    """Fields the coding relay may forward. timeout and any other key are dropped."""
+    """Fields the coding relay may hash. timeout, stream and any other key are dropped."""
     cleaned = {key: body[key] for key in _CHAT_FIELDS if key in body}
     if max_tokens is not None:
         cleaned["max_tokens"] = max_tokens
@@ -91,6 +97,192 @@ def accepted_chat_body(body: dict[str, Any], *, max_tokens: int | None = None) -
 
 def chat_prompt(body: dict[str, Any]) -> str:
     return json.dumps(accepted_chat_body(body), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+
+def upstream_model_name(requested: str) -> str:
+    """Send the configured provider model. Admission still uses the sandbox alias."""
+    alias = os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip()
+    return alias or requested
+
+
+def upstream_chat_payload(body: dict[str, Any], *, max_tokens: int | None) -> dict[str, Any]:
+    """Body posted upstream. A stream forces include_usage; the prompt hash ignores it."""
+    payload = accepted_chat_body(body, max_tokens=max_tokens)
+    payload["model"] = upstream_model_name(str(payload.get("model") or ""))
+    if body.get("stream") is True:
+        payload["stream"] = True
+        payload["stream_options"] = {"include_usage": True}
+    return payload
+
+
+def usage_counts(usage: object) -> tuple[int, int] | None:
+    """Prompt and completion tokens from a JSON object or the last SSE usage chunk."""
+    if not isinstance(usage, dict):
+        return None
+    incoming = _usage_token(usage, "prompt_tokens", "input_tokens")
+    outgoing = _usage_token(usage, "completion_tokens", "output_tokens")
+    if incoming is None or outgoing is None:
+        return None
+    return incoming, outgoing
+
+
+def parse_upstream_chat(raw: bytes, content_type: str) -> dict[str, Any]:
+    """One chat completion. SSE is folded into that object, including a final usage chunk."""
+    if _is_event_stream(raw, content_type):
+        return _aggregate_sse(raw)
+    try:
+        loaded = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise GatewayDenied("upstream_error", sent=True) from exc
+    if not isinstance(loaded, dict):
+        raise GatewayDenied("upstream_error", sent=True)
+    return loaded
+
+
+def _usage_token(usage: dict[str, Any], *names: str) -> int | None:
+    for name in names:
+        if name not in usage:
+            continue
+        value = usage[name]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            return None
+        return value
+    return None
+
+
+def _is_event_stream(raw: bytes, content_type: str) -> bool:
+    if "text/event-stream" in content_type.lower():
+        return True
+    return raw.lstrip().startswith(b"data:")
+
+
+def _sse_events(raw: bytes) -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
+        data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
+        if not data_lines:
+            continue
+        payload = "\n".join(data_lines).strip()
+        if payload == "[DONE]":
+            continue
+        try:
+            loaded = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(loaded, dict):
+            events.append(loaded)
+    return events
+
+
+def _aggregate_sse(raw: bytes) -> dict[str, Any]:
+    events = _sse_events(raw)
+    if not events:
+        raise GatewayDenied("upstream_error", sent=True)
+    content: list[str] = []
+    tool_calls: dict[int, dict[str, Any]] = {}
+    finish: str | None = None
+    usage: dict[str, Any] | None = None
+    model = ""
+    completion_id = "chatcmpl-stream"
+    role = "assistant"
+    for event in events:
+        if isinstance(event.get("id"), str) and event["id"] and completion_id == "chatcmpl-stream":
+            completion_id = event["id"]
+        if isinstance(event.get("model"), str) and event["model"]:
+            model = event["model"]
+        if usage_counts(event.get("usage")) is not None and isinstance(event.get("usage"), dict):
+            usage = event["usage"]
+        choices = event.get("choices")
+        if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+            continue
+        choice = choices[0]
+        reason = choice.get("finish_reason")
+        if isinstance(reason, str) and reason:
+            finish = reason
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
+        source = delta or message
+        if isinstance(source.get("role"), str) and source["role"]:
+            role = source["role"]
+        piece = source.get("content")
+        if isinstance(piece, str):
+            content.append(piece)
+        calls = source.get("tool_calls")
+        if isinstance(calls, list):
+            _merge_tool_calls(tool_calls, calls)
+    message_out: dict[str, Any] = {"role": role, "content": "".join(content) if content else None}
+    if tool_calls:
+        message_out["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
+    result: dict[str, Any] = {
+        "id": completion_id,
+        "object": "chat.completion",
+        "model": model,
+        "choices": [{"index": 0, "finish_reason": finish, "message": message_out}],
+    }
+    if usage is not None:
+        result["usage"] = usage
+    return result
+
+
+def _merge_tool_calls(found: dict[int, dict[str, Any]], calls: list[Any]) -> None:
+    for item in calls:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("index", 0)
+        if isinstance(index, bool) or not isinstance(index, int):
+            index = 0
+        current = found.setdefault(
+            index,
+            {"id": "", "type": "function", "function": {"name": "", "arguments": ""}},
+        )
+        if isinstance(item.get("id"), str) and item["id"]:
+            current["id"] = item["id"]
+        if isinstance(item.get("type"), str) and item["type"]:
+            current["type"] = item["type"]
+        function = item.get("function")
+        if not isinstance(function, dict):
+            continue
+        name = function.get("name")
+        arguments = function.get("arguments")
+        if isinstance(name, str) and name:
+            current["function"]["name"] += name
+        if isinstance(arguments, str) and arguments:
+            current["function"]["arguments"] += arguments
+
+
+def _provider_error_code(body: str) -> str | None:
+    try:
+        loaded = json.loads(body)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(loaded, dict):
+        return None
+    error = loaded.get("error")
+    if not isinstance(error, dict):
+        return None
+    for key in ("code", "type"):
+        value = error.get(key)
+        if isinstance(value, str) and _SAFE_ERROR.fullmatch(value):
+            return value
+    return None
+
+
+def _logger() -> logging.Logger:
+    _LOG.setLevel(logging.INFO)
+    if not _LOG.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        _LOG.addHandler(handler)
+    return _LOG
+
+
+def _public(value: object, secret: str) -> str:
+    text = "" if value is None else str(value)
+    if secret and secret in text:
+        return "[REDACTED]"
+    if len(text) > 80:
+        return text[:80]
+    return text
 
 
 def scripted_chat_completion(model: str) -> dict[str, Any]:
@@ -150,10 +342,19 @@ def _choice_content(response: Any) -> str:
 class GatewayDenied(Exception):
     """sent is true once the request may have reached the provider."""
 
-    def __init__(self, code: str, *, sent: bool = False) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        sent: bool = False,
+        upstream_status: int | None = None,
+        provider_error: str | None = None,
+    ) -> None:
         super().__init__(code)
         self.code = code
         self.sent = sent
+        self.upstream_status = upstream_status
+        self.provider_error = provider_error
 
 
 class ModelGateway:
@@ -163,6 +364,8 @@ class ModelGateway:
         self.provider_key = provider_key
         self.timeout = timeout
         self.audit: list[str] = []
+        self._coding_child_key = ""
+        self._response_kind = "json"
 
     def issue_token(
         self,
@@ -317,12 +520,58 @@ class ModelGateway:
         prompt = chat_prompt(body)
         max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
         self.audit.append(f"relay project={grant['project_id']} model={model}")
-        payload = accepted_chat_body(body, max_tokens=max_tokens)
-        result = scripted_chat_completion(model or "coder") if not self.upstream_base else self._post_upstream(payload)
+        payload = upstream_chat_payload(body, max_tokens=max_tokens)
+        upstream_model = str(payload.get("model") or "")
+        client_stream = body.get("stream") is True
+        try:
+            if not self.upstream_base:
+                self._response_kind = "scripted"
+                result = scripted_chat_completion(model or "coder")
+            else:
+                result = self._post_upstream(payload)
+        except GatewayDenied as exc:
+            self._note_upstream_failure(grant, exc, release_pending=True)
+            self._log_relay(
+                project_id=str(grant["project_id"]),
+                status=exc.upstream_status,
+                requested_model=model,
+                upstream_model=upstream_model,
+                stream=client_stream,
+                response_kind=self._response_kind,
+                incoming=None,
+                outgoing=None,
+                error=exc.code,
+            )
+            raise
         self._add_measured_usage(grant, result)
         encoded = json.dumps(result)
         if self.provider_key and (self.provider_key in encoded or any(self.provider_key in line for line in self.audit)):
-            raise GatewayDenied("secret_leak", sent=True)
+            denied = GatewayDenied("secret_leak", sent=True)
+            self._note_upstream_failure(grant, denied, release_pending=False)
+            self._log_relay(
+                project_id=str(grant["project_id"]),
+                status=200,
+                requested_model=model,
+                upstream_model=upstream_model,
+                stream=client_stream,
+                response_kind=self._response_kind,
+                incoming=None,
+                outgoing=None,
+                error=denied.code,
+            )
+            raise denied
+        counted = usage_counts(result.get("usage"))
+        self._log_relay(
+            project_id=str(grant["project_id"]),
+            status=200,
+            requested_model=model,
+            upstream_model=upstream_model,
+            stream=client_stream,
+            response_kind=self._response_kind,
+            incoming=None if counted is None else counted[0],
+            outgoing=None if counted is None else counted[1],
+            error="" if counted is not None else "usage_missing",
+        )
         return result
 
     def _spend_coding_ticket(self, session: dict[str, Any], *, alias: str, prompt: str) -> int:
@@ -379,6 +628,7 @@ class ModelGateway:
             self._abort_coding_ticket(project_id, task_id, parent_key, child_key)
             raise
         self._close_coding_ticket(project_id, task_id, child_key)
+        self._coding_child_key = child_key
         return CODING_CALL_OUTPUT_CAP
 
     def _require_coding_lease(
@@ -605,40 +855,79 @@ class ModelGateway:
             )
 
     def _add_measured_usage(self, session: dict[str, Any], result: dict[str, Any]) -> None:
-        usage = result.get("usage")
-        if not isinstance(usage, dict):
-            return
-        try:
-            incoming = int(usage.get("prompt_tokens"))
-            outgoing = int(usage.get("completion_tokens"))
-        except (TypeError, ValueError):
-            return
-        if isinstance(usage.get("prompt_tokens"), bool) or isinstance(usage.get("completion_tokens"), bool):
-            return
-        if incoming < 0 or outgoing < 0:
-            return
+        counted = usage_counts(result.get("usage"))
+        revision = result.get("model") if isinstance(result.get("model"), str) and result["model"] else None
+        if revision and self.provider_key and self.provider_key in revision:
+            revision = None
         project_id = str(session["project_id"])
+        task_id = str(session["task_id"])
+        parent_key = str(session["scope"]["request_key"])
         with self.database.transaction(project_id=project_id) as conn:
             row = conn.execute(
                 text(
                     "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
                     "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
                 ),
-                {
-                    "project_id": project_id,
-                    "task_id": str(session["task_id"]),
-                    "request_key": str(session["scope"]["request_key"]),
-                },
+                {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
             ).mappings().first()
             if row is None:
                 return
-            detail = row["usage_detail"]
-            if isinstance(detail, str):
-                detail = json.loads(detail)
-            detail = dict(detail or {})
-            detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
-            detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
+            detail = _object_detail(row["usage_detail"])
             detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+            if counted is None:
+                detail["usage_missing"] = True
+            else:
+                incoming, outgoing = counted
+                detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
+                detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
+                detail.pop("usage_missing", None)
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb), "
+                    "model_revision = COALESCE(:revision, model_revision) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(detail),
+                    "revision": revision,
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": parent_key,
+                },
+            )
+            self._write_child_observation(
+                conn,
+                project_id=project_id,
+                task_id=task_id,
+                incoming=None if counted is None else counted[0],
+                outgoing=None if counted is None else counted[1],
+                revision=revision,
+                usage_missing=counted is None,
+            )
+
+    def _note_upstream_failure(self, session: dict[str, Any], exc: GatewayDenied, *, release_pending: bool) -> None:
+        """Record the status and a safe error code. The provider message is not stored."""
+        project_id = str(session["project_id"])
+        task_id = str(session["task_id"])
+        parent_key = str(session["scope"]["request_key"])
+        with self.database.transaction(project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
+            ).mappings().first()
+            if row is None:
+                return
+            detail = _object_detail(row["usage_detail"])
+            detail["upstream_error"] = exc.code
+            if exc.upstream_status is not None:
+                detail["upstream_status"] = exc.upstream_status
+            if exc.provider_error:
+                detail["provider_error"] = exc.provider_error
+            if release_pending:
+                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -647,36 +936,144 @@ class ModelGateway:
                 {
                     "detail": json.dumps(detail),
                     "project_id": project_id,
-                    "task_id": str(session["task_id"]),
-                    "request_key": str(session["scope"]["request_key"]),
+                    "task_id": task_id,
+                    "request_key": parent_key,
                 },
             )
+            if self._coding_child_key:
+                child = conn.execute(
+                    text(
+                        "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                        "AND request_key = :request_key FOR UPDATE"
+                    ),
+                    {"project_id": project_id, "task_id": task_id, "request_key": self._coding_child_key},
+                ).mappings().first()
+                if child is not None:
+                    child_detail = _object_detail(child["usage_detail"])
+                    child_detail["upstream_error"] = exc.code
+                    if exc.upstream_status is not None:
+                        child_detail["upstream_status"] = exc.upstream_status
+                    if exc.provider_error:
+                        child_detail["provider_error"] = exc.provider_error
+                    conn.execute(
+                        text(
+                            "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                        ),
+                        {
+                            "detail": json.dumps(child_detail),
+                            "project_id": project_id,
+                            "task_id": task_id,
+                            "request_key": self._coding_child_key,
+                        },
+                    )
+
+    def _write_child_observation(
+        self,
+        conn: Connection,
+        *,
+        project_id: str,
+        task_id: str,
+        incoming: int | None,
+        outgoing: int | None,
+        revision: str | None,
+        usage_missing: bool,
+    ) -> None:
+        if not self._coding_child_key:
+            return
+        row = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key = :request_key FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": self._coding_child_key},
+        ).mappings().first()
+        if row is None:
+            return
+        detail = _object_detail(row["usage_detail"])
+        if usage_missing:
+            detail["usage_missing"] = True
+        else:
+            detail.pop("usage_missing", None)
+        conn.execute(
+            text(
+                "UPDATE model_requests SET input_tokens = COALESCE(:incoming, input_tokens), "
+                "output_tokens = COALESCE(:outgoing, output_tokens), model_revision = COALESCE(:revision, model_revision), "
+                "usage_detail = CAST(:detail AS jsonb) "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+            ),
+            {
+                "incoming": incoming,
+                "outgoing": outgoing,
+                "revision": revision,
+                "detail": json.dumps(detail),
+                "project_id": project_id,
+                "task_id": task_id,
+                "request_key": self._coding_child_key,
+            },
+        )
 
     def _post_upstream(self, body: dict[str, Any]) -> dict[str, Any]:
-        payload = accepted_chat_body(body, max_tokens=body.get("max_tokens") if isinstance(body.get("max_tokens"), int) else None)
         request = urllib.request.Request(
             _chat_url(self.upstream_base),
-            data=json.dumps(payload).encode(),
+            data=json.dumps(body).encode(),
             headers={"authorization": f"Bearer {self.provider_key}", "content-type": "application/json"},
             method="POST",
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         try:
             with opener.open(request, timeout=self.timeout) as response:
-                text = response.read().decode()
+                raw = response.read()
+                content_type = response.headers.get("content-type", "")
+                status = getattr(response, "status", 200)
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode(errors="replace")
             if self.provider_key and self.provider_key in detail:
                 raise GatewayDenied("secret_leak", sent=True) from exc
-            raise GatewayDenied("upstream_error", sent=True) from exc
+            status_code = exc.code if isinstance(exc.code, int) else 0
+            provider = _provider_error_code(detail)
+            code = f"upstream_http_{status_code}" if 400 <= status_code <= 599 else "upstream_error"
+            raise GatewayDenied(code, sent=True, upstream_status=status_code or None, provider_error=provider) from exc
         except (TimeoutError, urllib.error.URLError) as exc:
             raise GatewayDenied("upstream_error", sent=_is_timeout(exc)) from exc
-        if self.provider_key and self.provider_key in text:
+        self._response_kind = "sse" if _is_event_stream(raw, content_type) else "json"
+        decoded = raw.decode(errors="replace")
+        if self.provider_key and self.provider_key in decoded:
             raise GatewayDenied("secret_leak", sent=True)
-        loaded = json.loads(text)
-        if not isinstance(loaded, dict):
-            raise GatewayDenied("upstream_error", sent=True)
+        loaded = parse_upstream_chat(raw, content_type)
+        _logger().info(
+            "upstream status=%s kind=%s model=%s",
+            status,
+            self._response_kind,
+            _public(loaded.get("model"), self.provider_key),
+        )
         return loaded
+
+    def _log_relay(
+        self,
+        *,
+        project_id: str,
+        status: int | None,
+        requested_model: str,
+        upstream_model: str,
+        stream: bool,
+        response_kind: str,
+        incoming: int | None,
+        outgoing: int | None,
+        error: str,
+    ) -> None:
+        _logger().info(
+            "relay project=%s status=%s requested_model=%s upstream_model=%s stream=%s kind=%s input_tokens=%s output_tokens=%s error=%s",
+            _public(project_id, self.provider_key),
+            "" if status is None else status,
+            _public(requested_model, self.provider_key),
+            _public(upstream_model, self.provider_key),
+            stream,
+            response_kind,
+            "" if incoming is None else incoming,
+            "" if outgoing is None else outgoing,
+            _public(error, self.provider_key),
+        )
 
     def _scope(self, token: str) -> dict[str, Any]:
         token_hash = sha256_text(token)
@@ -754,6 +1151,15 @@ class ModelGateway:
                 {"project_id": project_id, "id": grant["id"]},
             )
         return max_tokens
+
+
+def _object_detail(raw: object) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        loaded = json.loads(raw)
+        return dict(loaded) if isinstance(loaded, dict) else {}
+    return {}
 
 
 def _uuid_text(value: object) -> str:

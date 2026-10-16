@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
 import secrets
 import shutil
 import socketserver
 import stat
 import struct
+import sys
 import tempfile
 import threading
 from pathlib import Path
@@ -28,6 +30,7 @@ _ACL_MASK = 0x10
 _ACL_OTHER = 0x20
 _ACL_UNDEFINED_ID = 0xFFFFFFFF
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
+_LOG = logging.getLogger("aether.worker.coding_proxy")
 
 
 class CodingModelProxy:
@@ -119,6 +122,8 @@ class _Handler(socketserver.StreamRequestHandler):
             return
         method, path, headers, raw = parsed
         status, payload = self.server.proxy.respond(method, path, headers, raw)
+        error = payload.get("error") if status >= 400 else ""
+        _logger().info("coding_proxy status=%s error=%s", status, error if isinstance(error, str) else "")
         _write_json(self.wfile, status, payload)
 
 
@@ -194,6 +199,15 @@ def _read_exact(reader, length: int) -> bytes | None:
         chunks.append(block)
         remaining -= len(block)
     return b"".join(chunks)
+
+
+def _logger() -> logging.Logger:
+    _LOG.setLevel(logging.INFO)
+    if not _LOG.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        _LOG.addHandler(handler)
+    return _LOG
 
 
 def _write_json(writer, status: int, payload: dict) -> None:

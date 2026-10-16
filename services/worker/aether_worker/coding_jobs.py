@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import sys
 import tempfile
 from datetime import UTC, datetime
 from pathlib import Path
@@ -33,6 +35,7 @@ _UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout
 _CONFIRMED_STOP = frozenset({"cancelled", "deadline_exceeded", "timeout"})
 CODING_RESERVE_MICRO_USD = 4096
 CODING_RESERVE_TOKENS = 4096
+_LOG = logging.getLogger("aether.worker.coding")
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -250,16 +253,30 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             finally:
                 if proxy is not None:
                     proxy.close()
-            result = sandbox["result"]
-            passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
-            error = None if passed else "test_failed"
-            if result.get("credential_present"):
-                passed = False
-                error = "credential_present"
-            if result.get("network_errno") == 0:
-                passed = False
-                error = "network_open"
-            state = "FINISHED" if passed else "FAILED"
+            detail = _request_detail(
+                ledger,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+            )
+            measured = _measured_from_detail(detail)
+            upstream_error, usage_missing = _relay_flags(detail)
+            state, error = _coding_terminal(
+                sandbox,
+                upstream_error=upstream_error,
+                measured=measured,
+                usage_missing=usage_missing,
+            )
+            _log_job(
+                job_id=job_id,
+                fencing=fencing,
+                state=state,
+                error=error,
+                result=sandbox.get("result") if isinstance(sandbox.get("result"), dict) else {},
+                measured=measured,
+                patch_source=_patch_source(sandbox),
+            )
             published = _publish(
                 database,
                 store,
@@ -775,6 +792,7 @@ def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[s
         "output_tokens": sandbox["result"].get("output_tokens"),
         "edit_calls": sandbox["result"].get("edit_calls"),
         "model_requests": sandbox["result"].get("model_requests"),
+        "patch_source": _patch_source(sandbox),
         "file_manifest": manifest,
         "patch_sha256": hashlib.sha256(patch).hexdigest(),
         "stdout_tail": stdout,
@@ -1060,17 +1078,59 @@ def _issue_coding_token(
     )
 
 
-def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, Any]) -> bytes:
+def _agent_patch(sandbox: dict[str, Any]) -> str | None:
     result = sandbox.get("result")
-    if isinstance(result, dict):
-        try:
-            edits = int(result.get("edit_calls") or 0)
-        except (TypeError, ValueError):
-            edits = 0
-        patch = result.get("patch")
-        if edits > 0 and isinstance(patch, str) and patch.startswith("--- "):
-            return patch.encode()
+    if not isinstance(result, dict):
+        return None
+    try:
+        edits = int(result.get("edit_calls") or 0)
+    except (TypeError, ValueError):
+        return None
+    patch = result.get("patch")
+    if edits > 0 and isinstance(patch, str) and patch.startswith("--- "):
+        return patch
+    return None
+
+
+def _patch_source(sandbox: dict[str, Any]) -> str:
+    return "agent_edit" if _agent_patch(sandbox) is not None else "candidate_files"
+
+
+def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, Any]) -> bytes:
+    patch = _agent_patch(sandbox)
+    if patch is not None:
+        return patch.encode()
     return unified_patch(workspace["base_files"], workspace["files"]).encode()
+
+
+def _coding_terminal(
+    sandbox: dict[str, Any],
+    *,
+    upstream_error: str | None,
+    measured: tuple[int, int] | None,
+    usage_missing: bool,
+) -> tuple[str, str | None]:
+    """FINISHED needs a passing protocol and a successful model call.
+
+    An upstream HTTP error, a response with no usable usage, or a run that never
+    called the model stays FAILED even when the candidate files already pass.
+    """
+    result = sandbox.get("result")
+    body = result if isinstance(result, dict) else {}
+    passed = int(body.get("passed") or 0) > 0 and int(body.get("failed") or 0) == 0 and sandbox.get("exit_code") == 0
+    if body.get("credential_present"):
+        return "FAILED", "credential_present"
+    if body.get("network_errno") == 0:
+        return "FAILED", "network_open"
+    requests = body.get("model_requests")
+    called = isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
+    if upstream_error:
+        return "FAILED", upstream_error
+    if usage_missing and measured is None:
+        return "FAILED", "usage_missing"
+    if not called and measured is None:
+        return "FAILED", "model_not_called"
+    return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
 
 
 def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
@@ -1085,6 +1145,45 @@ def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     return incoming, outgoing
 
 
+def _request_detail(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> dict[str, Any]:
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        loaded = json.loads(raw)
+        return dict(loaded) if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _measured_from_detail(detail: dict[str, Any]) -> tuple[int, int] | None:
+    if "measured_input_tokens" not in detail or "measured_output_tokens" not in detail:
+        return None
+    incoming = detail["measured_input_tokens"]
+    outgoing = detail["measured_output_tokens"]
+    if type(incoming) is not int or type(outgoing) is not int or incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
+        return None
+    return incoming, outgoing
+
+
+def _relay_flags(detail: dict[str, Any]) -> tuple[str | None, bool]:
+    error = detail.get("upstream_error")
+    code = error if isinstance(error, str) and error else None
+    return code, detail.get("usage_missing") is True
+
+
 def _measured_usage(
     ledger: BudgetLedger,
     *,
@@ -1093,21 +1192,49 @@ def _measured_usage(
     task_id: str,
     request_key: str,
 ) -> tuple[int, int] | None:
-    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        raw = conn.execute(
-            text(
-                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
-            ),
-            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
-        ).scalar()
-    detail = raw if isinstance(raw, dict) else json.loads(raw) if isinstance(raw, str) else {}
-    if "measured_input_tokens" not in detail or "measured_output_tokens" not in detail:
-        return None
-    incoming = detail["measured_input_tokens"]
-    outgoing = detail["measured_output_tokens"]
-    if type(incoming) is not int or type(outgoing) is not int or incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
-        return None
-    return incoming, outgoing
+    return _measured_from_detail(
+        _request_detail(
+            ledger,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+        )
+    )
+
+
+def _log_job(
+    *,
+    job_id: str,
+    fencing: int,
+    state: str,
+    error: str | None,
+    result: dict[str, Any],
+    measured: tuple[int, int] | None,
+    patch_source: str,
+) -> None:
+    logger = _logger()
+    logger.info(
+        "coding_job job=%s fencing=%s state=%s error=%s model_requests=%s edit_calls=%s input_tokens=%s output_tokens=%s patch_source=%s",
+        job_id,
+        fencing,
+        state,
+        error or "",
+        result.get("model_requests") if isinstance(result.get("model_requests"), int) else "",
+        result.get("edit_calls") if isinstance(result.get("edit_calls"), int) else "",
+        "" if measured is None else measured[0],
+        "" if measured is None else measured[1],
+        patch_source,
+    )
+
+
+def _logger() -> logging.Logger:
+    _LOG.setLevel(logging.INFO)
+    if not _LOG.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        _LOG.addHandler(handler)
+    return _LOG
 
 
 def _settle(
