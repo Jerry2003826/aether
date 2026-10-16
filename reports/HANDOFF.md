@@ -12,7 +12,14 @@
 - 网页跳过 BOM、XML 声明和已闭合注释后再交给 trafilatura。未闭合注释仍是纯文本。证明：`test_html_preamble_still_uses_trafilatura`。
 - 技能 metadata 只读到第二个 `---`。证明：`test_metadata_reads_only_the_frontmatter_fence`。
 
-本机没有 PostgreSQL、Temporal 和 Docker。全套集成测试没有在本机跑。这次本地：`verify_freeze` 通过（`api_operations` 50），参考套件 76 OK，`pytest tests/unit` 297 passed。这条修正的 CI 还没有跑。
+本机没有 PostgreSQL、Temporal 和 Docker。全套集成测试没有在本机跑。这次本地：`verify_freeze` 通过（`api_operations` 50），参考套件 76 OK，`pytest tests/unit` 297 passed。
+
+提交 `d215ebc` 的 CI 已通过：`pack-and-unit`、`integration`、SonarCloud。workflow：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38939914317
+- https://github.com/Jerry2003826/aether/actions/runs/38939904243
+
+质量门通过，Sonar 仍报 4 个新 issue，没有挡住合并检查。用 `@codex review` 请求复审时，连接器回复需要 Codex 账号连接 GitHub，没有产生针对 `d215ebc` 的新审查。上一次 Codex 审查仍停在 `716af7c`，摘要里的 findings 仍是 unresolved。其中 frontmatter、Retry-After、HTML 注释、技能正文和 RSS 编码五条评论在新 diff 上已过期；分词版本和重试装饰器两条仍锚在未改动的行上，对应行为已分别改到 `retrieval.py` 和 `_fetch_once`。`live_ready` 仍是 pending。
 
 ## R8-A 采集解析换成固定版本的开源库（分支 `cursor/r8-a-ingest-libraries-47e9`）
 

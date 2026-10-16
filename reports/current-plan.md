@@ -13,7 +13,7 @@
 - 重试：`tenacity`，只包采集 HTTP
 - 产物：只增加三种 OOXML 媒体类型
 
-结果：冻结检查通过，参考套件 76 OK，单元测试 297 passed。全套集成测试没有在本机跑，因为没有 PostgreSQL、Temporal 和 Docker。`b40ce32` 的 `pack-and-unit`、`integration` 和 SonarCloud 已通过。`live_ready` 保持 pending。
+结果：冻结检查通过，参考套件 76 OK，单元测试 297 passed。全套集成测试没有在本机跑，因为没有 PostgreSQL、Temporal 和 Docker。`d215ebc` 的 `pack-and-unit`、`integration` 和 SonarCloud 已通过。Codex 没有复审这个提交。`live_ready` 保持 pending。
 
 审查收紧（仍是 ADR-F41）：
 

@@ -14,7 +14,7 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing, splitting, and fetch retry are ADR-F41. The Codex P1 corrections (invalid markdown YAML, non-finite Retry-After, tokenizer mismatch, shared redirect retry budget, UTF-16 entity rejection) are covered by unit tests on this branch. b40ce32 CI was green. This correction's CI has not run yet. Local Postgres, Temporal, and Docker were absent, so the full integration suite ran only in CI.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing, splitting, and fetch retry are ADR-F41. The Codex P1 corrections (invalid markdown YAML, non-finite Retry-After, tokenizer mismatch, shared redirect retry budget, UTF-16 entity rejection) are in d215ebc. That commit's pack-and-unit, integration, and SonarCloud checks passed. A fresh @codex review was refused because the connector requires a connected Codex account, so the previous review of 716af7c is still the latest and its findings are still marked unresolved. Local Postgres, Temporal, and Docker were absent, so the full integration suite ran only in CI.",
   "last_executed_commands": [
     "uv lock",
     "uv sync --locked --no-build",
@@ -29,7 +29,7 @@
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-16 from a2b9313 on cursor/r8-a-ingest-libraries-47e9 after the Codex P1 corrections. verify_freeze passed with api_operations 50. unittest 76 OK. pytest tests/unit: 297 passed. Earlier on the same branch, pytest tests/unit plus tests/integration/test_ingest.py was 294 passed, 1 skipped, 1 failed. The skip is test_fixture_download_is_real_and_parser_stays_static because AETHER_ADMIN_DATABASE_URL is unset. The failure was test_playwright_profile_renders_javascript before Chromium was installed; after playwright install chromium that test passed. The full integration suite was not run locally. b40ce32 CI passed pack-and-unit, integration, and SonarCloud. The correction commit's CI has not run yet. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 from a2b9313 on cursor/r8-a-ingest-libraries-47e9 after the Codex P1 corrections. verify_freeze passed with api_operations 50. unittest 76 OK. pytest tests/unit: 297 passed. Earlier on the same branch, pytest tests/unit plus tests/integration/test_ingest.py was 294 passed, 1 skipped, 1 failed. The skip is test_fixture_download_is_real_and_parser_stays_static because AETHER_ADMIN_DATABASE_URL is unset. The failure was test_playwright_profile_renders_javascript before Chromium was installed; after playwright install chromium that test passed. The full integration suite was not run locally. d215ebc CI passed pack-and-unit, integration, and SonarCloud (runs 38939914317 and 38939904243). Sonar quality gate passed with 4 new issues. Codex did not review d215ebc. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
