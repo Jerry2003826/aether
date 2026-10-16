@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import sys
 import tempfile
 from datetime import UTC, datetime
@@ -33,8 +34,34 @@ _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
 LEASE_SECONDS = 30
 _UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout_unconfirmed"})
 _CONFIRMED_STOP = frozenset({"cancelled", "deadline_exceeded", "timeout"})
-CODING_RESERVE_MICRO_USD = 4096
-CODING_RESERVE_TOKENS = 4096
+CODING_CALL_RESERVE_TOKENS = 4096
+CODING_CALL_RESERVE_MICRO_USD = 4096
+CODING_RESERVE_TOKENS = CODING_CALL_RESERVE_TOKENS
+CODING_RESERVE_MICRO_USD = CODING_CALL_RESERVE_MICRO_USD
+
+
+def coding_call_reserve_tokens() -> int:
+    return _positive_env("AETHER_CODING_CALL_RESERVE_TOKENS", CODING_CALL_RESERVE_TOKENS)
+
+
+def coding_call_reserve_micro_usd() -> int:
+    raw = os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", "").strip()
+    if not raw:
+        return coding_call_reserve_tokens()
+    return _positive_env("AETHER_CODING_CALL_RESERVE_MICRO_USD", coding_call_reserve_tokens())
+
+
+def _positive_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < 1:
+        return default
+    return value
 _LOG = logging.getLogger("aether.worker.coding")
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
@@ -153,14 +180,17 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             return early
         workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
         _ensure_account(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
+        reserve_tokens = coding_call_reserve_tokens()
+        reserve_micro = coding_call_reserve_micro_usd()
         if not ledger.reserve(
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            amount=CODING_RESERVE_MICRO_USD,
+            amount=reserve_micro,
             role="coding",
-            tokens=CODING_RESERVE_TOKENS,
+            tokens=reserve_tokens,
+            extra_detail={"call_reserve_tokens": reserve_tokens, "call_reserve_micro_usd": reserve_micro},
         ):
             raise CodingError("budget_exceeded")
         reserved = True
@@ -262,18 +292,31 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             )
             measured = _measured_from_detail(detail)
             upstream_error, usage_missing = _relay_flags(detail)
+            admission_error = detail.get("admission_error")
+            blocked = admission_error if isinstance(admission_error, str) and admission_error else None
             state, error = _coding_terminal(
                 sandbox,
                 upstream_error=upstream_error,
                 measured=measured,
                 usage_missing=usage_missing,
+                admission_error=blocked,
             )
+            observed = _successful_model_requests(
+                ledger,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+            )
+            result = sandbox.get("result")
+            if isinstance(result, dict):
+                result["model_requests"] = observed
             _log_job(
                 job_id=job_id,
                 fencing=fencing,
                 state=state,
                 error=error,
-                result=sandbox.get("result") if isinstance(sandbox.get("result"), dict) else {},
+                result=result if isinstance(result, dict) else {},
                 measured=measured,
                 patch_source=_patch_source(sandbox),
             )
@@ -1103,17 +1146,27 @@ def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, An
     return unified_patch(workspace["base_files"], workspace["files"]).encode()
 
 
+def _agent_completed(body: dict[str, Any]) -> bool:
+    flag = body.get("agent_completed")
+    if isinstance(flag, bool):
+        return flag
+    requests = body.get("model_requests")
+    return isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
+
+
 def _coding_terminal(
     sandbox: dict[str, Any],
     *,
     upstream_error: str | None,
     measured: tuple[int, int] | None,
     usage_missing: bool,
+    admission_error: str | None = None,
 ) -> tuple[str, str | None]:
-    """FINISHED needs a passing protocol and a successful model call.
+    """FINISHED needs a completed agent and a passing protocol.
 
-    An upstream HTTP error, a response with no usable usage, or a run that never
-    called the model stays FAILED even when the candidate files already pass.
+    A budget rejection or a blank report (the agent raised before it finished)
+    is FAILED even when the files on disk already pass. A scripted finish that
+    completes without editing still lets an already-correct candidate pass.
     """
     result = sandbox.get("result")
     body = result if isinstance(result, dict) else {}
@@ -1122,12 +1175,16 @@ def _coding_terminal(
         return "FAILED", "credential_present"
     if body.get("network_errno") == 0:
         return "FAILED", "network_open"
-    requests = body.get("model_requests")
-    called = isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
+    if admission_error:
+        return "FAILED", admission_error
+    if not _agent_completed(body):
+        return "FAILED", "agent_interrupted"
     if upstream_error:
         return "FAILED", upstream_error
     if usage_missing and measured is None:
         return "FAILED", "usage_missing"
+    requests = body.get("model_requests")
+    called = isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
     if not called and measured is None:
         return "FAILED", "model_not_called"
     return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
@@ -1182,6 +1239,28 @@ def _relay_flags(detail: dict[str, Any]) -> tuple[str | None, bool]:
     error = detail.get("upstream_error")
     code = error if isinstance(error, str) and error else None
     return code, detail.get("usage_missing") is True
+
+
+def _successful_model_requests(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> int:
+    """Gateway-observed calls. A sandbox exception must not publish this as zero."""
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        count = conn.execute(
+            text(
+                "SELECT count(*) FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND role = 'coding_call' AND request_key LIKE :prefix AND usage_status = 'known' "
+                "AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0 "
+                "AND (usage_detail->>'upstream_error') IS NULL"
+            ),
+            {"project_id": project_id, "task_id": task_id, "prefix": request_key + ":call:%"},
+        ).scalar()
+    return int(count or 0)
 
 
 def _measured_usage(
@@ -1270,7 +1349,7 @@ def _settle(
         return
     incoming, outgoing = usage
     try:
-        ledger.settle(
+        ledger.settle_measured(
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
@@ -1279,15 +1358,11 @@ def _settle(
             input_tokens=incoming,
             output_tokens=outgoing,
         )
-    except (BudgetError, NoResultFound):
-        _release_hold(
-            ledger,
-            owner_id=owner_id,
-            project_id=project_id,
-            task_id=task_id,
-            request_key=request_key,
-            reserved=True,
-        )
+    except BudgetError as exc:
+        if exc.code not in {"unknown_not_zero", "not_reserved", "conflicting_settlement"}:
+            raise
+    except NoResultFound:
+        return
 
 
 def _release_hold(

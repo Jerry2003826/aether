@@ -39,13 +39,25 @@ def _require_docker() -> None:
         pytest.fail("Docker is required for the OpenHands agent proof")
 
 
+_ISOLATED_ENV = (
+    "AETHER_GATEWAY_BASE",
+    "AETHER_LOOPBACK_TOKEN",
+    "AETHER_LIVE_MODEL_KEY",
+    "AETHER_LIVE_MODEL_ALIAS",
+    "AETHER_LIVE_MODEL_BASE",
+    "AETHER_CODING_CALL_RESERVE_TOKENS",
+    "AETHER_CODING_CALL_RESERVE_MICRO_USD",
+)
+
+
 class _FakeModel:
-    def __init__(self) -> None:
+    def __init__(self, rounds: tuple[tuple[str, int, int], ...] | None = None) -> None:
         self.authorizations: list[str] = []
         self.models: list[str] = []
         self.tool_names: set[str] = set()
         self.usages: list[tuple[int, int]] = []
         self.problems: list[str] = []
+        self._rounds = rounds or (("edit", 20, 11), ("finish", 20, 7))
         self._calls = 0
         self._lock = threading.Lock()
 
@@ -68,19 +80,22 @@ class _FakeModel:
                 self.problems.append("job token reached the model")
             if _PROVIDER_KEY in text_body:
                 self.problems.append("provider key reached the model body")
-        if call == 1:
-            target = _app_path(text_body)
-            if not target.startswith("/"):
-                self.problems.append("missing app.py path")
+        kind, prompt, completion = self._rounds[min(call, len(self._rounds)) - 1]
+        target = _app_path(text_body)
+        if kind == "edit" and not target.startswith("/"):
+            self.problems.append("missing app.py path")
+        if kind == "view":
+            arguments = json.dumps({"command": "view", "path": target})
+            name = "file_editor"
+            call_id = "call_view"
+        elif kind == "edit":
             arguments = json.dumps({"command": "str_replace", "path": target, "old_str": "return 0", "new_str": "return 42"})
             name = "file_editor"
             call_id = "call_edit"
-            prompt, completion = 20, 11
         else:
             arguments = json.dumps({"message": "done"})
             name = "finish"
             call_id = "call_finish"
-            prompt, completion = 20, 7
         with self._lock:
             self.usages.append((prompt, completion))
         return {
@@ -157,18 +172,27 @@ def _ready(proc: subprocess.Popen[bytes]) -> str:
 
 
 def test_openhands_agent_edits_through_the_gateway_and_settles_tokens(client, role_urls) -> None:
+    _exercise(client, role_urls, _FakeModel(), "r8-agent")
+
+
+def test_large_token_rounds_extend_the_reservation_and_settle_actual_usage(client, role_urls) -> None:
+    rounds = (("view", 3000, 40), ("edit", 3100, 48), ("finish", 3200, 24))
+    _exercise(client, role_urls, _FakeModel(rounds), "r8-large", minimum_requests=3)
+
+
+def _exercise(client, role_urls, model: _FakeModel, prefix: str, *, minimum_requests: int = 2) -> None:
     _require_docker()
-    model = _FakeModel()
     server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(model))
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
-    saved = {name: os.environ.get(name) for name in ("AETHER_GATEWAY_BASE", "AETHER_LOOPBACK_TOKEN", "AETHER_LIVE_MODEL_KEY")}
+    saved = {name: os.environ.get(name) for name in _ISOLATED_ENV}
     gateway: subprocess.Popen[bytes] | None = None
     job_id = ""
     try:
         child_env = os.environ.copy()
-        child_env.pop("AETHER_LIVE_MODEL_KEY", None)
-        child_env.pop("AETHER_GATEWAY_BASE", None)
+        for name in _ISOLATED_ENV:
+            child_env.pop(name, None)
+            os.environ.pop(name, None)
         child_env["AETHER_LOOPBACK_TOKEN"] = _LOOPBACK
         child_env["AETHER_LIVE_MODEL_BASE"] = f"http://127.0.0.1:{server.server_address[1]}/v1"
         gateway = subprocess.Popen(
@@ -185,24 +209,23 @@ def test_openhands_agent_edits_through_the_gateway_and_settles_tokens(client, ro
         gateway.stdin.close()
         os.environ["AETHER_GATEWAY_BASE"] = _ready(gateway)
         os.environ["AETHER_LOOPBACK_TOKEN"] = _LOOPBACK
-        os.environ.pop("AETHER_LIVE_MODEL_KEY", None)
-        owner_id, project_id, csrf = _session(client, "r8-agent-project")
+        owner_id, project_id, csrf = _session(client, f"{prefix}-project")
         task = client.post(
             f"/v1/projects/{project_id}/tasks",
-            headers=_headers(csrf, "r8-agent-task"),
+            headers=_headers(csrf, f"{prefix}-task"),
             json={"goal": "让 OpenHands 改到四十二"},
         )
         assert task.status_code == 202, task.text
         task_id = task.json()["resource_id"]
         uploaded = client.post(
             f"/v1/projects/{project_id}/artifacts",
-            headers=_headers(csrf, "r8-agent-file"),
+            headers=_headers(csrf, f"{prefix}-file"),
             files={"file": ("workspace.json", json.dumps(WORKSPACE).encode(), "application/json")},
         )
         assert uploaded.status_code == 201, uploaded.text
         created = client.post(
             f"/v1/projects/{project_id}/coding-jobs",
-            headers=_headers(csrf, "r8-agent-job"),
+            headers=_headers(csrf, f"{prefix}-job"),
             json={
                 "task_id": task_id,
                 "base_artifact_id": uploaded.json()["artifact_id"],
@@ -219,7 +242,7 @@ def test_openhands_agent_edits_through_the_gateway_and_settles_tokens(client, ro
             Database(role_urls["aether_verifier"]),
             ArtifactStore(client.app.state.settings.artifact_root, worker),
         )
-        _assert_settled(client, worker, owner_id, project_id, task_id, job_id, model)
+        _assert_settled(client, worker, owner_id, project_id, task_id, job_id, model, minimum_requests=minimum_requests)
     finally:
         if job_id:
             release_coding_container(job_id)
@@ -238,7 +261,17 @@ def test_openhands_agent_edits_through_the_gateway_and_settles_tokens(client, ro
                 os.environ[name] = value
 
 
-def _assert_settled(client, worker: Database, owner_id: str, project_id: str, task_id: str, job_id: str, model: _FakeModel) -> None:
+def _assert_settled(
+    client,
+    worker: Database,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    job_id: str,
+    model: _FakeModel,
+    *,
+    minimum_requests: int,
+) -> None:
     store = ArtifactStore(client.app.state.settings.artifact_root, worker)
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
@@ -251,7 +284,7 @@ def _assert_settled(client, worker: Database, owner_id: str, project_id: str, ta
         ).mappings().one()
         request = conn.execute(
             text(
-                "SELECT usage_status, input_tokens, output_tokens, actual_micro_usd, reserved_micro_usd "
+                "SELECT usage_status, input_tokens, output_tokens, actual_micro_usd, reserved_micro_usd, usage_detail "
                 "FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND role = 'coding'"
             ),
             {"project_id": project_id, "task_id": task_id},
@@ -275,7 +308,8 @@ def _assert_settled(client, worker: Database, owner_id: str, project_id: str, ta
     assert "return 42" not in candidate
     assert b"return 42" in patch
     assert result["edit_calls"] >= 1
-    assert result["model_requests"] >= 2
+    assert result["model_requests"] >= minimum_requests
+    assert result["agent_completed"] is True
     assert result["executor"] == "openhands.sdk.Agent"
     incoming = sum(item[0] for item in model.usages)
     outgoing = sum(item[1] for item in model.usages)
@@ -293,11 +327,15 @@ def _assert_settled(client, worker: Database, owner_id: str, project_id: str, ta
     assert "terminal" in model.tool_names
     visible = patch + result_bytes + events_bytes
     assert _PROVIDER_KEY.encode() not in visible
+    detail = request["usage_detail"]
     assert request["usage_status"] == "known"
-    assert int(request["reserved_micro_usd"]) == CODING_RESERVE_MICRO_USD
+    assert int(request["reserved_micro_usd"]) >= CODING_RESERVE_MICRO_USD
+    assert int(request["reserved_micro_usd"]) >= incoming + outgoing
     assert int(request["input_tokens"]) == incoming
     assert int(request["output_tokens"]) == outgoing
     assert int(request["actual_micro_usd"]) == incoming + outgoing
+    assert detail["book_result"] == "settled"
+    assert int(detail.get("reservation_extensions") or 0) >= 1
     assert int(account["held_micro_usd"]) == 0
     assert int(account["spent_micro_usd"]) == incoming + outgoing
     assert int(account["tokens_used"]) == incoming + outgoing

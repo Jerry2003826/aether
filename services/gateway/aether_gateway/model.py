@@ -21,6 +21,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DataError, IntegrityError
 
 from aether_domain.security import sha256_text
+from aether_storage.budget import apply_reservation_extension, reservation_can_grow
 from aether_storage.db import Database
 
 litellm.suppress_debug_info = True
@@ -33,6 +34,37 @@ SCRIPTED_PROMPT_TOKENS = 8
 SCRIPTED_COMPLETION_TOKENS = 4
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
+
+
+def coding_reservation_gap(
+    *,
+    reserved_tokens: int,
+    measured_tokens: int,
+    pending_tokens: int,
+    call_reserve_tokens: int | None,
+) -> int | None:
+    """Tokens to append so the next call fits. None means this reservation does not grow."""
+    if call_reserve_tokens is None or call_reserve_tokens < 1:
+        return None
+    allowance = max(call_reserve_tokens, CODING_CALL_OUTPUT_CAP)
+    need = measured_tokens + pending_tokens + allowance
+    if reserved_tokens >= need:
+        return 0
+    return need - reserved_tokens
+
+
+def coding_reservation_micro(tokens: int, *, call_tokens: int, call_micro: int) -> int:
+    if tokens < 1:
+        return 0
+    if call_tokens < 1 or call_micro < 1:
+        return tokens
+    return (tokens * call_micro + call_tokens - 1) // call_tokens
+
+
+def _positive_int(value: object) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        return None
+    return value
 _CHAT_FIELDS = ("model", "messages", "tools", "tool_choice")
 _CODING_LEASE_STATES = ("STARTING", "ACTIVE", "EXPORTING")
 _MAX_FENCING = 9223372036854775807
@@ -503,9 +535,9 @@ class ModelGateway:
         """Forward one coding chat completion fenced by the coding job lease.
 
         The session token stays valid for the attempt. Each call spends a new
-        one-time child grant. A repeat of that prompt is rejected, and another
-        call past the reservation is rejected before the provider. The task row
-        is not read or written.
+        one-time child grant. A repeat of that prompt is rejected. A call that
+        cannot grow inside the task budget is rejected before the provider.
+        The task row is not read or written.
         """
         grant = self._scope(job_token)
         scope = grant["scope"]
@@ -518,7 +550,23 @@ class ModelGateway:
             raise GatewayDenied("alias_denied")
         alias = model.removeprefix("openai/") or model
         prompt = chat_prompt(body)
-        max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
+        try:
+            max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
+        except GatewayDenied as exc:
+            if exc.code == "budget_exceeded":
+                self._note_admission_block(grant, exc.code)
+            self._log_relay(
+                project_id=str(grant["project_id"]),
+                status=None,
+                requested_model=model,
+                upstream_model="",
+                stream=body.get("stream") is True,
+                response_kind="",
+                incoming=None,
+                outgoing=None,
+                error=exc.code,
+            )
+            raise
         self.audit.append(f"relay project={grant['project_id']} model={model}")
         payload = upstream_chat_payload(body, max_tokens=max_tokens)
         upstream_model = str(payload.get("model") or "")
@@ -687,6 +735,14 @@ class ModelGateway:
                 fencing=fencing,
             ):
                 raise GatewayDenied("token_rejected")
+            account = conn.execute(
+                text(
+                    "SELECT id, limit_micro_usd, spent_micro_usd, held_micro_usd, token_limit, tokens_used, tokens_held, "
+                    "verification_reserve_fraction FROM budget_accounts "
+                    "WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().first()
             parent = conn.execute(
                 text(
                     "SELECT usage_status, usage_detail FROM model_requests "
@@ -711,8 +767,37 @@ class ModelGateway:
             reserved_tokens = _count(detail.get("reserved_tokens"))
             measured = _count(detail.get("measured_input_tokens")) + _count(detail.get("measured_output_tokens"))
             pending = _count(detail.get("pending_tokens"))
-            if reserved_tokens < 1 or measured + pending + CODING_CALL_OUTPUT_CAP > reserved_tokens:
-                raise GatewayDenied("budget_exceeded")
+            call_reserve = _positive_int(detail.get("call_reserve_tokens"))
+            gap = coding_reservation_gap(
+                reserved_tokens=reserved_tokens,
+                measured_tokens=measured,
+                pending_tokens=pending,
+                call_reserve_tokens=call_reserve,
+            )
+            if gap is None:
+                if reserved_tokens < 1 or measured + pending + CODING_CALL_OUTPUT_CAP > reserved_tokens:
+                    raise GatewayDenied("budget_exceeded")
+            elif gap > 0:
+                call_micro = _positive_int(detail.get("call_reserve_micro_usd")) or call_reserve or gap
+                micro = coding_reservation_micro(gap, call_tokens=call_reserve or gap, call_micro=call_micro)
+                if account is None or not reservation_can_grow(dict(account), amount=micro, tokens=gap):
+                    raise GatewayDenied("budget_exceeded")
+                apply_reservation_extension(
+                    conn,
+                    account_id=account["id"],
+                    project_id=project_id,
+                    task_id=task_id,
+                    request_key=parent_key,
+                    amount=micro,
+                    tokens=gap,
+                    detail=detail,
+                )
+                _logger().info(
+                    "coding_reserve_extended project=%s tokens=%s micro_usd=%s",
+                    project_id,
+                    gap,
+                    micro,
+                )
             detail["pending_tokens"] = pending + CODING_CALL_OUTPUT_CAP
             conn.execute(
                 text(
@@ -852,6 +937,36 @@ class ModelGateway:
                     "AND scope->>'request_key' = :request_key"
                 ),
                 {"project_id": project_id, "task_id": task_id, "request_key": child_key},
+            )
+
+    def _note_admission_block(self, session: dict[str, Any], code: str) -> None:
+        """Remember a pre-upstream budget rejection. The hold stays until measured usage is settled."""
+        project_id = str(session["project_id"])
+        task_id = str(session["task_id"])
+        parent_key = str(session["scope"]["request_key"])
+        with self.database.transaction(project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
+            ).mappings().first()
+            if row is None:
+                return
+            detail = _object_detail(row["usage_detail"])
+            detail["admission_error"] = code
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": parent_key,
+                },
             )
 
     def _add_measured_usage(self, session: dict[str, Any], result: dict[str, Any]) -> None:

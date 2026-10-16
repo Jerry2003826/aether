@@ -80,8 +80,24 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
     assert b"return 42" in _published_patch(parsed, untouched)
     assert _coding_terminal(untouched, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
     blank = _sandbox(1, requests=0)
-    assert _coding_terminal(blank, upstream_error=None, measured=None, usage_missing=False) == ("FAILED", "model_not_called")
-    assert _coding_terminal(blank, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
+    assert _coding_terminal(blank, upstream_error=None, measured=None, usage_missing=False) == ("FAILED", "agent_interrupted")
+    assert _coding_terminal(blank, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FAILED", "agent_interrupted")
+    interrupted = _sandbox(1, requests=2)
+    interrupted["result"]["agent_completed"] = False
+    assert _coding_terminal(interrupted, upstream_error=None, measured=(5626, 243), usage_missing=False) == (
+        "FAILED",
+        "agent_interrupted",
+    )
+    assert _coding_terminal(
+        interrupted,
+        upstream_error=None,
+        measured=(5626, 243),
+        usage_missing=False,
+        admission_error="budget_exceeded",
+    ) == ("FAILED", "budget_exceeded")
+    completed = _sandbox(1, requests=1)
+    completed["result"]["agent_completed"] = True
+    assert _coding_terminal(completed, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
     assert _coding_terminal(untouched, upstream_error="upstream_http_400", measured=(8, 4), usage_missing=False) == (
         "FAILED",
         "upstream_http_400",

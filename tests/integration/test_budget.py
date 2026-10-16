@@ -136,6 +136,41 @@ def test_settle_rejects_actual_above_reservation(client, api_db, role_urls) -> N
     assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["held_micro_usd"] == 15
 
 
+def test_measured_overrun_is_charged_and_the_hold_is_released(client, api_db, role_urls) -> None:
+    owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "measured-over", limit=1000, tokens=1000, fraction=0)
+    assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="over", amount=100, role="coding", tokens=100) is True
+    assert ledger.settle_measured(
+        owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="over", actual=250, input_tokens=200, output_tokens=50
+    ) == "overrun"
+    assert ledger.settle_measured(
+        owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="over", actual=250, input_tokens=200, output_tokens=50
+    ) == "overrun"
+    snapshot = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
+    assert snapshot["held_micro_usd"] == 0
+    assert snapshot["actual_known_micro_usd"] == 250
+    assert snapshot["tokens_held"] == 0
+    assert snapshot["tokens_used"] == 250
+    assert snapshot["unknown_request_count"] == 0
+    with api_db.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        row = conn.execute(
+            text("SELECT usage_status, actual_micro_usd, input_tokens, output_tokens, usage_detail FROM model_requests WHERE request_key = 'over'")
+        ).mappings().one()
+    assert row["usage_status"] == "known"
+    assert int(row["actual_micro_usd"]) == 250
+    assert int(row["input_tokens"]) == 200
+    assert int(row["output_tokens"]) == 50
+    detail = row["usage_detail"]
+    assert detail["book_result"] == "overrun"
+    assert detail["overrun_micro_usd"] == 150
+    assert detail["overrun_tokens"] == 150
+    assert detail["reconciliation"] == "recorded"
+    ledger.settle(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="over", actual=250, input_tokens=200, output_tokens=50)
+    with pytest.raises(BudgetError) as rejected:
+        ledger.settle(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="over", actual=251, input_tokens=201, output_tokens=50)
+    assert rejected.value.code == "conflicting_settlement"
+    assert ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)["actual_known_micro_usd"] == 250
+
+
 def test_verification_reserve_is_protected(client, api_db, role_urls) -> None:
     owner_id, project_id, task_id, ledger = _open(client, api_db, role_urls, "reserve", limit=100, fraction=0.2)
     assert ledger.reserve(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key="planner", amount=80, role="planner") is True

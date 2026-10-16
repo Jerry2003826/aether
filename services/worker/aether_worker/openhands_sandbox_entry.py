@@ -143,6 +143,7 @@ def _failure(detail: str) -> dict[str, object]:
         "edit_calls": 0,
         "model_requests": 0,
         "patch": "",
+        "agent_completed": False,
     }
 
 
@@ -202,7 +203,14 @@ def _patch(before: dict[str, str], root: Path) -> str:
 
 
 def _blank_report() -> dict[str, object]:
-    return {"input_tokens": 0, "output_tokens": 0, "edit_calls": 0, "model_requests": 0, "patch": ""}
+    return {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "edit_calls": 0,
+        "model_requests": 0,
+        "patch": "",
+        "agent_completed": False,
+    }
 
 
 def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], job: Path) -> dict[str, object]:
@@ -219,6 +227,7 @@ def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], j
         "edit_calls": edits,
         "model_requests": len(agent.llm.metrics.token_usages),
         "patch": _patch(before, job),
+        "agent_completed": True,
     }
 
 

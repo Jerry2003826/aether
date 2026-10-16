@@ -497,6 +497,161 @@ def test_upstream_http_errors_are_stored_without_the_provider_message(client, ro
     assert _task_status(database, owner_id, project_id, binding["task_id"]) == "WAITING_APPROVAL"
 
 
+def test_each_call_appends_a_reservation_until_the_task_cap(client, role_urls) -> None:
+    owner_id, project_id, _headers = project(client)
+    database = Database(role_urls["aether_worker"])
+    grown = _reserve_parent(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        token_limit=100_000,
+        money_limit=100_000,
+    )
+    capped = _reserve_parent(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        token_limit=5_000,
+        money_limit=5_000,
+    )
+    seen: list[int] = []
+
+    class Wide(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length") or "0")
+            self.rfile.read(length)
+            seen.append(1)
+            payload = json.dumps(
+                {
+                    "id": "chatcmpl-wide",
+                    "model": "coder-upstream",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {"prompt_tokens": 3000, "completion_tokens": 40, "total_tokens": 3040},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Wide)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    gateway = ModelGateway(
+        database,
+        upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1",
+        provider_key=_KEY,
+        timeout=5,
+    )
+    try:
+        for index in range(3):
+            gateway.relay_chat(
+                grown["token"],
+                {"model": "coder", "messages": [{"role": "user", "content": f"round-{index}"}]},
+            )
+        gateway.relay_chat(capped["token"], {"model": "coder", "messages": [{"role": "user", "content": "first"}]})
+        with pytest.raises(GatewayDenied) as blocked:
+            gateway.relay_chat(capped["token"], {"model": "coder", "messages": [{"role": "user", "content": "second"}]})
+        assert blocked.value.code == "budget_exceeded"
+        assert blocked.value.sent is False
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(seen) == 4
+    grown_row = _parent(database, owner_id, project_id, grown["task_id"])
+    assert grown_row["usage_detail"]["measured_input_tokens"] == 9000
+    assert grown_row["usage_detail"]["measured_output_tokens"] == 120
+    assert int(grown_row["usage_detail"]["reservation_extensions"]) == 2
+    assert int(grown_row["reserved_micro_usd"]) == 4096 + 3040 + 3040
+    assert _held(database, owner_id, project_id, grown["task_id"]) == 4096 + 3040 + 3040
+    capped_row = _parent(database, owner_id, project_id, capped["task_id"])
+    assert capped_row["usage_detail"]["admission_error"] == "budget_exceeded"
+    assert capped_row["usage_detail"]["measured_input_tokens"] == 3000
+    assert "reservation_extensions" not in capped_row["usage_detail"]
+    assert int(capped_row["reserved_micro_usd"]) == 4096
+    assert _held(database, owner_id, project_id, capped["task_id"]) == 4096
+
+
+def _reserve_parent(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    token_limit: int,
+    money_limit: int,
+) -> dict[str, str]:
+    workflow = f"coding-grow-{uuid.uuid4()}"
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        task_id = conn.execute(
+            text(
+                "INSERT INTO tasks (project_id, original_goal, workflow_id, status) "
+                "VALUES (:project_id, '追加预留', :workflow, 'WAITING_APPROVAL') RETURNING id::text"
+            ),
+            {"project_id": project_id, "workflow": workflow},
+        ).scalar_one()
+    ledger = BudgetLedger(database)
+    ledger.open_account(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        limit_micro_usd=money_limit,
+        token_limit=token_limit,
+        max_requests=8,
+        verification_reserve_fraction=0,
+    )
+    request_key = f"coding-grow-{uuid.uuid4().hex}"
+    assert ledger.reserve(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        amount=4096,
+        role="coding",
+        tokens=4096,
+        model_alias="coder",
+        extra_detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096},
+    )
+    fencing = 1
+    job = _leased_job(database, owner_id=owner_id, project_id=project_id, task_id=task_id, fencing=fencing)
+    gateway = ModelGateway(database, upstream_base="http://127.0.0.1", provider_key=_KEY)
+    token = gateway.issue_token(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        attempt_id=str(fencing),
+        capabilities=["coding:model"],
+        aliases=["coder"],
+        job_id=job["job_id"],
+        operation_id=job["operation_id"],
+    )
+    return {"task_id": task_id, "token": token}
+
+
+def _parent(database: Database, owner_id: str, project_id: str, task_id: str) -> dict:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        row = conn.execute(
+            text(
+                "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                "WHERE project_id = :project_id AND task_id = :task_id AND role = 'coding'"
+            ),
+            {"project_id": project_id, "task_id": task_id},
+        ).mappings().one()
+    return dict(row)
+
+
+def _held(database: Database, owner_id: str, project_id: str, task_id: str) -> int:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        held = conn.execute(
+            text("SELECT held_micro_usd FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar_one()
+    return int(held)
+
+
 def _request_rows(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, dict]:
     rows = _all_requests(database, owner_id, project_id, task_id)
     return {row["role"]: row for row in rows if row["role"] in {"coding", "coding_call"}}

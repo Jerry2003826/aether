@@ -13,16 +13,36 @@ from typing import cast
 
 from aether_gateway.__main__ import GATEWAY_CHAT_TIMEOUT_SECONDS, gateway_timeout
 from aether_gateway.model import (
+    CODING_CALL_OUTPUT_CAP,
     GatewayDenied,
     ModelGateway,
     _fencing_token,
     _uuid_text,
     accepted_chat_body,
+    coding_reservation_gap,
+    coding_reservation_micro,
     scripted_chat_completion,
 )
 from aether_worker.role_launch import _gateway_env
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
+
+def test_per_call_reserve_grows_by_the_shortfall_and_legacy_rows_do_not() -> None:
+    assert coding_reservation_gap(reserved_tokens=256, measured_tokens=5, pending_tokens=0, call_reserve_tokens=None) is None
+    assert coding_reservation_gap(reserved_tokens=4096, measured_tokens=0, pending_tokens=0, call_reserve_tokens=4096) == 0
+    assert coding_reservation_gap(reserved_tokens=4096, measured_tokens=2800, pending_tokens=0, call_reserve_tokens=4096) == 2800
+    assert (
+        coding_reservation_gap(
+            reserved_tokens=4096,
+            measured_tokens=2800,
+            pending_tokens=CODING_CALL_OUTPUT_CAP,
+            call_reserve_tokens=4096,
+        )
+        == 2800 + CODING_CALL_OUTPUT_CAP
+    )
+    assert coding_reservation_micro(2800, call_tokens=4096, call_micro=4096) == 2800
+    assert coding_reservation_micro(1, call_tokens=4096, call_micro=8192) == 2
+
 
 _KEY = "gateway-provider-key"
 _JOB = "job-token-unit"
