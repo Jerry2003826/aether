@@ -4,7 +4,11 @@
 
 把网页、RSS、PDF、代码仓库、MCP响应、第三方skill和LLM输出全部视为不可信。攻击可能诱导泄露API key、读取其他项目、修改验收/日志、扩大权限、反复花钱、运行恶意依赖或伪造完成报告。提示词过滤只能辅助，不是边界；隔离容器也不是无条件安全承诺。
 
-评分器的父进程以 root 运行，从不导入候选代码。它先静态解析受信套件得到测试清单，再降权到 nobody（`no-new-privileges`）跑 pytest，JUnit 报告写到随机路径。pytest 返回后杀掉降权用户的残留进程，再读报告：至少一个用例，没有失败、错误或跳过，清单里每个测试都通过，并且退出码为 0。宿主只接受恰好一行 `ISOLATION` 和一行 `GRADE`；降权进程打不开父进程的标准输出，伪造的 `N passed` 或抢先写入都不会被当成结论。剩余风险：候选仍与 pytest 同进程，被 import 时若改写 pytest 内部的结果对象，JUnit 仍可能把失败记成通过；跳过或少跑测试会被清单核对挡住，这类改写挡不住，要靠断言与候选分进程才能消除。容器边界本身也不是对恶意代码的无条件承诺。
+评分器的父进程以 root 运行，从不导入候选代码。能归约成输入/输出协议的套件（每个断言都是候选探针与字面期望值的相等比较）由父进程持有断言和期望值。期望值不进入子进程、不写入 `protocol.json`。降权到 nobody 的子进程只计算探针并返回值，不跑 pytest。套件目录在子进程启动前收成 nobody 不可读；子进程若仍能打开套件、提前退出或返回值对不上，结果都是 FAIL。这种通过可以记为安全认证（`security_certified`），但评分结果的 `auto_promote` 恒为 false，不能据此自动发布。
+
+任意 import 式白盒 pytest 仍与候选同一个解释器。它只验证合作代码：即便 JUnit 看起来通过，评分也不是 PASS，`trust` 为 `cooperative`，`security_certified` 为 false，不能自动发布。宿主只接受恰好一行 `ISOLATION` 和一行 `GRADE`。容器内的 `os.kill(-1, SIGKILL)` 只作为该容器 PID 1 清理本命名空间的残留进程，禁止在宿主机执行。
+
+未覆盖、也不能称为已修复：容器逃逸、ptrace 父进程、候选猜中期望值、以及不能归约成字面协议的白盒断言。容器边界本身也不是对恶意代码的无条件安全承诺。
 
 可信域：owner身份系统、policy/tool registry、gateway、runner-manager、verifier控制进程、release evaluator。应用开发者能修改这些代码，因此自我进化只允许改skill/受限workflow DSL，不允许Agent自动替换可信控制代码。
 
