@@ -21,7 +21,7 @@ gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
 
 进度：编码作业由 OpenHands Agent 生成补丁。`relay_chat` 用编码作业的 fencing 和 operation 租约做一次一票，不改 `tasks.status`。聊天补全忽略请求体 timeout，只转发白名单字段。协议判定前用基线测试覆盖副本并核对哈希。模型套接字是属主权限加 uid 65534 的 POSIX ACL。编码容器的工作目录不再是 `/tmp`。沙箱策略仍手写，内存和 swap 上限是 805306368。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 仍是 true。`live_ready` 仍是 pending。
 
-结果：2026-10-16 冻结检查通过（`api_operations` 50），参考套件 76 OK（1.375s），单元 321 passed、1 warning（40.74s）。这次没有跑 Gitleaks。本机没有 Docker、Postgres 和 Temporal，作业租约集成测试、OpenHands 容器集成测试、web typecheck 和 doctor 没有跑。`origin/main` 在这次本地检查时仍按 `13bc096` 记录，推送前再核对。
+结果：2026-10-16 本地冻结检查通过（`api_operations` 50），参考套件 76 OK（1.375s），单元 321 passed、1 warning（40.74s）。本机没有 Docker、Postgres 和 Temporal。`9dbe90b` 的 CI 已通过：pack-and-unit、integration（385 passed）、SonarCloud。workflow `38969500944` 与 `38969494717`。`origin/main` 仍是 `13bc096`。没有合并。
 
 修正：入口不再挡住 LLM 栈。`file_editor` 和 `terminal` 由 Agent 调用。容器只挂一个模型 Unix socket。没有用量时 `mark_unknown`，不再按 0 结算。套接字不再对 other 开放。桥接半关闭不再从 `finally` 返回。
 
