@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import os
 import sys
 import time
 import uuid
@@ -28,6 +27,7 @@ from tests.integration.test_worker_process import (
     ROOT,
     _headers,
     _port,
+    _service_env,
     _start,
     _stop,
     _temporal_address,
@@ -81,25 +81,14 @@ def test_public_entry_reaches_a_terminal_state(role_urls, clean_db, tmp_path: Pa
     index_root = tmp_path / "indexes"
     secret_path = ROOT / "secrets" / f"sys01-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(secret_path)
-    env = os.environ.copy()
-    env.update(
-        {
-            "AETHER_DATABASE_URL": role_urls["aether_api"],
-            "AETHER_WORKER_DATABASE_URL": role_urls["aether_worker"],
-            "AETHER_VERIFIER_DATABASE_URL": role_urls["aether_verifier"],
-            "AETHER_DISPATCHER_DATABASE_URL": role_urls["aether_dispatcher"],
-            "AETHER_TEMPORAL_ADDRESS": address,
-            "AETHER_ARTIFACT_ROOT": str(artifact_root),
-            "AETHER_INDEX_ROOT": str(index_root),
-            "AETHER_TASK_QUEUE": queue,
-            "AETHER_INTAKE_PAUSE_SECONDS": "0",
-            "AETHER_RESEARCH_PROVIDER": "scripted",
-            "AETHER_BIND_HOST": "127.0.0.1",
-            "AETHER_API_PORT": str(api_port),
-            "AETHER_BOOTSTRAP_PATH": str(secret_path),
-            "AETHER_ORIGINS": ORIGIN_VALUE,
-            "AETHER_COOKIE_SECURE": "",
-        }
+    env = _service_env(
+        role_urls,
+        address=address,
+        api_port=api_port,
+        queue=queue,
+        artifact_root=artifact_root,
+        secret_path=secret_path,
+        index_root=index_root,
     )
     api_logs: list[str] = []
     worker_logs: list[str] = []

@@ -53,6 +53,44 @@ def _headers(csrf: str, key: str) -> dict[str, str]:
     return {**ORIGIN, "X-CSRF-Token": csrf, "Idempotency-Key": key}
 
 
+def _service_env(
+    role_urls: dict[str, str],
+    *,
+    address: str,
+    api_port: int,
+    queue: str,
+    artifact_root: Path,
+    secret_path: Path,
+    index_root: Path | None = None,
+    intake_pause_seconds: str = "0",
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    env = os.environ.copy()
+    env.update(
+        {
+            "AETHER_DATABASE_URL": role_urls["aether_api"],
+            "AETHER_WORKER_DATABASE_URL": role_urls["aether_worker"],
+            "AETHER_VERIFIER_DATABASE_URL": role_urls["aether_verifier"],
+            "AETHER_DISPATCHER_DATABASE_URL": role_urls["aether_dispatcher"],
+            "AETHER_TEMPORAL_ADDRESS": address,
+            "AETHER_ARTIFACT_ROOT": str(artifact_root),
+            "AETHER_TASK_QUEUE": queue,
+            "AETHER_INTAKE_PAUSE_SECONDS": intake_pause_seconds,
+            "AETHER_RESEARCH_PROVIDER": "scripted",
+            "AETHER_BIND_HOST": "127.0.0.1",
+            "AETHER_API_PORT": str(api_port),
+            "AETHER_BOOTSTRAP_PATH": str(secret_path),
+            "AETHER_ORIGINS": ORIGIN_VALUE,
+            "AETHER_COOKIE_SECURE": "",
+        }
+    )
+    if index_root is not None:
+        env["AETHER_INDEX_ROOT"] = str(index_root)
+    if extra:
+        env.update(extra)
+    return env
+
+
 def test_dispatcher_leaves_console_commands_pending(client, api_db, role_urls) -> None:
     from tests.integration.test_artifacts import _project
 
@@ -145,24 +183,14 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
     artifact_root = tmp_path / "artifacts"
     secret_path = ROOT / "secrets" / f"audit-worker-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(secret_path)
-    env = os.environ.copy()
-    env.update(
-        {
-            "AETHER_DATABASE_URL": role_urls["aether_api"],
-            "AETHER_WORKER_DATABASE_URL": role_urls["aether_worker"],
-            "AETHER_VERIFIER_DATABASE_URL": role_urls["aether_verifier"],
-            "AETHER_DISPATCHER_DATABASE_URL": role_urls["aether_dispatcher"],
-            "AETHER_TEMPORAL_ADDRESS": address,
-            "AETHER_ARTIFACT_ROOT": str(artifact_root),
-            "AETHER_TASK_QUEUE": queue,
-            "AETHER_INTAKE_PAUSE_SECONDS": "4",
-            "AETHER_RESEARCH_PROVIDER": "scripted",
-            "AETHER_BIND_HOST": "127.0.0.1",
-            "AETHER_API_PORT": str(api_port),
-            "AETHER_BOOTSTRAP_PATH": str(secret_path),
-            "AETHER_ORIGINS": ORIGIN_VALUE,
-            "AETHER_COOKIE_SECURE": "",
-        }
+    env = _service_env(
+        role_urls,
+        address=address,
+        api_port=api_port,
+        queue=queue,
+        artifact_root=artifact_root,
+        secret_path=secret_path,
+        intake_pause_seconds="4",
     )
     api_logs: list[str] = []
     worker_logs: list[str] = []
@@ -251,24 +279,14 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
     artifact_root = tmp_path / "artifacts"
     secret_path = ROOT / "secrets" / f"audit-control-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(secret_path)
-    env = os.environ.copy()
-    env.update(
-        {
-            "AETHER_DATABASE_URL": role_urls["aether_api"],
-            "AETHER_WORKER_DATABASE_URL": role_urls["aether_worker"],
-            "AETHER_VERIFIER_DATABASE_URL": role_urls["aether_verifier"],
-            "AETHER_DISPATCHER_DATABASE_URL": role_urls["aether_dispatcher"],
-            "AETHER_TEMPORAL_ADDRESS": address,
-            "AETHER_ARTIFACT_ROOT": str(artifact_root),
-            "AETHER_TASK_QUEUE": queue,
-            "AETHER_INTAKE_PAUSE_SECONDS": "4",
-            "AETHER_RESEARCH_PROVIDER": "scripted",
-            "AETHER_BIND_HOST": "127.0.0.1",
-            "AETHER_API_PORT": str(api_port),
-            "AETHER_BOOTSTRAP_PATH": str(secret_path),
-            "AETHER_ORIGINS": ORIGIN_VALUE,
-            "AETHER_COOKIE_SECURE": "",
-        }
+    env = _service_env(
+        role_urls,
+        address=address,
+        api_port=api_port,
+        queue=queue,
+        artifact_root=artifact_root,
+        secret_path=secret_path,
+        intake_pause_seconds="4",
     )
     api_logs: list[str] = []
     worker_logs: list[str] = []
