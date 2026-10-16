@@ -17,12 +17,14 @@ from temporalio.worker import Worker
 
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
+from aether_worker.coding_jobs import execute_queued_coding_jobs
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
 from aether_worker.memory import apply_memory_commands
 from aether_worker.pending_jobs import execute_queued_ingestions
+from aether_worker.skill_execute import execute_pending_skill_evaluations
 from aether_worker.tool_gateway import dispatch_approved_tools
 from aether_worker.project_registry import load_projects, save_projects
 from aether_worker.watch_tick import run_watch_tick
@@ -62,7 +64,7 @@ def route_pending(
     if seen is not None and remembered != before:
         save_projects(root, remembered)
     if not _defer_progress():
-        _execute_remembered(remembered, worker, store, root)
+        _execute_remembered(remembered, worker, verifier, store, root)
 
 
 def _pending_command_rows(dispatcher: Database) -> list[Any]:
@@ -113,7 +115,13 @@ def _apply_grouped(
             print(f"aether-route-failed project={project_id} error={type(exc).__name__}", flush=True)
 
 
-def _execute_remembered(remembered: dict[str, str], worker: Database, store: ArtifactStore, root: Path) -> None:
+def _execute_remembered(
+    remembered: dict[str, str],
+    worker: Database,
+    verifier: Database,
+    store: ArtifactStore,
+    root: Path,
+) -> None:
     for project_id, owner_id in remembered.items():
         try:
             execute_queued_ingestions(worker, store, owner_id=owner_id, project_id=project_id, index_root=root)
@@ -123,6 +131,14 @@ def _execute_remembered(remembered: dict[str, str], worker: Database, store: Art
             dispatch_approved_tools(worker, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
             print(f"aether-tool-failed project={project_id} error={type(exc).__name__}", flush=True)
+        try:
+            execute_queued_coding_jobs(worker, store, owner_id=owner_id, project_id=project_id)
+        except Exception as exc:
+            print(f"aether-coding-failed project={project_id} error={type(exc).__name__}", flush=True)
+        try:
+            execute_pending_skill_evaluations(verifier, worker, store, owner_id=owner_id, project_id=project_id)
+        except Exception as exc:
+            print(f"aether-skill-eval-failed project={project_id} error={type(exc).__name__}", flush=True)
 
 
 def _defer_progress() -> bool:

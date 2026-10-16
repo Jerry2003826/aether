@@ -1,8 +1,26 @@
-# P2-09 复核出口、所有者批准、活动时间与工作流投递
+# R7-1 编码作业与技能评测
 
-任务：从 `6f223f7` 做本路六项。ADR-F34 已被 PR #24 占用，决定记为 ADR-F35。NEEDS_REVIEW 有所有者出口；worker 不以所有者名义自动批准；active elapsed 不计排队、审批、暂停和复核；工作流可结束并 continue-as-new，ID 复用为 REJECT_DUPLICATE，投递有租约；审批失败不把幂等键留在 0；超额可对账；已成功任务的答案和验收报告不能删除。
+任务：实现编码作业和 `skill.evaluate`，去掉第六轮对这两条入口的 422 `unsupported`。变基到 `origin/main` `6f223f7` 之后，ADR-F34 属于已合入的公开采集路，本路决定改为 ADR-F35。ADR-F33 的 Watch 循环保留。
 
-相关合同：不改 `contracts/`、`reference/` 或验收标准。不把 `live_ready` 改成 passed。不新增 OpenAPI 操作。没有预批准模板登记，因此不实现低风险自动批准。
+相关合同：不改 `contracts/`、`reference/`、验收门槛。`coding_jobs.state` 的成功值保持冻结的 `FINISHED`。不把 `live_ready` 改成 passed。不改 ADR-F34 的采集、工具和检索行为。
+
+拟改路径：
+
+- `services/api/aether_api/console_routes.py`
+- `services/worker/aether_worker/console_commands.py`
+- `services/worker/aether_worker/service.py`（采集和已批准工具之后跑编码作业与技能评测）
+- `services/worker/aether_worker/coding_jobs.py`
+- `services/worker/aether_worker/coding_sandbox.py`
+- `services/worker/aether_worker/coding_workspace.py`
+- `services/worker/aether_worker/bundle_files.py`
+- `services/worker/aether_worker/skill_execute.py`
+- `services/worker/aether_worker/skill_dataset.py`
+- `services/worker/aether_worker/skill_metrics.py`
+- `services/worker/aether_worker/skill_eval.py`（评测 id 与 manifest 状态）
+- `apps/web/app/code/page.tsx`、`apps/web/app/console/page.tsx`
+- `docs/08_api_ui.md`、`docs/DECISIONS.md` 与由此重建的 `MASTER_SPEC.md`
+- `tests/unit/test_coding_skill_pipeline.py`、`tests/unit/test_api_ui_doc.py`
+- `tests/integration/test_r7_coding_skill.py`、`test_console_api.py`、`test_console_records.py`、`test_console_browser.py`、`test_sys01_entry.py`
 
 测试命令：
 
@@ -10,12 +28,12 @@
 uv run --locked --no-build python scripts/verify_freeze.py
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
 uv run --locked --no-build pytest -q tests/unit
-AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
-  uv run --locked --no-build pytest -q tests/integration
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration
+(cd apps/web && pnpm typecheck)
 ```
 
-进度：产品路径和本路测试已接上。先失败的用例是 `test_worker_does_not_approve_the_contract_as_the_owner`：没有批准时不得写入 `goal_contracts.approved_by`。
+进度：变基冲突已按「保留 ADR-F34 的采集与工具，编码决定改记 ADR-F35」处理。变基后的全量还没有重跑。
 
-结果：冻结检查通过。参考套件 76。单元 231 passed。集成 320 passed、38 failed、1 warning。38 条失败都是本机没有 Docker、Playwright Chromium 和 Hermes，没有 skip。本路定向 16 passed，worker 进程、p0 批准和历史回放 13 passed。
+结果：变基前全量通过过。变基后的次数还没有。
 
-阻塞：本机缺 Docker、浏览器和 Hermes，交给 CI。不改 `live_ready`。已被终止且任务尚未终态的 workflow 不会重新启动。
+阻塞：不启动 OpenHands，也不在沙箱里调用模型。取消确认和 TTL 回收还没有进这一笔。`live_ready` 保持 pending。

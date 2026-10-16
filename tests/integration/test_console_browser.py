@@ -4,7 +4,6 @@ import socket
 import subprocess
 import threading
 import time
-import uuid
 from pathlib import Path
 
 import httpx
@@ -120,23 +119,60 @@ def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db
             expect(page.get_by_text(HTML)).to_be_visible()
             assert page.locator("img").count() == 0
             page.get_by_role("button", name="技能").click()
-            expect(page.get_by_text("技能评测不支持，不会进入排队，也不能据此晋升。")).to_be_visible()
+            expect(page.get_by_text("评测由独立评分器写入终态。受理不是通过，证据不足不会晋升。")).to_be_visible()
             code = desktop.new_page()
             code.goto(f"{web_origin}/code", wait_until="networkidle")
-            expect(code.get_by_text("编码作业不支持。这个页面提交后会显示 unsupported，不会把它显示成已排队。")).to_be_visible()
+            expect(code.get_by_text("提交只表示已受理。沙箱断网、只读、限资源。终态是 FINISHED 或 FAILED，失败后可以用同一作业键重试。")).to_be_visible()
+            refreshed = code.request.get(f"{web_origin}/v1/auth/session")
+            assert refreshed.ok, refreshed.text()
+            csrf = refreshed.json()["csrf_token"]
+            task = code.request.post(
+                f"{web_origin}/v1/projects/{project_id}/tasks",
+                headers={
+                    "X-CSRF-Token": csrf,
+                    "Idempotency-Key": "browser-code-task",
+                    "Origin": web_origin,
+                    "Content-Type": "application/json",
+                },
+                data=json.dumps({"goal": "改一处"}),
+            )
+            assert task.ok, task.text()
+            uploaded = code.request.post(
+                f"{web_origin}/v1/projects/{project_id}/artifacts",
+                headers={
+                    "X-CSRF-Token": csrf,
+                    "Idempotency-Key": "browser-code-file",
+                    "Origin": web_origin,
+                },
+                multipart={
+                    "file": {
+                        "name": "base.json",
+                        "mimeType": "application/json",
+                        "buffer": json.dumps(
+                            {
+                                "kind": "aether.coding_workspace",
+                                "base_files": {"app.py": "def value():\n    return 0\n"},
+                                "files": {"app.py": "def value():\n    return 1\n"},
+                                "tests": {"test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 1\n"},
+                            }
+                        ).encode(),
+                    }
+                },
+            )
+            assert uploaded.ok, uploaded.text()
             code.get_by_label("项目编号").fill(project_id)
-            code.get_by_label("任务编号").fill(str(uuid.uuid4()))
-            code.get_by_label("基线产物").fill(str(uuid.uuid4()))
+            code.get_by_label("任务编号").fill(task.json()["resource_id"])
+            code.get_by_label("基线产物").fill(uploaded.json()["artifact_id"])
             code.get_by_label("作业键").fill("edit")
             code.get_by_label("目标").fill("改一处")
             code.get_by_role("button", name="提交编码作业").click()
-            expect(code.get_by_role("status")).to_have_text("编码作业不支持，不会进入排队。")
+            expect(code.get_by_role("status")).to_have_text("作业已排队，还没有通过结果。")
             mobile = browser.new_context(viewport={"width": 390, "height": 800})
             narrow = mobile.new_page()
             narrow.goto(f"{web_origin}/console", wait_until="networkidle")
             expect(narrow.get_by_role("button", name="总览")).to_be_visible()
             narrow.goto(f"{web_origin}/code", wait_until="networkidle")
-            expect(narrow.get_by_text("编码作业不支持。这个页面提交后会显示 unsupported，不会把它显示成已排队。")).to_be_visible()
+            expect(narrow.get_by_text("提交只表示已受理。沙箱断网、只读、限资源。终态是 FINISHED 或 FAILED，失败后可以用同一作业键重试。")).to_be_visible()
             narrow.get_by_role("button", name="提交编码作业").click()
             expect(narrow.get_by_role("status")).to_have_text("还没有登录。")
             page.context.set_offline(True)

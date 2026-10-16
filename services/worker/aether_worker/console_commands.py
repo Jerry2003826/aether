@@ -29,8 +29,10 @@ _KINDS = (
     "watch.delete",
     "connector.register",
     "coding.create",
+    "coding.retry",
 )
 _VERIFIER_KINDS = ("evaluation.create", "skill.evaluate")
+_QUEUED_EVALUATION_KINDS = ("evaluation.create",)
 CONSOLE_KINDS = _KINDS
 VERIFIER_KINDS = _VERIFIER_KINDS
 _FORBIDDEN_SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
@@ -94,7 +96,7 @@ def apply_verifier_commands(database: Database, *, owner_id: str, project_id: st
                 "WHERE project_id = :project_id AND kind IN :kinds AND status = 'PENDING' "
                 "ORDER BY created_at, command_key FOR UPDATE"
             ).bindparams(bindparam("kinds", expanding=True)),
-            {"project_id": project_id, "kinds": list(_VERIFIER_KINDS)},
+            {"project_id": project_id, "kinds": list(_QUEUED_EVALUATION_KINDS)},
         ).mappings().all()
         for row in rows:
             payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
@@ -148,6 +150,8 @@ def _apply(
         _connector(conn, project_id, payload)
     elif kind == "coding.create":
         _coding_create(conn, project_id, payload)
+    elif kind == "coding.retry":
+        _coding_retry(conn, project_id, payload)
     else:
         raise ConsoleCommandError("command_rejected")
 
@@ -727,6 +731,86 @@ def _coding_create(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
             "operation_id": payload["operation_id"],
             "job_key": payload["job_key"],
             "artifact_id": payload["base_artifact_id"],
+        },
+    )
+
+
+def _coding_retry(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
+    job_id = str(payload["coding_job_id"])
+    current = conn.execute(
+        text(
+            "SELECT state, fencing_token FROM coding_jobs "
+            "WHERE project_id = :project_id AND id = :id AND task_id = :task_id AND job_key = :job_key FOR UPDATE"
+        ),
+        {"project_id": project_id, "id": job_id, "task_id": payload["task_id"], "job_key": payload["job_key"]},
+    ).mappings().first()
+    if current is None:
+        raise ConsoleCommandError("job_missing")
+    if current["state"] != "FAILED":
+        if _exists(conn, "SELECT 1 FROM operations WHERE project_id = :project_id AND id = :id", project_id, str(payload["operation_id"])):
+            return
+        raise ConsoleCommandError("job_not_retryable")
+    if not _exists(
+        conn,
+        "SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL",
+        project_id,
+        str(payload["base_artifact_id"]),
+    ):
+        raise ConsoleCommandError("artifact_missing")
+    fencing = int(current["fencing_token"]) + 1
+    _insert_coding_operation(conn, project_id, payload, job_id, fencing)
+    updated = conn.execute(
+        text(
+            "UPDATE coding_jobs SET state = 'QUEUED', operation_id = :operation_id, base_artifact_id = :artifact_id, "
+            "fencing_token = :fencing, result_artifact_id = NULL, patch_artifact_id = NULL, events_artifact_id = NULL, "
+            "container_reference = NULL, last_heartbeat_at = NULL, deadline = now() + interval '1 hour' "
+            "WHERE project_id = :project_id AND id = :id AND state = 'FAILED'"
+        ),
+        {
+            "operation_id": payload["operation_id"],
+            "artifact_id": payload["base_artifact_id"],
+            "fencing": fencing,
+            "project_id": project_id,
+            "id": job_id,
+        },
+    ).rowcount
+    if updated != 1:
+        raise ConsoleCommandError("job_not_retryable")
+
+
+def _insert_coding_operation(conn: Any, project_id: str, payload: dict[str, Any], job_id: str, fencing: int) -> None:
+    arguments = {"objective": payload["objective"], "base_artifact_id": payload["base_artifact_id"], "fencing_token": fencing}
+    digest = sha256_text(json.dumps(arguments, sort_keys=True, separators=(",", ":")))
+    conn.execute(
+        text(
+            "INSERT INTO capability_grants (id, project_id, task_id, grantee_service, token_hash, capability_type, scope, expires_at, policy_version) "
+            "VALUES (:id, :project_id, :task_id, 'aether_worker', :token_hash, 'coding:execute', CAST(:scope AS jsonb), now() + interval '1 hour', 'v1')"
+        ),
+        {
+            "id": payload["capability_id"],
+            "project_id": project_id,
+            "task_id": payload["task_id"],
+            "token_hash": sha256_text(f"{job_id}:{fencing}"),
+            "scope": json.dumps({"project_id": project_id}),
+        },
+    )
+    conn.execute(
+        text(
+            "INSERT INTO operations (id, project_id, task_id, intent_key, tool_id, args_sha256, intent_digest, normalized_arguments, "
+            "resource_id, resource_version, idempotency_class, risk, capability_id, state, fencing_token) "
+            "VALUES (:id, :project_id, :task_id, :intent_key, 'coding.start', :digest, :digest, CAST(:arguments AS jsonb), "
+            ":resource_id, '1', 'idempotent_write', 'R1', :capability_id, 'PREPARED', :fencing)"
+        ),
+        {
+            "id": payload["operation_id"],
+            "project_id": project_id,
+            "task_id": payload["task_id"],
+            "intent_key": f"{job_id}:retry:{fencing}",
+            "digest": digest,
+            "arguments": json.dumps(arguments, ensure_ascii=False),
+            "resource_id": payload["base_artifact_id"],
+            "capability_id": payload["capability_id"],
+            "fencing": fencing,
         },
     )
 

@@ -378,7 +378,7 @@ export default function ConsolePage() {
                 </article>
               ))}
               <h2>评测</h2>
-              <p>技能评测不支持，不会进入排队，也不能据此晋升。</p>
+              <p>评测由独立评分器写入终态。受理不是通过，证据不足不会晋升。</p>
               {evaluations.length === 0 ? <p>还没有评测。没有样本就是证据不足，不显示增长百分比。</p> : null}
               {evaluations.map((evaluation) => (
                 <article key={evaluation.id}>

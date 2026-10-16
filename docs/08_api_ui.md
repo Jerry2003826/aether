@@ -40,7 +40,7 @@ API前缀`/v1`，JSON字段snake_case，时间UTC RFC3339；UI按Australia/Melbo
 | /v1/admin/connectors | GET/POST | owner-only registry和连接器配置；密钥仅写不可回显 |
 | /v1/admin/connectors/{connector_id}/probe | POST | 非副作用能力测试，不能自动扩大scope |
 | /v1/admin/models/probe | POST | model/tool/structured output能力与价格配置检查 |
-| /v1/projects/{project_id}/coding-jobs | POST | 不支持：返回 422，code 为 unsupported，不进入排队 |
+| /v1/projects/{project_id}/coding-jobs | POST | 受理 202。worker 在断网、只读、限资源的沙箱里跑到 FINISHED 或 FAILED；失败后同一作业键可以重试。受理不是通过 |
 
 `/v1/admin/*` 依赖 V1 只有一个所有者。已登录会话就是该所有者，这些路由因此没有第二层角色检查。支持多用户时必须先核对所有者角色，不能只凭登录态放行。第二次创建所有者会被拒绝。
 

@@ -88,6 +88,7 @@ def record_evaluation(
     metrics: dict[str, Any],
     synthetic: bool,
     report_store: ArtifactStore | None = None,
+    evaluation_id: str | None = None,
 ) -> str:
     """Record a verifier evaluation. With a report store, the report is written in the same transaction.
 
@@ -97,7 +98,7 @@ def record_evaluation(
     if split == "holdout" and purpose != "release":
         raise SkillEvalError("dataset_isolated")
     verdict = judge(metrics, synthetic=synthetic)
-    evaluation_id = str(uuid.uuid4())
+    evaluation_id = evaluation_id or str(uuid.uuid4())
     recorded = {**metrics, "synthetic": synthetic, "label": verdict["label"]}
     configuration: dict[str, Any] = {"split": split, "label": verdict["label"]}
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -178,7 +179,11 @@ def apply_verdict(database: Database, *, owner_id: str, project_id: str, version
         status = "EVALUATING"
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
-            text("UPDATE skill_versions SET status = :status WHERE project_id = :project_id AND id = :id"),
+            text(
+                "UPDATE skill_versions SET status = :status, "
+                "manifest = jsonb_set(manifest, '{status}', to_jsonb(CAST(:status AS text)), true) "
+                "WHERE project_id = :project_id AND id = :id"
+            ),
             {"status": status, "project_id": project_id, "id": version_id},
         )
     return status

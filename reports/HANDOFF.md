@@ -91,6 +91,34 @@ uv run --locked --no-build python scripts/doctor.py --require-services
 
 下一步：PR 标为 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）绿。
 
+## R7-1 编码作业与技能评测（分支 `cursor/r7-coding-jobs-skill-eval-84e7`）
+
+基线已变基到 `origin/main` 的 `6f223f7`。ADR-F34 已被公开采集那一路占用，本路编码作业和 `skill.evaluate` 的决定改为 ADR-F35。没有改 `contracts/`、`reference/`。`readiness.live_ready` 仍是 `pending`。
+
+ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F35 接替。Watch 循环仍按 ADR-F33。GitHub 与 arXiv 采集、工具账本和检索可见性按已合入的 ADR-F34，本路不改那些行为。`route_pending` 在采集之后先派发已批准工具，再跑编码作业和技能评测。成功的编码状态是冻结检查约束里的 `FINISHED`，没有 `SUCCEEDED`。
+
+编码作业：`POST /v1/projects/{id}/coding-jobs` 在任务或基线产物不存在时返回 404 `not_found`，不写 outbox。合法请求 202。worker 消费 `coding.create`，在 `python:3.12-alpine` 里跑所有者放进基线产物的候选和测试。容器断网、只读、丢掉全部 capability、`no-new-privileges`、pid 上限 64、内存和 swap 各 256MiB、1 CPU、`/tmp` 为 tmpfs、用户 65534。不挂 Docker socket，不继承 worker 环境。测试通过且网络探测不是 0、环境里没有凭证名时是 `FINISHED`，否则 `FAILED`。失败后同一任务和作业键再提交走 `coding.retry`，fencing 加一，新建 operation 和 capability。还没失败是 409 `job_not_retryable`。每次尝试在现有账本预留 1 micro-USD 和 1 token，沙箱结束后按实际 0 结算；预留之后进程失败则 `mark_unknown`，未决账单继续占用。补丁、测试结果和事件挂到任务产物。公开合同没有单独的编码作业查询。这次不启动 OpenHands，也不发作业范围的模型调用。
+
+技能评测：合法 `skill.evaluate` 返回 202，不插入不能更新的 `QUEUED` 行。`evaluation.create` 仍只插入没有分数的 `QUEUED`。verifier 按数据集清单用 SYS-02 隔离评分器逐项评分，`record_evaluation` 写不可变评测和报告。指标沿用 SYS-07。`baseline_cost` 为 0 且 `candidate_cost` 不为 0 时，在启动容器前记 `REJECTED`，`metrics` 为 NULL，`error_code` 为 `non_finite`。一个 family 是 `INSUFFICIENT_EVIDENCE`，版本变为 `EVALUATING`，不晋升。development 遇到 holdout 是 `dataset_isolated`。终态用 `GET /v1/projects/{id}/evaluations` 查询。`apply_verdict` 同时更新状态列和 `manifest.status`。
+
+有意改写的断言：
+
+- `tests/unit/test_api_ui_doc.py` 的 `test_coding_jobs_reach_a_sandbox_terminal_state`：编码说明从 unsupported 改为 202、FINISHED、FAILED。
+- `tests/integration/test_console_records.py` 的 `test_console_coding_job_matches_the_database`：真实工作区从 422 `unsupported`、零行改为 202 后 `FINISHED`，命令 `DELIVERED`，补丁含 `return 42`。目标文本仍不回显。
+- `tests/integration/test_console_api.py` 的 `test_skill_import_does_not_score_or_execute`：自带 `score` 仍是 422。合法评测从 422 `unsupported`、评测列表为空改为 202，随后 `REJECTED` 且 `metrics` 为 NULL，正文没有 Infinity 或 NaN。部署计数仍是 0，版本仍是 `QUARANTINED`。同文件里推荐 GET 不写曝光仍按 ADR-F34。
+- `tests/integration/test_sys01_entry.py` 的 `_assert_missing_jobs_are_not_queued`：随机任务、产物、技能 id 从 422 `unsupported` 改为 404 `not_found`。编码作业和评测行数仍是 0。
+- `tests/integration/test_console_browser.py` 的 `test_console_shows_real_states_and_does_not_execute_html`：页面文案改为终态说明。登录后的代码页提交真实作业，状态是「作业已排队，还没有通过结果。」刷新会轮换 CSRF，所以提交前重新读取会话。未登录的窄屏仍是「还没有登录。」
+
+变基前的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1）是 verify_freeze 通过、参考套件 76、单元 232、集成 344。变基到 `6f223f7` 之后还没有重跑全量，上面的次数不能当作变基后的结果。
+
+做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。规格第 6 节的取消确认和 TTL 回收在这一笔里还没有。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
+
+下一步：补上取消确认和 TTL 回收，重跑全量后再更新这里的命令和次数。
+
+## P2-09 公开采集、工具账本、检索可见性与只读推荐（已合入 main，ADR-F34）
+
+`github_api` 与 `arxiv_api` 由 worker 抓取并进入检索。`route_pending` 在采集之后调用 `dispatch_approved_tools`。来源删除递增 `visibility_epoch` 并丢掉该项目检索缓存。`GET /recommendations` 只读预览，不插入画像或曝光。合同未改。
+
 ## SYS-08 验收报告与 SYS-03 快照边界（分支 `cursor/r6-report-sys08-sys03-e789`）
 
 基线已变基到 `76fd71c`（PR #22，ADR-F31 归 SYS-06/04）。本分支只关闭 SYS-08 与 SYS-03，决定编号是 ADR-F32。没有改 `contracts/`、`reference/`，没有改 F26 的 `100` 判定，没有改 `reports/f26_acceptance_result.json` 的字节。协议断言仍留在父进程，记忆降级与验收条款冻结没有回退，`runner.cancel` 的撤销确认没有动。本机没有 live key。

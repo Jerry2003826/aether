@@ -267,8 +267,11 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
         _task_id(skill_id)
-        _evaluate_body(body)
-        raise ApiError(422, "unsupported", "技能评测不支持：不会受理后停在排队，也不能据此晋升")
+        stable = _evaluate_body(body)
+        _require_skill_version(app, owner, project_id, skill_id, stable["candidate_version_id"])
+        _require_artifact(app, owner, project_id, stable["dataset_manifest_id"])
+        command = {**stable, "skill_id": skill_id, "evaluation_id": str(uuid.uuid4())}
+        return _accept(app, settings, request, project_id, "skill.evaluate", stable, command, command["evaluation_id"])
 
     @app.post("/v1/projects/{project_id}/skills/{skill_id}/deployments", status_code=202, operation_id="deploySkill", responses=_ERRORS)
     def deploy_skill(project_id: str, skill_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
@@ -281,8 +284,25 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
     def create_coding_job(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
-        _coding_body(body)
-        raise ApiError(422, "unsupported", "编码作业不支持：没有会执行到终态的编码沙箱，不会受理后一直排队")
+        stable = _coding_body(body)
+        existing = _coding_target(app, owner, project_id, stable)
+        if existing is None:
+            command = {
+                **stable,
+                "coding_job_id": str(uuid.uuid4()),
+                "operation_id": str(uuid.uuid4()),
+                "capability_id": str(uuid.uuid4()),
+            }
+            return _accept(app, settings, request, project_id, "coding.create", stable, command, command["coding_job_id"])
+        if existing["state"] != "FAILED":
+            raise ApiError(409, "job_not_retryable", "这个作业还不能重试")
+        command = {
+            **stable,
+            "coding_job_id": existing["id"],
+            "operation_id": str(uuid.uuid4()),
+            "capability_id": str(uuid.uuid4()),
+        }
+        return _accept(app, settings, request, project_id, "coding.retry", stable, command, existing["id"])
 
     @app.get("/v1/projects/{project_id}/watches", operation_id="listWatches", responses=_ERRORS)
     def list_watches(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -675,6 +695,50 @@ def _deploy_body(body: dict[str, Any]) -> dict[str, Any]:
         "approval_id": str(body["approval_id"]),
         "report_sha256": digest,
     }
+
+
+def _require_artifact(app: FastAPI, owner: str, project_id: str, artifact_id: str) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": artifact_id},
+        ).first()
+    if found is None:
+        raise ApiError(404, "not_found", "产物不存在")
+
+
+def _require_skill_version(app: FastAPI, owner: str, project_id: str, skill_id: str, version_id: str) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM skill_versions WHERE project_id = :project_id AND skill_id = :skill_id AND id = :id"),
+            {"project_id": project_id, "skill_id": skill_id, "id": version_id},
+        ).first()
+    if found is None:
+        raise ApiError(404, "not_found", "技能版本不存在")
+
+
+def _coding_target(app: FastAPI, owner: str, project_id: str, body: dict[str, Any]) -> dict[str, str] | None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        task = conn.execute(
+            text("SELECT 1 FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": body["task_id"]},
+        ).first()
+        artifact = conn.execute(
+            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": body["base_artifact_id"]},
+        ).first()
+        existing = conn.execute(
+            text(
+                "SELECT id::text AS id, state FROM coding_jobs "
+                "WHERE project_id = :project_id AND task_id = :task_id AND job_key = :job_key"
+            ),
+            {"project_id": project_id, "task_id": body["task_id"], "job_key": body["job_key"]},
+        ).mappings().first()
+    if task is None or artifact is None:
+        raise ApiError(404, "not_found", "任务或基线产物不存在")
+    if existing is None:
+        return None
+    return {"id": str(existing["id"]), "state": str(existing["state"])}
 
 
 def _coding_body(body: dict[str, Any]) -> dict[str, Any]:

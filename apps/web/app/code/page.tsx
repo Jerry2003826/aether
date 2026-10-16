@@ -43,12 +43,6 @@ export default function CodeTaskPage() {
           objective,
         }),
       });
-      const code = typeof response.body === "object" && response.body !== null && "code" in response.body ? String((response.body as { code: unknown }).code) : "";
-      if (response.status === 422 && code === "unsupported") {
-        setPhase("error");
-        setMessage("编码作业不支持，不会进入排队。");
-        return;
-      }
       if (response.status !== 202) {
         setPhase("error");
         setMessage("编码作业没有接收。");
@@ -65,7 +59,7 @@ export default function CodeTaskPage() {
   return (
     <main>
       <h1>代码任务</h1>
-      <p>编码作业不支持。这个页面提交后会显示 unsupported，不会把它显示成已排队。</p>
+      <p>提交只表示已受理。沙箱断网、只读、限资源。终态是 FINISHED 或 FAILED，失败后可以用同一作业键重试。</p>
       <p>候选、验收和失败状态只来自 API。这里没有示例补丁，也没有写死的通过结果。</p>
       <p>验收绑定套件、合同和候选的哈希。候选一变，之前的通过就失效。</p>
       <ul>

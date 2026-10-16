@@ -4,8 +4,10 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 
+from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
-from aether_worker.console_commands import apply_console_commands, apply_verifier_commands
+from aether_worker.console_commands import apply_console_commands
+from aether_worker.service import route_pending
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 SHA = "b" * 64
@@ -205,13 +207,21 @@ def test_skill_import_does_not_score_or_execute(client, role_urls) -> None:
         headers=_headers(csrf, "console-skill-eval"),
         json={"candidate_version_id": version_id, "dataset_manifest_id": artifact_id, "budget": {"max_tokens": 10}},
     )
-    assert queued.status_code == 422, queued.text
-    assert queued.json()["code"] == "unsupported"
+    assert queued.status_code == 202, queued.text
+    assert queued.json()["status"] == "accepted"
     verifier = Database(role_urls["aether_verifier"])
-    apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
+    route_pending(
+        Database(role_urls["aether_dispatcher"]),
+        worker,
+        verifier,
+        ArtifactStore(client.app.state.settings.artifact_root, worker),
+    )
     evaluations = client.get(f"/v1/projects/{project_id}/evaluations")
     assert evaluations.status_code == 200
-    assert evaluations.json()["items"] == []
+    assert evaluations.json()["items"][0]["status"] == "REJECTED"
+    assert evaluations.json()["items"][0]["metrics"] is None
+    assert "Infinity" not in evaluations.text
+    assert "NaN" not in evaluations.text
     row = {"id": str(uuid.uuid4())}
     api = Database(role_urls["aether_api"])
     try:
