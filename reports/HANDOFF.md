@@ -2,34 +2,41 @@
 
 ## 系统审计第一轮 · C 组修复（分支 `cursor/sysfix-c-f4de`）
 
-基线 main `d6ed382`。审计在 PR #13（`reports/audits/system_round1/`）。本组只修 P1-07、P1-08、P1-09、P2-04、P2-06 的 SSRF 网段与 MCP argv、P2-08；其余条目由另外两组处理，本分支没有碰。每项先把复现用例移植进 `tests/` 并确认失败，再修。决定与剩余风险见 `docs/DECISIONS.md` 的 ADR-SR1-*。`STATUS.json` 的 `live_ready`、`product_engineering` 未改。
+已 rebase 到 main `80f1d39`（含 PR #14，A 组的 P0/P1-01~03 修复和 Alembic `0012_artifact_identity`）。审计在 PR #13（`reports/audits/system_round1/`）。本组只修 P1-07、P1-08、P1-09、P2-04、P2-06 的 SSRF 网段与 MCP argv、P2-08；其余条目由另外两组处理，本分支没有碰。每项先把复现用例移植进 `tests/` 并确认失败，再修。决定与剩余风险见 `docs/DECISIONS.md` 的 ADR-SR1-*。`STATUS.json` 的 `live_ready`、`product_engineering` 未改。
 
 | 条目 | 新测试 | 修复前 | 修复后 |
 | --- | --- | --- | --- |
 | P2-06 | `tests/unit/test_round1_p2_06_ssrf_and_mcp.py`（21） | 14 failed | 全过 |
 | P2-08 | `tests/integration/test_round1_p2_08_bootstrap_passwords.py`（2） | 1 failed | 全过 |
-| P1-08 | `tests/integration/test_round1_p1_08_migration_drift.py`（2） | 2 failed | 全过 |
+| P1-08 | `tests/integration/test_round1_p1_08_migration_drift.py`（3） | 全部 failed | 全过 |
 | P2-04 | `tests/integration/test_round1_p2_04_skill_lifecycle.py`（5） | 4 failed | 全过 |
 | P1-09 | `tests/integration/test_round1_p1_09_backup_restore.py`（4） | 4 failed | 全过 |
-| P1-07 | `tests/integration/test_round1_p1_07_history_replay.py`（6） | 2 failed（NondeterminismError） | 全过，连跑 3 次稳定 |
+| P1-07 | `tests/integration/test_round1_p1_07_history_replay.py`（8） | NondeterminismError | 全过 |
 
-全量回归（head `c982ec2`，本机 Postgres 17 + Temporal dev server）：
+rebase 时的处理：
+
+- 迁移改号为 `0013_runtime_patches`（down_revision `0012`），建库脚本 head 记 `0013`，`0012` 进入可升级旧标记。P1-08 增加「已在 `0012` 的库升级到 head」一例，原「已在 `0011`」一例保留。
+- `durable_workflow.py` 保留 A 的 `bounded-activity-retry`（重试上限、心跳、`ArtifactError` 不重试），改为实例方法，补丁为真时同时证明是新版本。没有这一点，80f1d39 启动、start 与 pause 同时排队的历史在 prepare 之后会被当成首个版本回放，报 NondeterminismError（已用去掉该行的代码验证）。新增 80f1d39 的两份录制历史。
+- `console_commands.py` 自动合并，A 的异常处理不变，晋升闸门在其上。
+
+全量回归（head `fce90a6`，本机 Postgres 17 + Temporal dev server）：
 
 ```text
+export AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
 uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
 uv run --locked --no-build pytest -q tests/unit                                   # 129 passed
-AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
-  uv run --locked --no-build pytest -q tests/integration                          # 257 passed, 1 failed
-PATH=.hermes/.venv/bin:$PATH ... pytest -q tests/integration/test_hermes_probe.py  # 1 passed
+PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 286 passed
 uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
 (cd apps/web && pnpm typecheck)                                                    # exit 0
-... pytest -p no:cacheprovider -rA reports/audits/system_round1/repro              # 29 failed, 18 passed
 ```
 
-integration 里那 1 条失败是 `test_hermes_probe`：本机 Hermes 装在 `.hermes/.venv/bin`，没有进 PATH（CI 由安装脚本写入 `GITHUB_PATH`），加上 PATH 后通过。合计 unit 129 + integration 258 = 387，原基线 347 + 本分支新增 40。原复现目录里属于本组的 18 条全部通过；仍失败的 29 条属于另外两组的条目。
+合计 415 = main 的 372 + 本分支 43。PR #13 的 `repro/`（main 未收录，临时放回跑）：36 passed、11 failed；本组条目的复现全部通过。失败的 10 条属于 B 组；`test_p1_02_unbounded_retry` 用 main 自己的工作流也同样失败，因为它借用的 P1-01 触发条件已被 A 修掉，任务直接 SUCCEEDED，A 的 P1-02 测试在 `tests/` 里通过。
 
-与另外两组可能冲突的地方：`docs/DECISIONS.md` 表尾、本文件开头、`MASTER_SPEC.md`；`services/worker/aether_worker/durable_workflow.py`（P1-02/P1-03 也可能改）；Alembic `0012`（若别组也新增迁移，需要重排 revision）。工作流以后任何改动都要加 patch，并在 `tests/fixtures/` 加该版本的回放夹具。
+SonarCloud：PR 之前那次失败是 abe0f5c 的新代码重复率 22.2%，来源是三份整段复制的旧版工作流代码夹具；1ba72d5 起换成录制的 JSON 事件历史，重复率 0.0%，质量门通过，没有加排除或抑制。
+
+工作流以后任何改动都要加 patch，并在 `tests/fixtures/workflow_histories/` 加该版本的录制历史。
+
 系统审计第一轮（PR #13 `reports/audits/system_round1/`）中 P1-04、P1-05、P1-06、P2-01、P2-05、P2-07 修在 `cursor/sysfix-b-d9aa`，最初基线 main `d6ed382`，PR #14（A 组）合入后已变基到 main `80f1d39`。P0、P1-01~03、P1-07~09、P2-04、P2-06、P2-08 由另外两个分支负责，本分支没有改。复现用例先作为一个提交移植进 `tests/integration/test_sysfix_*.py`，在修复前的代码上 20 个失败、8 个通过（通过的是对照组和保护性用例），之后每条一个提交。没有 skip、xfail 或放宽断言。ADR-F25 已被 A 组使用，本分支的裁决是 ADR-F26。本分支没有新增迁移。
 
 - P1-04：每次执行带 `attempt_id`。只有 `sending` 的预留才记为 unknown；`dispatched`/`permitted` 的预留由重试重新定价并接管；网关在联系供应商前拒绝时释放预留并转人工复核。测试 `test_sysfix_p1_04_unsent_reservation.py`。
