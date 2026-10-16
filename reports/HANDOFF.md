@@ -1,5 +1,61 @@
 # 交接
 
+## SYS-01 后续：PR #23 的八条 Codex 意见（分支 `cursor/r6-entry-followup-168c`）
+
+基线改为 `cfbc65d`（PR #24、PR #28 与 PR #26 已合入 main）。ADR-F34 留给 GitHub/arXiv 采集、工具账本、来源删除缓存和只读推荐。ADR-F35 留给任务流程复核。ADR-F36、ADR-F37 与 ADR-F38 留给编码作业和技能评测。八条意见里仍属于本决定的部分改记为 ADR-F39。域名白名单同时覆盖 `url`、`rss`、`github_api` 和 `arxiv_api`。GitHub 与 arXiv 的官方主机、夹具主机和不跟随重定向都保留；非官方主机仍是 `source_host_rejected`。复核出口、所有者 `approve_goal`、活动时间、continue-as-new、投递租约、幂等冲突和 `evidence_retained` 都保留。编码作业和技能评测仍按 ADR-F36 至 ADR-F38 跑到可查询终态；本决定不改这两条入口的合同和路由。没有改 `contracts/`、`reference/`，没有删断言，也没有把仍成立的断言放宽。`live_ready` 没有改。没有改 `STATUS.json`。
+
+证明用例：
+
+- 域名与重定向：`test_url_allowlist_and_redirects`。其中包含官方主机和已放行夹具主机上的 `github_api` / `arxiv_api`，未批准时是 `domain_rejected`。
+- 已批准夹具域名上的真实抓取：`test_github_and_arxiv_are_fetched_indexed_and_searchable` 仍要求两条采集 SUCCEEDED，并在请求里写上 `127.0.0.1`。
+- 连接前拒绝：`test_approved_domain_is_required_before_github_or_arxiv_connects`。夹具服务收到的请求数是 0。
+- 本地产物：`test_local_document_indexes_the_uploaded_artifact`。locator 仍是本项目产物 id。
+- 抓取失败：`test_fetch_failures_reach_a_terminal_state`。
+- 缺失引用：随机任务、产物和技能版本是 404 `not_found`，不写编码作业或评测行。合同仍要求 202、Idempotency-Key 和 CSRF。文档是 `test_skill_evaluate_cannot_be_scored_by_the_actor`。
+- 暂停与批准人：`test_activated_watch_records_the_approver_and_can_pause`。
+- 无批准人的执行：`test_runner_refuses_an_active_watch_without_an_approver`。
+- 词法检索：`test_lexical_search_ignores_a_missing_embedding_process`。
+- 来源过滤：`test_source_filter_keeps_chunks_outside_the_global_window`。
+
+Codex 的三条 P2 已接上，断言没有放宽，`live_ready` 没有改。`evaluateSkill` 与 `createCodingJob` 不再按 422 `unsupported` 验收：PR #26 的 ADR-F36 至 ADR-F38 要求它们跑到可查询终态。本决定把这两条入口的断言改成缺失引用返回 404 `not_found`、评测列表为空、编码作业和评测行数为 0，合同仍要求 202、必填 Idempotency-Key 和 CSRF。PR #26 里要求终态、取消确认和租约的断言没有放宽。
+
+- 文本 PDF 按媒体类型抽出 `Tj`/`TJ`/`'` 的正文再索引，原始字节仍按 `application/pdf` 保存。ZIP 等其他媒体是 `parse_rejected`。证明：`test_text_pdf_is_indexed_as_extracted_text`、`test_text_pdf_extracts_shown_text_and_ignores_the_container`。
+- 已暂停或已删除的跟踪在确认 schedule 不存在后，于当时的 `version` 写入 `schedule_removed`。worker 循环跳过这些行，不再每 250ms `describe`。从 ACTIVE 暂停或再次激活时清掉标记。证明：`test_stopped_schedule_is_reconciled_once`。
+- 非空 `source_ids` 只给允许的 chunk 位置累加 BM25 分，不再向检索器请求整库的 k。证明：`test_filtered_lexical_does_not_rank_the_whole_corpus`。`test_source_filter_keeps_chunks_outside_the_global_window` 仍要求被全局窗口截掉的片段能在过滤后出现。
+
+变基到 `cfbc65d` 之后的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 29.1.3，Hermes v0.22.1）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0，api_operations 50
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests in 2.038s, OK
+uv run --locked --no-build pytest -q tests/unit
+# 251 passed in 106.41s
+PATH="$HOME/.local/bin:/workspace/.hermes/.venv/bin:$PATH" \
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+  uv run --locked --no-build pytest -q tests/integration
+# 第一次：376 passed，1 failed，1 warning，511.02s
+# 失败是 test_pinned_hermes_identity_and_local_protocol，identity commit 为 None
+# 单独重跑该测试：1 passed in 12.09s
+# 全量重跑：377 passed，1 warning，485.03s
+# 没有 skip，没有 xfail
+(cd apps/web && pnpm typecheck)
+# exit 0（本机 Node 22.14.0；CI 使用 Node 24）
+```
+
+`reports/doctor.json` 的本机探测差异没有提交。
+
+变基前的头 `517cd74` 上，`pack-and-unit`、`integration` 与 SonarCloud 质量门曾通过。Cursor Security Reviewer 没有安全发现。Approval Agent 判定高风险、需要人工评审，没有代码级 P0/P1。PR #23 的八条线程已回复并附上该提交。那一轮 CI 不覆盖 `cfbc65d` 上的这次变基。
+
+头 `3a28a5f` 上的 CI 已通过。两次 workflow 都是 success：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38914706599 ：`pack-and-unit` 46s，`integration` 10m29s
+- https://github.com/Jerry2003826/aether/actions/runs/38914697785 ：`pack-and-unit` 50s，`integration` 12m9s
+- SonarCloud Code Analysis 通过：https://sonarcloud.io/dashboard?id=Jerry2003826_aether&pullRequest=25
+
+这条交接提交在 `3a28a5f` 之后。它自己的 CI 通过之前，不把新 head 记成通过。PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
+
 ## R7-1 编码作业与技能评测（分支 `cursor/r7-coding-jobs-skill-eval-84e7`）
 
 基线已变基到 `origin/main` 的 `5fa78f7`（PR #28 已合入）。ADR-F34 是公开采集，ADR-F35 是复核出口。本路编码作业和 `skill.evaluate` 改记 ADR-F36。没有改 `contracts/`、`reference/`。`readiness.live_ready` 仍是 `pending`。

@@ -117,10 +117,16 @@ def _exercise(http: httpx.Client, role_urls, worker, worker_logs: list[str], sec
     project = http.post("/v1/projects", headers=_headers(csrf, "sys01-project"), json={"name": "入口"})
     assert project.status_code == 201, project.text
     project_id = project.json()["id"]
+    uploaded = http.post(
+        f"/v1/projects/{project_id}/artifacts",
+        headers=_headers(csrf, "sys01-artifact"),
+        files={"file": ("apple.txt", APPLE.encode(), "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
     source = http.post(
         f"/v1/projects/{project_id}/sources",
         headers=_headers(csrf, "sys01-source"),
-        json={"kind": "local_document", "locator": APPLE, "allowed_domains": ["example.test"]},
+        json={"kind": "local_document", "locator": uploaded.json()["artifact_id"], "allowed_domains": ["example.test"]},
     )
     assert source.status_code == 202, source.text
     listed = _poll(

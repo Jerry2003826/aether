@@ -25,7 +25,16 @@ def authorised_search(
     index_root: Path,
     generation_id: str,
 ) -> dict[str, Any]:
-    found = search(database, owner_id=owner_id, project_id=project_id, query=query, index_root=index_root, generation_id=generation_id)
+    found = search(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        query=query,
+        index_root=index_root,
+        generation_id=generation_id,
+        mode=mode,
+        source_ids=source_ids or None,
+    )
     hits = _hits(database, owner_id=owner_id, project_id=project_id, found=found, mode=mode, limit=limit, source_ids=source_ids)
     degraded = bool(found["degraded"])
     return {

@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import hashlib
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
+import httpcore
+import httpx
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
-from aether_storage.artifacts import ArtifactStore
+from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
-from aether_worker.ingest import IngestError, attach_text_version, fetch_url, parse_rss_items
+from aether_worker.document_text import document_text
+from aether_worker.ingest import TEXT_MEDIA, IngestError, attach_text_version, fetch_url, parse_rss_items
 from aether_worker.remote_sources import arxiv_text, fetch_arxiv, fetch_github, github_text
 from aether_worker.retrieval import RetrievalError, activate_generation, build_generation
 from aether_worker.watches import trigger_watch
 
 _SUPPORTED_KINDS = {"local_document", "url", "rss", "github_api", "arxiv_api"}
+_FETCH_FAILURES = (httpx.HTTPError, httpcore.NetworkError, httpcore.ProtocolError, httpcore.TimeoutException)
 
 
 def execute_queued_ingestions(
@@ -86,7 +91,7 @@ def _run_ingestion(
             version_id = _store_source(database, store, owner_id=owner_id, project_id=project_id, source_id=str(job["source_id"]))
             _remember_version(database, owner_id=owner_id, project_id=project_id, job_id=str(job["id"]), version_id=version_id)
         _publish_index(database, store, owner_id=owner_id, project_id=project_id, index_root=index_root, job_id=str(job["id"]))
-    except (IngestError, RetrievalError, SQLAlchemyError, OSError, UnicodeError, json.JSONDecodeError) as exc:
+    except (IngestError, RetrievalError, SQLAlchemyError, OSError, UnicodeError, json.JSONDecodeError, *_FETCH_FAILURES) as exc:
         print(f"aether-ingestion-failed job={job['id']} error={_code(exc)}", flush=True)
         _finish(database, owner_id=owner_id, project_id=project_id, job_id=str(job["id"]), status="FAILED", error_code=_code(exc), version_id=version_id)
         return
@@ -95,7 +100,7 @@ def _run_ingestion(
 
 def _store_source(database: Database, store: ArtifactStore, *, owner_id: str, project_id: str, source_id: str) -> str:
     source = _load_source(database, owner_id=owner_id, project_id=project_id, source_id=source_id)
-    raw, text_value = _read_body(source)
+    raw, text_value, raw_media_type = _read_body(source, store=store, owner_id=owner_id, project_id=project_id)
     stored = attach_text_version(
         database,
         store,
@@ -104,6 +109,7 @@ def _store_source(database: Database, store: ArtifactStore, *, owner_id: str, pr
         source_id=source_id,
         raw=raw,
         text_value=text_value,
+        raw_media_type=raw_media_type,
     )
     return stored["source_version_id"]
 
@@ -112,7 +118,7 @@ def _load_source(database: Database, *, owner_id: str, project_id: str, source_i
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
             text(
-                "SELECT kind, locator, status FROM sources "
+                "SELECT kind, locator, status, approved_config FROM sources "
                 "WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"
             ),
             {"project_id": project_id, "id": source_id},
@@ -124,23 +130,30 @@ def _load_source(database: Database, *, owner_id: str, project_id: str, source_i
     return dict(row)
 
 
-def _read_body(source: dict[str, Any]) -> tuple[bytes, str]:
+def _read_body(
+    source: dict[str, Any],
+    *,
+    store: ArtifactStore,
+    owner_id: str,
+    project_id: str,
+) -> tuple[bytes, str, str]:
     kind = str(source["kind"])
     locator = str(source["locator"])
     if kind not in _SUPPORTED_KINDS:
         raise IngestError("unsupported")
     if kind == "local_document":
-        return _decoded(locator.encode())
-    if kind == "url":
-        return _decoded(fetch_url(locator))
-    if kind == "rss":
-        return _decoded("\n".join(parse_rss_items(fetch_url(locator))).encode())
+        raw, media_type = _artifact_bytes(store, owner_id=owner_id, project_id=project_id, locator=locator)
+        return raw, document_text(raw, media_type), media_type
+    domains = _allowed_domains(source)
+    if kind in {"url", "rss"}:
+        raw, text_value = _decoded(_remote_bytes(kind, locator, domains))
+        return raw, text_value, TEXT_MEDIA
     if kind == "github_api":
-        raw = fetch_github(locator)
-        return raw, github_text(raw)
+        raw = fetch_github(locator, allowed_domains=domains)
+        return raw, github_text(raw), TEXT_MEDIA
     if kind == "arxiv_api":
-        raw = fetch_arxiv(locator)
-        return raw, arxiv_text(raw)
+        raw = fetch_arxiv(locator, allowed_domains=domains)
+        return raw, arxiv_text(raw), TEXT_MEDIA
     raise IngestError("unsupported")
 
 
@@ -149,6 +162,39 @@ def _decoded(raw: bytes) -> tuple[bytes, str]:
         return raw, raw.decode("utf-8")
     except UnicodeError as exc:
         raise IngestError("parse_rejected") from exc
+
+
+def _allowed_domains(source: dict[str, Any]) -> set[str]:
+    config = source.get("approved_config")
+    if isinstance(config, str):
+        config = json.loads(config)
+    if not isinstance(config, dict):
+        return set()
+    domains = config.get("allowed_domains")
+    if not isinstance(domains, list):
+        return set()
+    return {str(item) for item in domains if isinstance(item, str)}
+
+
+def _artifact_bytes(store: ArtifactStore, *, owner_id: str, project_id: str, locator: str) -> tuple[bytes, str]:
+    try:
+        artifact_id = str(uuid.UUID(locator.strip()))
+    except ValueError as exc:
+        raise IngestError("artifact_missing") from exc
+    try:
+        data, media_type = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
+    except ArtifactError as exc:
+        raise IngestError(exc.code) from exc
+    return data, str(media_type)
+
+
+def _remote_bytes(kind: str, locator: str, domains: set[str]) -> bytes:
+    body = fetch_url(locator, allowed_domains=domains)
+    if kind == "url":
+        return body
+    if kind == "rss":
+        return "\n".join(parse_rss_items(body)).encode()
+    raise IngestError("unsupported")
 
 
 def _remember_version(database: Database, *, owner_id: str, project_id: str, job_id: str, version_id: str) -> None:
@@ -285,6 +331,8 @@ def _watermark(database: Database, *, owner_id: str, project_id: str, watch_id: 
 
 
 def _code(exc: Exception) -> str:
+    if isinstance(exc, _FETCH_FAILURES):
+        return "fetch_failed"
     code = getattr(exc, "code", None)
     if isinstance(code, str) and code:
         return code

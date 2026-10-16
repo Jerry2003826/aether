@@ -1,8 +1,19 @@
 import json
 
+import bm25s
 import pytest
 
-from aether_worker.retrieval import DIMENSION, EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, group_metrics, rrf
+from aether_worker.retrieval import (
+    DIMENSION,
+    EMBEDDING_REVISION,
+    RetrievalError,
+    _bounded_lexical,
+    _index_bm25,
+    _lexical_ids,
+    encode_texts,
+    group_metrics,
+    rrf,
+)
 from aether_worker.tokenize import tokenize
 
 
@@ -20,6 +31,30 @@ def test_rrf_counts_a_repeated_id_once_from_rank_one() -> None:
     only = rrf([["a", "b"]])
     assert only[0] == "a"
     assert rrf([[]]) == []
+
+
+def test_filtered_lexical_does_not_rank_the_whole_corpus(tmp_path, monkeypatch) -> None:
+    strong = "applepie " * 6
+    texts = [strong] * 220 + ["applepie"]
+    directory = tmp_path / "filtered"
+    _index_bm25(texts, directory)
+    ids = [f"chunk-{index}" for index in range(len(texts))]
+    calls: list[int] = []
+    original = bm25s.BM25.retrieve
+
+    def wrapped(self, *args, **kwargs):
+        if "k" in kwargs:
+            calls.append(int(kwargs["k"]))
+        elif len(args) >= 2 and isinstance(args[1], int):
+            calls.append(int(args[1]))
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(bm25s.BM25, "retrieve", wrapped)
+    found = _bounded_lexical(directory, ids, "applepie", {ids[-1]: {"id": ids[-1]}}, wide=True)
+    assert found == [ids[-1]]
+    assert calls == []
+    window = _lexical_ids(directory, ids, "applepie")
+    assert ids[-1] not in window
 
 
 def test_unknown_query_token_returns_no_lexical_hit(tmp_path) -> None:

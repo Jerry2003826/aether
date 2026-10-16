@@ -16,7 +16,7 @@ from aether_storage.db import Database
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.ingest import FIXTURE_ENV, store_text_version
 from aether_worker.retention import current_epoch, invalidate_derived, read_cached_result
-from aether_worker.retrieval import activate_generation, build_generation
+from aether_worker.retrieval import _result_key, activate_generation, build_generation
 from aether_worker.service import route_pending
 from tests.integration.test_console_api import _headers, _session
 from tests.integration.test_hybrid_retrieval import APPLE, RAIL
@@ -73,12 +73,20 @@ def test_github_and_arxiv_are_fetched_indexed_and_searchable(client, role_urls, 
         github = client.post(
             f"/v1/projects/{project_id}/sources",
             headers=_headers(csrf, "r7-github-source"),
-            json={"kind": "github_api", "locator": f"http://127.0.0.1:{port}/repos/octocat/Hello-World"},
+            json={
+                "kind": "github_api",
+                "locator": f"http://127.0.0.1:{port}/repos/octocat/Hello-World",
+                "allowed_domains": ["127.0.0.1"],
+            },
         )
         arxiv = client.post(
             f"/v1/projects/{project_id}/sources",
             headers=_headers(csrf, "r7-arxiv-source"),
-            json={"kind": "arxiv_api", "locator": f"http://127.0.0.1:{port}/api/query?id_list=1706.03762"},
+            json={
+                "kind": "arxiv_api",
+                "locator": f"http://127.0.0.1:{port}/api/query?id_list=1706.03762",
+                "allowed_domains": ["127.0.0.1"],
+            },
         )
         assert github.status_code == 202, github.text
         assert arxiv.status_code == 202, arxiv.text
@@ -170,8 +178,9 @@ def test_deleting_a_source_advances_the_epoch_and_drops_the_search_cache(client,
     )
     assert found.status_code == 200, found.text
     assert found.json()["hits"][0]["text"] == APPLE
+    cache_key = _result_key("苹果派", "hybrid", None)
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        cached = read_cached_result(conn, project_id, "苹果派", generation_id=generation_id)
+        cached = read_cached_result(conn, project_id, cache_key, generation_id=generation_id)
     assert cached is not None
     assert APPLE in str(cached)
     removed = client.delete(
@@ -182,7 +191,7 @@ def test_deleting_a_source_advances_the_epoch_and_drops_the_search_cache(client,
     apply_console_commands(database, owner_id=owner_id, project_id=project_id)
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         epoch_after = current_epoch(conn, project_id)
-        cached_after = read_cached_result(conn, project_id, "苹果派", generation_id=generation_id)
+        cached_after = read_cached_result(conn, project_id, cache_key, generation_id=generation_id)
         gone = conn.execute(
             text("SELECT deleted_at IS NOT NULL FROM chunks WHERE project_id = :project_id AND text_content = :body"),
             {"project_id": project_id, "body": APPLE},

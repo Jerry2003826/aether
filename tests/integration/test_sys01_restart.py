@@ -106,10 +106,16 @@ def _bootstrap_project(http: httpx.Client, secret: str) -> tuple[str, str, str]:
 
 
 def _create_source(http: httpx.Client, csrf: str, project_id: str, worker, logs: list[str]) -> str:
+    uploaded = http.post(
+        f"/v1/projects/{project_id}/artifacts",
+        headers=_headers(csrf, "sys01-restart-artifact"),
+        files={"file": ("apple.txt", APPLE.encode(), "text/plain")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
     source = http.post(
         f"/v1/projects/{project_id}/sources",
         headers=_headers(csrf, "sys01-restart-source"),
-        json={"kind": "local_document", "locator": APPLE, "allowed_domains": ["example.test"]},
+        json={"kind": "local_document", "locator": uploaded.json()["artifact_id"], "allowed_domains": ["example.test"]},
     )
     assert source.status_code == 202, source.text
     listed = _poll(

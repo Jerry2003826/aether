@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterator
 
 import bm25s
+import numpy as np
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -256,7 +257,7 @@ def _index_bm25(texts: list[str], destination: Path) -> None:
     retriever.save(str(destination), corpus=None, show_progress=False, leave_progress=False)
 
 
-def _lexical_ids(index_dir: Path, chunk_ids: list[str], query: str) -> list[str]:
+def _lexical_ids(index_dir: Path, chunk_ids: list[str], query: str, *, limit: int | None = None) -> list[str]:
     if not chunk_ids:
         return []
     query_tokens = [token for token in tokenize(query)]
@@ -264,7 +265,9 @@ def _lexical_ids(index_dir: Path, chunk_ids: list[str], query: str) -> list[str]
     known = [token for token in query_tokens if token in retriever.vocab_dict]
     if not known:
         return []
-    window = min(len(chunk_ids), 200)
+    window = min(len(chunk_ids), 200 if limit is None else limit)
+    if window < 1:
+        return []
     found, _scores = retriever.retrieve([known], k=window, show_progress=False, leave_progress=False)
     return [chunk_ids[int(position)] for position in found[0]]
 
@@ -484,6 +487,95 @@ def _reader(index_dir: Path) -> Iterator[None]:
         handle.close()
 
 
+def _result_key(query: str, mode: str | None, source_ids: list[str] | None) -> str:
+    if mode is None and not source_ids:
+        return query
+    return json.dumps(
+        {"mode": mode, "query": query, "sources": sorted(source_ids or [])},
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+
+
+def _dense_ids(conn: Any, project_id: str, chunk_ids: list[str], query_vector: list[float] | None) -> list[str]:
+    if not chunk_ids or query_vector is None:
+        return []
+    rows = conn.execute(
+        text(
+            "SELECT c.id::text FROM chunks c "
+            "JOIN source_versions v ON v.project_id = c.project_id AND v.id = c.source_version_id "
+            "JOIN sources s ON s.project_id = v.project_id AND s.id = v.source_id "
+            "WHERE c.project_id = :project_id AND c.id::text = ANY(:ids) "
+            "AND c.deleted_at IS NULL AND s.deleted_at IS NULL AND s.status <> 'revoked' "
+            "AND c.embedding_revision = :revision "
+            "ORDER BY c.embedding <=> CAST(:query AS vector) LIMIT :limit"
+        ),
+        {
+            "project_id": project_id,
+            "ids": chunk_ids,
+            "revision": EMBEDDING_REVISION,
+            "query": _vector_literal(query_vector),
+            "limit": TOP_K,
+        },
+    ).scalars().all()
+    return [str(chunk_id) for chunk_id in rows]
+
+
+def _bounded_lexical(index_dir: Path, manifest_ids: list[str], query: str, allowed: dict[str, dict[str, Any]], *, wide: bool) -> list[str]:
+    if wide:
+        return _filtered_lexical(index_dir, manifest_ids, query, allowed)
+    ranked = _lexical_ids(index_dir, manifest_ids, query, limit=None)
+    return [chunk_id for chunk_id in ranked if chunk_id in allowed][:TOP_K]
+
+
+def _filtered_lexical(index_dir: Path, manifest_ids: list[str], query: str, allowed: dict[str, dict[str, Any]]) -> list[str]:
+    """Score only chunk positions the caller already allowed. Do not rank the rest of the generation."""
+    positions = [index for index, chunk_id in enumerate(manifest_ids) if chunk_id in allowed]
+    if not positions:
+        return []
+    retriever = bm25s.BM25.load(str(index_dir), load_corpus=False, mmap=False)
+    token_ids = [int(token_id) for token_id in retriever.get_tokens_ids([token for token in tokenize(query)])]
+    if not token_ids:
+        return []
+    scores = _scores_at_positions(retriever, token_ids, positions)
+    order = sorted(range(len(positions)), key=lambda slot: (-scores[slot], positions[slot]))
+    return [manifest_ids[positions[slot]] for slot in order[:TOP_K]]
+
+
+def _scores_at_positions(retriever: bm25s.BM25, token_ids: list[int], positions: list[int]) -> list[float]:
+    data = retriever.scores["data"]
+    indices = retriever.scores["indices"]
+    indptr = retriever.scores["indptr"]
+    sorted_pos = np.sort(np.asarray(positions, dtype=np.int64))
+    slot_of = {int(doc): slot for slot, doc in enumerate(positions)}
+    acc = np.zeros(len(positions), dtype=np.float64)
+    for token_id in token_ids:
+        start = int(indptr[token_id])
+        end = int(indptr[token_id + 1])
+        if start == end:
+            continue
+        docs = np.asarray(indices[start:end], dtype=np.int64)
+        values = np.asarray(data[start:end], dtype=np.float64)
+        found = np.searchsorted(sorted_pos, docs)
+        clipped = np.minimum(found, len(sorted_pos) - 1)
+        matched = (found < len(sorted_pos)) & (sorted_pos[clipped] == docs)
+        if not matched.any():
+            continue
+        for doc, value in zip(docs[matched].tolist(), values[matched].tolist(), strict=True):
+            acc[slot_of[int(doc)]] += float(value)
+    return [float(item) for item in acc]
+
+
+def _order_rerank(query: str, fused: list[str], allowed: dict[str, dict[str, Any]]) -> tuple[list[str], bool]:
+    head = fused[:RERANK_HEAD]
+    try:
+        scores = rerank_scores(query, [allowed[chunk_id]["text_content"] for chunk_id in head])
+    except RetrievalError:
+        return list(fused), True
+    order = sorted(range(len(head)), key=lambda index: (-scores[index], head[index]))
+    return [head[index] for index in order], False
+
+
 def search(
     database: Database,
     *,
@@ -492,8 +584,13 @@ def search(
     query: str,
     index_root: Path,
     generation_id: str | None = None,
+    mode: str | None = None,
+    source_ids: list[str] | None = None,
 ) -> dict[str, Any]:
-    query_vector = encode_texts([query])[0]
+    lexical = mode == "lexical"
+    chosen_sources = [str(item) for item in source_ids] if source_ids else None
+    query_vector = None if lexical else encode_texts([query])[0]
+    cache_key = _result_key(query, mode, chosen_sources)
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         epoch = current_epoch(conn, project_id)
         generation = _load_generation(conn, project_id, generation_id)
@@ -503,7 +600,7 @@ def search(
             result = _empty(True, state=generation["state"])
             result["query"] = query
             return result
-        cached = read_cached_result(conn, project_id, query, generation_id=str(generation["id"]))
+        cached = read_cached_result(conn, project_id, cache_key, generation_id=str(generation["id"]))
         if cached is not None:
             return cached
         index_dir = (index_root / generation["generation_key"]).resolve()
@@ -517,43 +614,24 @@ def search(
         if manifest.get("embedding_revision") != EMBEDDING_REVISION:
             raise RetrievalError("revision_mismatch")
         visible = _visible(conn, project_id)
-        allowed = {row["id"]: row for row in visible}
-        chunk_ids = [chunk_id for chunk_id in manifest["chunk_ids"] if chunk_id in allowed]
-        index_lag = any(row["id"] not in set(manifest["chunk_ids"]) for row in visible)
-        if chunk_ids:
-            dense_rows = conn.execute(
-                text(
-                    "SELECT c.id::text FROM chunks c "
-                    "JOIN source_versions v ON v.project_id = c.project_id AND v.id = c.source_version_id "
-                    "JOIN sources s ON s.project_id = v.project_id AND s.id = v.source_id "
-                    "WHERE c.project_id = :project_id AND c.id::text = ANY(:ids) "
-                    "AND c.deleted_at IS NULL AND s.deleted_at IS NULL AND s.status <> 'revoked' "
-                    "AND c.embedding_revision = :revision "
-                    "ORDER BY c.embedding <=> CAST(:query AS vector) LIMIT :limit"
-                ),
-                {
-                    "project_id": project_id,
-                    "ids": chunk_ids,
-                    "revision": EMBEDDING_REVISION,
-                    "query": _vector_literal(query_vector),
-                    "limit": TOP_K,
-                },
-            ).scalars().all()
-        else:
-            dense_rows = []
-    dense = [str(chunk_id) for chunk_id in dense_rows]
+        selected = visible
+        if chosen_sources is not None:
+            permitted = set(chosen_sources)
+            selected = [row for row in visible if row["source_id"] in permitted]
+        allowed = {row["id"]: row for row in selected}
+        manifest_ids = [str(chunk_id) for chunk_id in manifest["chunk_ids"]]
+        chunk_ids = [chunk_id for chunk_id in manifest_ids if chunk_id in allowed]
+        index_lag = any(row["id"] not in set(manifest_ids) for row in visible)
+        dense = _dense_ids(conn, project_id, chunk_ids, query_vector)
     with _reader(index_dir):
-        bm25 = [chunk_id for chunk_id in _lexical_ids(index_dir, list(manifest["chunk_ids"]), query) if chunk_id in allowed][:TOP_K]
-        fused = rrf([bm25, dense])
-        head = fused[:RERANK_HEAD]
-        degraded = False
-        try:
-            scores = rerank_scores(query, [allowed[chunk_id]["text_content"] for chunk_id in head])
-            order = sorted(range(len(head)), key=lambda index: (-scores[index], head[index]))
-            reranked = [head[index] for index in order]
-        except RetrievalError:
-            reranked = list(fused)
-            degraded = True
+        bm25 = _bounded_lexical(index_dir, manifest_ids, query, allowed, wide=chosen_sources is not None)
+        if lexical:
+            fused = list(bm25)
+            reranked = list(bm25)
+            degraded = False
+        else:
+            fused = rrf([bm25, dense])
+            reranked, degraded = _order_rerank(query, fused, allowed)
         chosen = _select_context(reranked, allowed)
         result = {
             "stale": False,
@@ -579,7 +657,7 @@ def search(
             "index_lag": index_lag,
             "embedding_revision": EMBEDDING_REVISION,
         }
-        cache_result(project_id, epoch, query, result, generation_id=str(generation["id"]))
+        cache_result(project_id, epoch, cache_key, result, generation_id=str(generation["id"]))
         return result
 
 
