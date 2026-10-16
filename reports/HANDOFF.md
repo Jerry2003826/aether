@@ -2,7 +2,7 @@
 
 ## 系统审计第一轮 · C 组修复（分支 `cursor/sysfix-c-f4de`）
 
-已 rebase 到 main `80f1d39`（含 PR #14，A 组的 P0/P1-01~03 修复和 Alembic `0012_artifact_identity`）。审计在 PR #13（`reports/audits/system_round1/`）。本组只修 P1-07、P1-08、P1-09、P2-04、P2-06 的 SSRF 网段与 MCP argv、P2-08；其余条目由另外两组处理，本分支没有碰。每项先把复现用例移植进 `tests/` 并确认失败，再修。决定与剩余风险见 `docs/DECISIONS.md` 的 ADR-SR1-*。`STATUS.json` 的 `live_ready`、`product_engineering` 未改。
+已 rebase 到 main `bbf2811`（含 PR #14 A 组的 P0/P1-01~03 修复与 Alembic `0012_artifact_identity`，以及 PR #15 B 组的 P1-04~06、P2-01/05/07 修复）。审计在 PR #13（`reports/audits/system_round1/`）。本组只修 P1-07、P1-08、P1-09、P2-04、P2-06 的 SSRF 网段与 MCP argv、P2-08；其余条目由另外两组处理，本分支没有碰。每项先把复现用例移植进 `tests/` 并确认失败，再修。决定与剩余风险见 `docs/DECISIONS.md` 的 ADR-F27（F25、F26 已由 A、B 使用）。`STATUS.json` 的 `live_ready`、`product_engineering` 未改。
 
 | 条目 | 新测试 | 修复前 | 修复后 |
 | --- | --- | --- | --- |
@@ -18,20 +18,21 @@ rebase 时的处理：
 - 迁移改号为 `0013_runtime_patches`（down_revision `0012`），建库脚本 head 记 `0013`，`0012` 进入可升级旧标记。P1-08 增加「已在 `0012` 的库升级到 head」一例，原「已在 `0011`」一例保留。
 - `durable_workflow.py` 保留 A 的 `bounded-activity-retry`（重试上限、心跳、`ArtifactError` 不重试），改为实例方法，补丁为真时同时证明是新版本。没有这一点，80f1d39 启动、start 与 pause 同时排队的历史在 prepare 之后会被当成首个版本回放，报 NondeterminismError（已用去掉该行的代码验证）。新增 80f1d39 的两份录制历史。
 - `console_commands.py` 自动合并，A 的异常处理不变，晋升闸门在其上。
+- B 没有改工作流和迁移，bbf2811 的工作流与 80f1d39 相同，不需要新的回放历史。B 的 `docs/06_security.md` 改动与本组的 SSRF/MCP 段落自动合并。
 
-全量回归（head `fce90a6`，本机 Postgres 17 + Temporal dev server）：
+全量回归（head `0aef9e4`，本机 Postgres 17 + Temporal dev server）：
 
 ```text
 export AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
 uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
 uv run --locked --no-build pytest -q tests/unit                                   # 129 passed
-PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 286 passed
+PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 314 passed
 uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
 (cd apps/web && pnpm typecheck)                                                    # exit 0
 ```
 
-合计 415 = main 的 372 + 本分支 43。PR #13 的 `repro/`（main 未收录，临时放回跑）：36 passed、11 failed；本组条目的复现全部通过。失败的 10 条属于 B 组；`test_p1_02_unbounded_retry` 用 main 自己的工作流也同样失败，因为它借用的 P1-01 触发条件已被 A 修掉，任务直接 SUCCEEDED，A 的 P1-02 测试在 `tests/` 里通过。
+合计 443 = main 的 400 + 本分支 43。PR #13 的 `repro/`（main 未收录，临时放回跑）：46 passed、1 failed；`test_p1_02_unbounded_retry` 用 main 自己的工作流也同样失败，因为它借用的 P1-01 触发条件已被 A 修掉，任务直接 SUCCEEDED，A 的 P1-02 测试在 `tests/` 里通过。
 
 SonarCloud：PR 之前那次失败是 abe0f5c 的新代码重复率 22.2%，来源是三份整段复制的旧版工作流代码夹具；1ba72d5 起换成录制的 JSON 事件历史，重复率 0.0%，质量门通过，没有加排除或抑制。
 
