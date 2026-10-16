@@ -12,11 +12,14 @@ from aether_worker.retrieval import (
     _bounded_lexical,
     _index_bm25,
     _lexical_ids,
+    _measured,
+    _sha,
     encode_texts,
     group_metrics,
     require_tokenizer_version,
     rrf,
     search,
+    vectors_for_index,
 )
 from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
@@ -83,6 +86,20 @@ def test_wrong_embedding_revision_is_rejected(tmp_path, monkeypatch) -> None:
     with pytest.raises(RetrievalError) as rejected:
         encode_texts(["苹果派"])
     assert rejected.value.code == "revision_mismatch"
+
+
+def test_baked_pdf_phrase_is_not_measured() -> None:
+    assert _sha("苹果派烘烤说明") not in _measured()["vectors"]
+
+
+def test_unmeasured_text_does_not_start_a_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aether_worker.retrieval.embedding_runtime_ready", lambda: False)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("live encode started")
+
+    monkeypatch.setattr("aether_worker.retrieval.subprocess.run", boom)
+    assert vectors_for_index(["苹果派烘烤说明"]) is None
 
 
 def test_cache_miss_does_not_invent_a_vector(monkeypatch) -> None:

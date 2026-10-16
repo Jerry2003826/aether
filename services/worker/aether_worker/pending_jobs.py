@@ -91,6 +91,7 @@ def _run_ingestion(
         if version_id is None:
             version_id = _store_source(database, store, owner_id=owner_id, project_id=project_id, source_id=str(job["source_id"]))
             _remember_version(database, owner_id=owner_id, project_id=project_id, job_id=str(job["id"]), version_id=version_id)
+        print(f"aether-ingestion-version job={job['id']} version={version_id}", flush=True)
         _publish_index(database, store, owner_id=owner_id, project_id=project_id, index_root=index_root, job_id=str(job["id"]))
     except (IngestError, RetrievalError, SQLAlchemyError, OSError, UnicodeError, json.JSONDecodeError, *_FETCH_FAILURES) as exc:
         print(f"aether-ingestion-failed job={job['id']} error={_code(exc)}", flush=True)

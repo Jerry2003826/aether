@@ -39,6 +39,8 @@ PER_SOURCE = 2
 DEBOUNCE_SECONDS = 30
 _KEY = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
 _CACHE: tuple[object, dict[str, Any]] | None = None
+_RUNTIME_READY: bool | None = None
+_MODEL_DIR = "models--BAAI--bge-m3"
 
 
 class RetrievalError(Exception):
@@ -79,10 +81,70 @@ def _measured() -> dict[str, Any]:
     return payload
 
 
-def _encode_live(texts: list[str]) -> list[list[float]]:
+def _hub_roots() -> list[Path]:
+    roots: list[Path] = []
+    hub = os.environ.get("HUGGINGFACE_HUB_CACHE", "").strip()
+    home = os.environ.get("HF_HOME", "").strip()
+    if hub:
+        roots.append(Path(hub))
+    if home:
+        roots.append(Path(home) / "hub")
+    roots.append(Path.home() / ".cache" / "huggingface" / "hub")
+    return roots
+
+
+def _pinned_snapshot_present() -> bool:
+    for root in _hub_roots():
+        snapshot = root / _MODEL_DIR / "snapshots" / EMBEDDING_REVISION
+        if snapshot.is_dir() and any(snapshot.iterdir()):
+            return True
+    return False
+
+
+def _ml_import_offline() -> bool:
     try:
         completed = subprocess.run(
-            ["uv", "run", "--frozen", "python", "encode_texts.py"],
+            ["uv", "run", "--offline", "--frozen", "python", "-c", "import FlagEmbedding"],
+            cwd=ML_ENV,
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return completed.returncode == 0
+
+
+def embedding_runtime_ready() -> bool:
+    """True only when the pinned weights and the ML env are already on disk.
+
+    Ingestion must not download either one. A cold Hub fetch stays outside the job.
+    """
+    global _RUNTIME_READY
+    if _RUNTIME_READY is None:
+        _RUNTIME_READY = _pinned_snapshot_present() and _ml_import_offline()
+    return _RUNTIME_READY
+
+
+def vectors_for_index(texts: list[str]) -> list[list[float]] | None:
+    """Vectors for unmeasured chunks, or None when the local model cannot run.
+
+    None leaves embeddings unset. The caller still publishes the lexical index.
+    """
+    if not texts:
+        return []
+    if not embedding_runtime_ready():
+        print(f"aether-embedding-skipped reason=weights_absent count={len(texts)}", flush=True)
+        return None
+    return encode_texts(texts)
+
+
+def _encode_live(texts: list[str]) -> list[list[float]]:
+    print(f"aether-embedding-start count={len(texts)}", flush=True)
+    try:
+        completed = subprocess.run(
+            ["uv", "run", "--offline", "--frozen", "python", "encode_texts.py"],
             cwd=ML_ENV,
             input=json.dumps({"texts": texts}),
             text=True,
@@ -91,8 +153,11 @@ def _encode_live(texts: list[str]) -> list[list[float]]:
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:
+        print(f"aether-embedding-failed error={type(exc).__name__}", flush=True)
         raise RetrievalError("encode_failed") from exc
     if completed.returncode != 0 or not completed.stdout:
+        detail = (completed.stderr or "").replace("\n", " ")[-1500:]
+        print(f"aether-embedding-failed code={completed.returncode} stderr={detail}", flush=True)
         raise RetrievalError("encode_failed")
     try:
         payload = json.loads(completed.stdout)
@@ -108,6 +173,7 @@ def _encode_live(texts: list[str]) -> list[list[float]]:
         if not isinstance(vector, list) or len(vector) != DIMENSION:
             raise RetrievalError("dimension_mismatch")
         parsed.append([float(value) for value in vector])
+    print(f"aether-embedding-done count={len(parsed)}", flush=True)
     return parsed
 
 
@@ -327,8 +393,8 @@ def build_generation(
                 raise RetrievalError("empty_index")
             seen_epoch = current_epoch(conn, project_id)
             missing = [row["text_content"] for row in rows if row["embedding_revision"] != EMBEDDING_REVISION]
-            vectors = encode_texts(missing) if missing else []
-            encoded = dict(zip(missing, vectors, strict=True))
+            vectors = vectors_for_index(missing) if missing else []
+            encoded = {} if vectors is None else dict(zip(missing, vectors, strict=True))
             for row in rows:
                 if row["text_content"] not in encoded:
                     continue
