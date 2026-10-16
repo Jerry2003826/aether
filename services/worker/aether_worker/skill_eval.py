@@ -141,7 +141,7 @@ def rollback_active(
     project_id: str,
     skill_id: str,
     previous_version_id: str,
-    task_id: str,
+    task_id: str | None = None,
 ) -> dict[str, Any]:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         updated = conn.execute(
@@ -159,12 +159,14 @@ def rollback_active(
         ).rowcount
         if rolled < 1:
             raise SkillEvalError("rollback_rejected")
-        pinned = conn.execute(
-            text(
-                "SELECT content->>'skill_version_id' FROM goal_contracts "
-                "WHERE project_id = :project_id AND task_id = :task_id AND content ? 'skill_version_id' "
-                "ORDER BY contract_version DESC LIMIT 1"
-            ),
-            {"project_id": project_id, "task_id": task_id},
-        ).scalar_one()
-    return {"deployment_version_id": previous_version_id, "pinned_version_id": str(pinned), "atomic": updated == 1}
+        pinned = None
+        if task_id is not None:
+            pinned = conn.execute(
+                text(
+                    "SELECT content->>'skill_version_id' FROM goal_contracts "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND content ? 'skill_version_id' "
+                    "ORDER BY contract_version DESC LIMIT 1"
+                ),
+                {"project_id": project_id, "task_id": task_id},
+            ).scalar()
+    return {"deployment_version_id": previous_version_id, "pinned_version_id": None if pinned is None else str(pinned), "atomic": updated == 1}

@@ -460,7 +460,7 @@ Approval显示真实收件人/仓库/分支/域名、规范化参数、payload/p
 
 ## 5. SSRF与网页安全
 
-下载只接受http/https、默认80/443，无URL userinfo、无file/gopher/unix等scheme。解析并规范化IDN/IPv4/IPv6；禁止loopback、private/link-local/metadata、reserved等非公开目标（本地fixture通过单独测试配置定点允许）。每次redirect重新检查，限制跳数、请求时长、解压后body大小和content type。
+下载只接受http/https、默认80/443，无URL userinfo、无file/gopher/unix等scheme。解析并规范化IDN/IPv4/IPv6；禁止loopback、private/link-local/metadata、reserved等非公开目标，判断以“是否全局可路由”为准，100.64.0.0/10共享地址段（含其中的云厂商metadata地址）、fec0::/10 site-local以及IPv4-mapped/NAT64内嵌的上述地址同样拒绝（本地fixture通过单独测试配置定点允许）。每次redirect重新检查，限制跳数、请求时长、解压后body大小和content type。
 
 DNS检查必须与实际连接目标绑定并配合网络出口规则；“先查一次IP，再让库任意重解析”不能过安全验收。防DNS rebinding、IPv4-mapped IPv6、重定向到metadata、代理环境变量绕过、服务名称解析逃逸。HTTPX本身不提供这些授权语义；网络策略在真实容器内做探针验证。实现不了就禁用对应live网页功能，不降低测试。
 
@@ -476,7 +476,7 @@ trusted test suite只读且独立；actor无法写测试定义、评测标签或
 
 ## 7. MCP接入
 
-只有管理员添加transport和server executable/URL，禁止模型动态安装MCP server。首次拉取schema保存hash并审核；server升级或工具schema变更进入quarantine，暂停旧授权。stdio使用固定argv而非shell拼接；远程服务固定TLS和允许域名。读超时、body限制、cancel和重连必须测试。
+只有管理员添加transport和server executable/URL，禁止模型动态安装MCP server。首次拉取schema保存hash并审核；server升级或工具schema变更进入quarantine，暂停旧授权。stdio使用固定argv而非shell拼接；argv检查会拒绝shell程序、env/sudo等启动包装器和解释器的内联代码参数（如`sh -ec`、`node -e`、`python -c`），但它只是配置错误的兜底，不是安全边界，边界仍是管理员审核的可执行文件与沙箱；远程服务固定TLS和允许域名。读超时、body限制、cancel和重连必须测试。
 
 每个MCP tool映射到AETHER tool ID、风险/幂等分类与JSONschema。任何未分类工具默认deny。远程返回的instructions或“这是只读操作”不能修改分类。OAuth token仅gateway存储，按最小scope申请；未实现OAuth的provider只提供管理员配置token方式，UI如实标明。
 
@@ -706,6 +706,7 @@ index、profile、UI projection都是可重建派生数据；每次查询记录�
 ## 保留与备份
 
 默认原始模型prompt不落日志；可配置脱敏trace保留30天、task metadata90天、artifact30天、知识资料直到owner删除。所有默认值在配置可见，不是法律要求。backup单独加密，记录保留与删除到期；测试pg dump/restore及artifact hash核对。恢复后先停外部dispatch，对UNKNOWN和未完成操作对账，不能一恢复就重放全部写操作。
+备份覆盖全部业务表（schema出现未登记的表即拒绝备份/恢复），在一个可重复读快照里读取；可以在空库重建，也可以合并进在用库。合并不删除任何行或文件：缺的行补回；内容类行（项目、产物元数据、资料、记忆等）回到备份值，但备份后已删除的不复活，行内的生命周期与安全决定（记忆的 superseded 等状态、索引代的 ACTIVE/RETIRED、产物与任务产物的分类）保留当前值；账本与生命周期类行（任务、命令、审批、操作、预算、合同、验收、会话、部署等）在备份后变化的保留当前值，并在结果里列出。产物先复制一份到同级暂存目录，在副本里写回备份字节，只存在于当前目录的文件和 journal/locks 记录保留；数据库事务提交前才整体改名换入，暂存或数据库任一步失败，两边都保持原样。暂存期间需要与产物目录同等的额外磁盘空间，恢复前要停掉写产物的 worker。
 
 
 ---
@@ -773,6 +774,8 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 ## 7. 禁止默认危险的运维行为
 
 不使用`docker compose down -v`作为普通重启/升级；不自动清空DB；不把任何admin端口映射0.0.0.0；不在前端bundle注入provider key。备份恢复、数据导出、真实PR发布需要显式命令和授权。安装脚本不改机器范围防火墙/安全设置；需要这些权限的部署步骤先生成配置供owner执行/批准，并把相关验收标清。
+
+**备份恢复与 Temporal**：备份只含 AETHER 数据库与产物目录，不含 Temporal 的工作流历史。恢复点之后 Temporal 里发生的事不会随数据库回退：备份后已经完成的任务在恢复时保留当前状态（结果里列在 `kept_live_tasks`），不会被改回排队；恢复把所有 PENDING/DELIVERING 命令改成 STOPPED，不自动重新派发，由所有者核对后重新提交。在用库上恢复前先停 worker 与派发进程。重建到空库时，Temporal 若也是新的，旧工作流不存在，未完成的任务需要重新派发；Temporal 若仍是原来的，工作流仍按原历史运行。
 
 
 ---
@@ -997,6 +1000,7 @@ skills先加载name/description，再读取被选中的指令，再按需读取�
 | ADR-F24 | 多对象答案必须带主语；停发许可在真正派发前可以被取消 | 2026-10-16：PR #11 合入 `967b55f` 后 Codex 仍指出的 P1。两个对象的事实不能被没有主语的数字对上。目标拆开的每一部分要碰到自己的对象，共享的「限额」不算。控制命令排在非控制命令后面时仍要抽出来处理。`apply_task_control` 使用单独的控制线程池。派发先取得 `permitted`，暂停或取消提交后把它撤销，`consume` 失败就不再调用供应商。尚未派发就到期的预留改为释放，而不是标成 unknown。输出上限按剩余金额缩小。验收版本改为 `goal-artifact-8`。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run` |
 | ADR-F25 | 记忆 claim 不是资料；逻辑产物可以共享字节；一条坏命令不能停掉 worker；终态不能改写 | 2026-10-16：系统审计第一轮里本批负责的项。记忆 claim 使用 `memory_claim`，删除和更正会给旧字节打 tombstone，来源发现和显式名单只接受 `project_private`。显式把记忆 id 当资料会得到 `allowed_sources_invalid`，不把记忆文本送去当证据。同一 `storage_key` 的活行按分类和媒体类型区分，tombstone 不挡住以后的新行；第一次绑定仍会写 `artifacts.task_id`，以保持既有的任务引用测试。命令应用按条使用 savepoint，非暂时错误标 FAILED，`route_pending` 和 `serve` 吞掉单次失败后继续。同一任务的信号失败时，后面的命令回到 PENDING。`resume` 不清除 `cancel_requested`。公开合同哈希取自 `current_contract_id`，终态任务不能改草案。状态变化和 `task.status` 事件在同一事务里写入。事件序号在锁住任务行后分配，冲突则重试。新工作流用 `bounded-activity-retry` 把活动重试限制为 3 次并设置心跳超时，`ArtifactError` 记成 `NEEDS_REVIEW` 而不再抛出。数据库拒绝离开 SUCCEEDED、FAILED、CANCELLED。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run`。活动超时后两次尝试互相改写预算的部分留给派发状态机那一批 |
 | ADR-F26 | 未发出的预留可以接管或释放；验收只看模型当时看到的资料；评分不取自候选进程；令牌绑定账本中的单个请求；作业取消要确认容器已停 | 2026-10-16：系统审计第一轮 P1-04、P1-05、P1-06、P2-01、P2-05、P2-07，基线 `d6ed382`。每次执行带 `attempt_id`，只有 `sending` 的预留才记为 unknown；`dispatched`/`permitted` 由重试重新定价接管，网关在联系供应商前拒绝时释放并转人工复核。生成记录写入 `source_manifest`，验收器按清单重读资料，清单缺失、字节变化或提示哈希不符都是 `UNVERIFIABLE`；同一主语、单位、时段、比较关系的资料数值不同（中文数字归一化后）为 `conflicting_sources`，不判 PASS。验收版本改为 `goal-artifact-9`。评分器父进程不导入候选代码，pytest 在降权到 nobody 的子进程里跑，以退出码和随机路径 JUnit 报告为准，每个受信测试都要通过。报告的模式取自生成记录；未报用量是 unknown 并继续冻结，不判超额；LiteLLM 金额标为 `local_price_estimate` 并带 `pricing_version`。模型令牌要有 `task_id`、`request_key`、`attempt_id`，网关在同一事务核对账本后单次作废，任务停止即撤销。作业取消删除令牌和容器，核对标签下无残留才是 `confirmed`，已取消作业不再启动。不改变 `live_ready`，`comparative_evidence` 仍是 `not_run` |
+| ADR-F27 | 旧工作流历史按版本标记回放；Alembic 链与建库脚本同形；备份覆盖全部业务表、恢复只合并不删除；技能晋升绑定本次审批与评测；抓取只放行全局地址、MCP argv 拒绝 shell 与内联代码；重跑建库不轮换口令 | 2026-10-16：系统审计第一轮 P1-07、P1-08、P1-09、P2-04、P2-06（SSRF 网段与 MCP argv；终态守卫在 ADR-F25）、P2-08，基线 `bbf2811`。P1-07（任务工作流按版本标记回放旧历史）：4ba3b2f 的工作流把每条命令都当 start；75ec05b（PR #7）加控制分支、0359da5（PR #11）加 `execute-interruptible`、48281f3（PR #12）改为抽出全部控制命令，控制分支和抽取都没有 patch，4ba3b2f 时期收到过 pause 的历史回放报 `NondeterminismError`。现在新启动的工作流记 `task-command-versions`，直接用当前语义；没有该标记的历史在首个版本与之后版本分叉的点（控制命令、prepare 未就绪、prepare 后有待处理控制）依次询问编号 patch `task-command-legacy-N`：回放时保持首个版本的行为，升级后才到的命令走当前处理；`intake-pause-interruptible`、`execute-interruptible` 或 80f1d39（PR #14）的 `bounded-activity-retry` 出现即证明是之后的版本；80f1d39 在第一次 prepare 就记 `bounded-activity-retry`，所以它与 start 同时排队的控制命令也能回放。五个已发布版本各有回放夹具。剩余风险：没有任何标记能区分以下历史，它们在分叉点按首个版本回放、会报不确定性错误，只能人工 reset 或终止后重新派发——75ec05b 在接收停顿为 0 时收到的任何控制命令；0359da5 / 48281f3 在第一次 execute 之前就排队的控制命令。0359da5 与 48281f3 在「控制命令排在非控制命令之后」时的差异按 48281f3 回放。以后任何工作流改动都要加 patch 和回放夹具。任务结束后是否关闭工作流留给 P2-09。 P1-08（Alembic 链与建库脚本给出同一个库）：`0005_runtime_patches.sql`（`budget_accounts.tokens_held`、`resource_heads` 及其策略和授权）只由建库脚本执行，按 Alembic 升到 head 的库缺这些对象。新增 Alembic `0013`（接在 `0012_artifact_identity` 之后）幂等执行同一份 SQL，建库脚本把 head 记为 `0013`；已被 stamp 成 `0011` 或 `0012` 的库升级后补齐。`0013` 的降级不删对象，因为 `0011`/`0012` 时期由建库脚本建的库本来就有它们。结构比对测试保留，防止再漂移。 P1-09（备份覆盖全部业务表，恢复是不删除任何东西的合并）：原备份只有 4 张表，恢复按备份覆盖并整体替换产物目录：备份后写入的字节被删、备份后完成的任务让恢复撞上终态守卫而整体中止、新库因缺所有者等表无法重建。现在备份在可重复读只读快照里导出全部业务表，schema 出现未登记的表或外键顺序不符就拒绝；旧的 4 表备份以 `backup_tables_missing` 拒绝。恢复规则见 docs/09「保留与备份」：内容行内的生命周期与安全列（记忆状态、索引代状态、分类）保留当前值；产物先在暂存目录合并完整，数据库提交前才换入（Codex 在 PR #16 的审查意见）。限制：Temporal 状态不在备份里，见 docs/10「备份恢复与 Temporal」；在用库上恢复前先停 worker 与派发；恢复后被 STOPPED 的命令目前靠所有者核对后重新提交，还没有自动对账入口。 P2-04（技能回滚经 API 可达；晋升绑定这次晋升的审批与这个版本的评测）：回滚不再要求请求体里没有的 `task_id`：必须写明当前 canary 版本和部署版本号，目标只能是该 canary 的父版本或 active 版本，评测与审批要与该部署一致；回滚只降低暴露面，不另要审批。晋升要求评测由 verifier 写、状态 ELIGIBLE、候选正是目标版本；评测有报告产物时核对 `report_sha256`（`record_evaluation` 目前不写报告，所以这一项暂时多数不触发）。审批意图摘要必须等于 `{"action":"promote","skill_id","version_id"}` 的摘要，并在部署所在事务里写一条 `skill.promote` 操作（以一条即时撤销的 capability 记录为载体）、设置 `consumed_by_operation_id`；已被部署引用过的旧审批同样拒绝。待所有者决定（改了等于改验收条件，所以没改）：一、修复计划要求评测执行器接上之前 `skill.evaluate` 返回「未实现」，但现有 `test_console_api` 断言它排队（202、QUEUED）。二、Codex 指出回滚目标可以是从未部署过的父版本（例如导入后仍是 QUARANTINED 的 v1），未经审查的包会接到 canary 流量；但审计验收用例 `test_owner_can_roll_a_canary_back_through_the_api` 正是要求回滚到这样的 v1 成功。三、Codex 指出没有报告产物的评测会跳过 `report_sha256` 核对，任意 64 位哈希都能晋升；但同一验收用例用不写报告的 `record_evaluation` 和任意 `report_sha256` 晋升并要求成功。二、三若要收紧，需要所有者同时批准修改该验收用例（先部署 v1、由 verifier 写报告产物并传真实哈希）。 P2-06（抓取只放行全局可路由地址；MCP argv 拒绝 shell 与内联代码）：地址检查以 `is_global` 为准，并显式拒绝 100.64.0.0/10、fec0::/10，以及 IPv4 映射和 NAT64 形式的被拒地址。MCP stdio 的 argv 拒绝 shell、`env`/`sudo` 等转启动器和解释器的内联代码参数（`-c`、`-e`、`--eval` 等）。这仍是兜底，不是安全边界；修复计划要求的「只接受管理员审核过的可执行文件白名单」未在本次实现。 P2-08（重跑建库默认不轮换口令）：`ensure_database` 默认会轮换全部角色口令，升级时照 README 重跑就让在跑的服务断库。现在默认 `rotate_passwords=False`，轮换必须显式传参，README 分开写「升级重跑」和「轮换口令（先停服务）」。集成测试的会话夹具显式轮换。 |
 
 实施时确需改架构：追加日期、具体失败证据、最小变更、风险、迁移与新增/修订测试。不因个人偏好换栈；不得删除失败记录。
 

@@ -12,8 +12,8 @@ from psycopg import sql
 ROOT = Path(__file__).resolve().parents[3]
 SQL_DIR = ROOT / "migrations" / "sql"
 ROLES = ("aether_api", "aether_worker", "aether_verifier", "aether_dispatcher")
-ALEMBIC_HEAD = "0012"
-_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011")
+ALEMBIC_HEAD = "0013"
+_BEFORE_HEAD = ("0001", "0002", "0003", "0004", "0005", "0006", "0007", "0008", "0009", "0010", "0011", "0012")
 
 
 def _execute_script(conn: psycopg.Connection, path: Path) -> None:
@@ -51,7 +51,8 @@ def _stamp_alembic_head(conn: psycopg.Connection) -> None:
         conn.execute("UPDATE alembic_version SET version_num = %s", (ALEMBIC_HEAD,))
 
 
-def ensure_database(admin_url: str, database: str = "aether", *, rotate_passwords: bool = True) -> dict[str, str]:
+def ensure_database(admin_url: str, database: str = "aether", *, rotate_passwords: bool = False) -> dict[str, str]:
+    """Return URLs only for roles whose password was set here; existing roles keep theirs unless rotation is requested."""
     with psycopg.connect(admin_url, autocommit=True) as conn:
         exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone()
         if exists is None:
