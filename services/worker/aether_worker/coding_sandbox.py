@@ -27,6 +27,10 @@ CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
 LOG_CAPTURE_LIMIT = 65536
 POLL_SECONDS = 0.25
+# 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
+CODING_MEMORY_BYTES = 805306368
+CODING_SANDBOX_TIMEOUT_SECONDS = 120
+_MODEL_SOCKET = "/run/aether/proxy/model.sock"
 
 
 class CodingSandboxError(Exception):
@@ -41,11 +45,30 @@ def container_name(job_id: str) -> str:
     return f"aether-code-{token}"
 
 
-def container_arguments(workspace: Path, image: str, *, job_id: str | None = None) -> list[str]:
+def container_arguments(
+    workspace: Path,
+    image: str,
+    *,
+    job_id: str | None = None,
+    proxy_dir: Path | None = None,
+    job_token: str | None = None,
+) -> list[str]:
     """Flags only. The caller supplies docker and does not inherit the worker environment."""
     labels: list[str] = []
     if job_id is not None:
         labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding"]
+    proxy: list[str] = []
+    if proxy_dir is not None and job_token:
+        proxy = [
+            "-e",
+            f"AETHER_MODEL_SOCKET={_MODEL_SOCKET}",
+            "-e",
+            f"AETHER_JOB_TOKEN={job_token}",
+            "-e",
+            "AETHER_MODEL_ALIAS=openai/coder",
+            "-v",
+            f"{proxy_dir.resolve()}:/run/aether/proxy:rw",
+        ]
     return [
         "run",
         *labels,
@@ -59,19 +82,23 @@ def container_arguments(workspace: Path, image: str, *, job_id: str | None = Non
         "--pids-limit",
         "64",
         "--memory",
-        "268435456",
+        str(CODING_MEMORY_BYTES),
         "--memory-swap",
-        "268435456",
+        str(CODING_MEMORY_BYTES),
         "--cpus",
         "1",
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,mode=1777",
+        "--workdir",
+        "/tmp",
         "--user",
         "65534:65534",
         "-e",
         "HOME=/tmp",
         "-e",
         "TMPDIR=/tmp",
+        "-e",
+        "XDG_CACHE_HOME=/tmp",
         "-e",
         "PYTHONDONTWRITEBYTECODE=1",
         "-e",
@@ -80,6 +107,7 @@ def container_arguments(workspace: Path, image: str, *, job_id: str | None = Non
         "PATH=/usr/local/bin:/usr/bin:/bin:/opt/openhands/.venv/bin",
         "-e",
         "OPENHANDS_SUPPRESS_BANNER=1",
+        *proxy,
         "-v",
         f"{workspace.resolve()}:/work:ro",
         image,
@@ -123,6 +151,7 @@ def read_bounded_tail(stream: BinaryIO, limit: int) -> str:
 
 
 def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
+    """Both streams come back from the Docker SDK. An empty stream is b'', not a missing pipe."""
     if worker_delegates():
         try:
             return remote_logs(target, limit, timeout=60)
@@ -170,8 +199,10 @@ def run_coding_sandbox(
     workspace: Path,
     *,
     image: str = JOB_IMAGE,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = CODING_SANDBOX_TIMEOUT_SECONDS,
     job_id: str | None = None,
+    proxy_dir: Path | None = None,
+    job_token: str | None = None,
     stop_requested: Callable[[], bool] | None = None,
     deadline_reached: Callable[[], bool] | None = None,
     on_poll: Callable[[], None] | None = None,
@@ -181,7 +212,7 @@ def run_coding_sandbox(
     if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
         raise CodingSandboxError("sandbox_unavailable")
     chosen = job_id or str(uuid.uuid4())
-    _ensure_started(workspace, image, chosen)
+    _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token)
     return _wait_until_stopped(
         chosen,
         timeout_seconds=timeout_seconds,
@@ -193,7 +224,14 @@ def run_coding_sandbox(
     )
 
 
-def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
+def _ensure_started(
+    workspace: Path,
+    image: str,
+    job_id: str,
+    *,
+    proxy_dir: Path | None,
+    job_token: str | None,
+) -> None:
     existing = coding_container_ids(job_id)
     if existing is None:
         raise CodingSandboxError("sandbox_unavailable")
@@ -203,7 +241,7 @@ def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
         if image != JOB_IMAGE:
             raise CodingSandboxError("sandbox_unavailable")
         try:
-            launched = remote_run(workspace, job_id, timeout=180)
+            launched = remote_run(workspace, job_id, proxy_dir=proxy_dir, job_token=job_token or "", timeout=180)
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
     else:
@@ -211,7 +249,13 @@ def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
             runtime_image = launch_image(image, JOB_IMAGE)
         except LookupError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
-        args = [part for part in container_arguments(workspace, runtime_image, job_id=job_id) if part != "--rm"]
+        args = [
+            part
+            for part in container_arguments(
+                workspace, runtime_image, job_id=job_id, proxy_dir=proxy_dir, job_token=job_token
+            )
+            if part != "--rm"
+        ]
         launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
     if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")
@@ -239,6 +283,9 @@ def _wait_until_stopped(
         status = _container_status(name)
         if status in {"exited", "dead"}:
             return _collect_exit(name)
+        if status is None and coding_container_ids(job_id) == []:
+            logs = container_log_tails(job_id)
+            raise CodingSandboxError("timeout", logs)
         if time.monotonic() >= deadline:
             logs = container_log_tails(job_id)
             if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):

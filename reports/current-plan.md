@@ -19,10 +19,10 @@ uv run --locked --no-build pytest -q tests/unit
 gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
 ```
 
-进度：七项替换都接到库调用。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 改为 true。
+进度：编码作业由 OpenHands Agent 生成补丁。模型请求经 `ModelGateway.relay_chat`，按 token 结算。沙箱策略仍手写，内存和 swap 上限是 805306368。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 仍是 true。`live_ready` 仍是 pending。
 
-结果：2026-10-16 变基到 `13bc096` 之后，冻结检查通过（`api_operations` 50），参考套件 76 OK（1.259s），单元 313 passed、1 warning（24.65s）。Gitleaks 8.30.1 无泄漏。本机没有 Docker、Postgres 和 Temporal，集成测试、web typecheck 和 doctor 没有跑。`live_ready` 保持 pending。
+结果：2026-10-16 冻结检查通过（`api_operations` 50），参考套件 76 OK（1.283s），单元 318 passed、1 warning（35.09s）。Gitleaks 8.30.1 无泄漏。入口采样父进程 283888 KiB，进程树 306484 KiB。本机没有 Docker、Postgres 和 Temporal，集成测试、web typecheck 和 doctor 没有跑。
 
-修正：OpenHands 安装改为 `uv sync --locked --no-build`。`func-timeout==4.3.5` 使用仓库内 wheel。`exec`、`kill`、日志尾部和 runner 构建镜像已接上。入口只加载 `LocalWorkspace.execute_command` 用到的模块，避开会超过 256 MiB 的 LLM 栈。一次 `/proc` 采样的父进程峰值是 41736 KiB。CI 结果还没有记入。
+修正：入口不再挡住 LLM 栈。`file_editor` 和 `terminal` 由 Agent 调用。容器只挂一个模型 Unix socket。没有用量时 `mark_unknown`，不再按 0 结算。
 
-阻塞：本机没有 Docker，编码作业的容器终态仍要由 CI 的 integration 证明。
+阻塞：本机没有 Docker。`test_openhands_agent_edits_through_the_gateway_and_settles_tokens` 要由 CI 的 integration 证明；缺 Docker 时该测试失败，不跳过。

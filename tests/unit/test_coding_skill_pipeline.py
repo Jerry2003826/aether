@@ -8,7 +8,7 @@ import math
 import pytest
 
 from aether_worker.bundle_files import BundleError, parse_file_map
-from aether_worker.coding_sandbox import container_arguments
+from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.coding_workspace import WorkspaceError, parse_workspace, unified_patch
 from aether_worker.skill_dataset import DatasetError, parse_candidate, parse_dataset
 from aether_worker.skill_eval import SkillEvalError, judge
@@ -64,6 +64,17 @@ def test_coding_container_is_offline_read_only_and_limited(tmp_path) -> None:
     assert "docker.sock" not in joined
     assert "AETHER_LIVE_MODEL_KEY" not in joined
     assert "provider" not in joined.lower()
+    assert str(CODING_MEMORY_BYTES) in args
+    proxy = tmp_path / "aether-model-proof"
+    proxy.mkdir()
+    mounted = container_arguments(tmp_path, "python:3.12-alpine", proxy_dir=proxy, job_token="job-token-unit")
+    mounted_text = " ".join(mounted)
+    assert f"{proxy.resolve()}:/run/aether/proxy:rw" in mounted_text
+    assert "AETHER_MODEL_SOCKET=/run/aether/proxy/model.sock" in mounted_text
+    assert "AETHER_JOB_TOKEN=job-token-unit" in mounted_text
+    assert "AETHER_MODEL_ALIAS=openai/coder" in mounted_text
+    assert mounted[mounted.index("--network") + 1] == "none"
+    assert "AETHER_LIVE_MODEL_KEY" not in mounted_text
 
 
 def test_one_passing_family_is_finite_and_not_eligible() -> None:

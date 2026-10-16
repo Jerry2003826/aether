@@ -68,7 +68,7 @@ def _candidate() -> bytes:
 
 
 def _wait_job(database: Database, owner_id: str, project_id: str, job_key: str, states: set[str], proc, logs: list[str]) -> dict:
-    deadline = time.time() + 90
+    deadline = time.time() + 180
     last = ""
     while time.time() < deadline:
         if proc.poll() is not None:

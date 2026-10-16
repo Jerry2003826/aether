@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 import requests
 
-from aether_worker.coding_sandbox import container_arguments
+from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.container_runtime import container_logs, execute_docker, set_docker_client
 from aether_worker.runner import JOB_IMAGE
 
@@ -89,7 +89,8 @@ def test_run_and_pull_use_the_sdk_and_not_subprocess(tmp_path: Path, monkeypatch
     assert kwargs["pids_limit"] == 64
     assert kwargs["user"] == "65534:65534"
     assert kwargs["detach"] is True
-    assert kwargs["mem_limit"] == 268435456
+    assert kwargs["mem_limit"] == CODING_MEMORY_BYTES
+    assert kwargs["memswap_limit"] == CODING_MEMORY_BYTES
     assert client.containers.container.killed is True
     joined = " ".join(args)
     assert "/opt/aether/openhands_sandbox_entry.py" in joined
@@ -122,6 +123,7 @@ class _StreamContainer:
 
     def logs(self, **kwargs: object) -> object:
         assert kwargs.get("stream") is True
+        assert kwargs.get("follow") is False
         if kwargs.get("stdout") is True and kwargs.get("stderr") is False:
             return iter([b"HEAD", b"Z" * 70000])
         if kwargs.get("stderr") is True and kwargs.get("stdout") is False:

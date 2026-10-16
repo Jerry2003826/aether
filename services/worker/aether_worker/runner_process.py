@@ -19,6 +19,8 @@ from aether_worker.sandbox_delegate import (
     accepted_grace,
     accepted_job,
     accepted_name,
+    accepted_proxy,
+    accepted_token,
     accepted_workspace,
 )
 
@@ -92,7 +94,7 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
         job = accepted_job(body.get("job_id"))
         return _docker(["ps", "-aq", "--filter", f"label=aether.coding={job}", "--filter", "label=aether.role=coding"])
     if op == "run":
-        return _run(body.get("workspace"), body.get("job_id"))
+        return _run(body.get("workspace"), body.get("job_id"), body.get("proxy_dir"), body.get("job_token"))
     if op == "stop":
         return _docker(["stop", "-t", accepted_grace(body.get("grace")), accepted_name(body.get("name"))])
     if op == "rm":
@@ -116,14 +118,16 @@ def _ensure_coding_image(started: dict[str, str]) -> None:
         sys.stderr.write("openhands sandbox image build failed\n")
 
 
-def _run(workspace: object, job_id: object) -> subprocess.CompletedProcess[str]:
+def _run(workspace: object, job_id: object, proxy_dir: object, job_token: object) -> subprocess.CompletedProcess[str]:
     root = accepted_workspace(workspace)
     job = accepted_job(job_id)
+    proxy = accepted_proxy(proxy_dir)
+    token = accepted_token(job_token)
     try:
         image = launch_image(JOB_IMAGE, JOB_IMAGE)
     except LookupError:
         return subprocess.CompletedProcess(["docker"], 1, "", "image_unavailable")
-    args = [part for part in container_arguments(root, image, job_id=job) if part != "--rm"]
+    args = [part for part in container_arguments(root, image, job_id=job, proxy_dir=proxy, job_token=token) if part != "--rm"]
     return _docker(["run", "-d", "--name", container_name(job), *args[1:]])
 
 

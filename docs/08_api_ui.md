@@ -40,7 +40,7 @@ API前缀`/v1`，JSON字段snake_case，时间UTC RFC3339；UI按Australia/Melbo
 | /v1/admin/connectors | GET/POST | owner-only registry和连接器配置；密钥仅写不可回显 |
 | /v1/admin/connectors/{connector_id}/probe | POST | 非副作用能力测试，不能自动扩大scope |
 | /v1/admin/models/probe | POST | model/tool/structured output能力与价格配置检查 |
-| /v1/projects/{project_id}/coding-jobs | POST | 受理 202。worker 在断网、只读、限资源的沙箱里跑到 FINISHED 或 FAILED；容器内由 OpenHands 1.54.0 的 LocalWorkspace.execute_command 执行测试协议，不调用模型。失败后同一作业键可以重试。任务取消只有在容器确认消失后才写成 CANCELLED；仍持有租约的作业不会被 TTL 回收。终态写入任务事件 coding_job.terminal，沿用现有事件流查看。受理不是通过 |
+| /v1/projects/{project_id}/coding-jobs | POST | 受理 202。worker 在断网、只读、限资源的沙箱里跑到 FINISHED 或 FAILED。容器内由 OpenHands 1.54.0 的 Agent 用 file_editor 和 terminal 生成补丁，模型调用经本机代理进入网关并按 token 结算；测试协议仍由 LocalWorkspace.execute_command 执行。供应商 key 不进容器。失败后同一作业键可以重试。任务取消只有在容器确认消失后才写成 CANCELLED；仍持有租约的作业不会被 TTL 回收。终态写入任务事件 coding_job.terminal，沿用现有事件流查看。受理不是通过 |
 
 `/v1/admin/*` 依赖 V1 只有一个所有者。已登录会话就是该所有者，这些路由因此没有第二层角色检查。支持多用户时必须先核对所有者角色，不能只凭登录态放行。第二次创建所有者会被拒绝。
 

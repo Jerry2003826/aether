@@ -4,7 +4,7 @@
 
 基线已变基到 `origin/main` 的 `ab1ebef`。采集解析是已合并的 ADR-F41，威胁情报浏览器是已合并的 ADR-F43，本决定记为 ADR-F42。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 或 `f27.live_ready` 改成 passed。`f27.codegraph_enabled` 改为 true：锁文件 `product_enabled` 已是 true，`readiness.codegraph_enabled` 已是 passed，证据是 `reports/f15_product_result.json`。
 
-编码作业：控制面不安装 OpenHands。四个包仍钉在 `environments/openhands` 的 1.54.0。沙箱标志仍由 `container_arguments` 手写，内存上限仍是 268435456 字节。`JOB_IMAGE` 仍是 Alpine digest。runner 使用在 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` 上构建的镜像。入口在导入前挡住 `openhands.sdk` 包初始化、litellm 和 LLM 栈，然后调用 wheel 里的 `LocalWorkspace.execute_command`。不调用模型。证明：`test_local_workspace_strips_its_secret_before_the_protocol`（含入口 VmRSS 不超过 131072 KiB）、`test_entry_source_calls_local_workspace_and_launch_keeps_other_images`。
+编码作业：控制面不安装 OpenHands。四个包仍钉在 `environments/openhands` 的 1.54.0。沙箱标志仍由 `container_arguments` 手写：`--network none`、只读、丢掉全部 capabilities、用户 `65534:65534`。内存和 swap 上限改为 805306368 字节。一次入口采样的父进程 VmRSS 峰值是 283888 KiB，进程树是 306484 KiB，都超过原来的 256 MiB。`JOB_IMAGE` 仍是 Alpine digest。runner 使用在 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` 上构建的镜像。入口用 `openhands.sdk.Agent` 和 `Conversation`，工具是 `file_editor` 与 `terminal`（subprocess），由模型返回的编辑生成补丁，然后再用 `LocalWorkspace.execute_command` 跑测试协议。容器没有出网。模型请求只走挂载的 Unix socket，宿主机代理核对作业令牌后调用 `ModelGateway.relay_chat`。供应商 key 只在网关进程，经 stdin 交接。没有上游时网关返回一次 finish，8 个输入 token 加 4 个输出 token，不改文件。有用量时按 token 数结算 micro-USD；没有用量（含已确认取消）`mark_unknown`。`_bounded_logs` 删除的 `assert process.stdout is not None and process.stderr is not None` 是旧 `Popen` 管道收窄；Docker SDK 的 `container_logs` 直接返回两段字节，空日志是 `b""`。`logs(follow=False)` 避免 docker-py 把 `follow` 默认成 `stream` 后取消作业卡住。证明：`test_entry_source_calls_the_agent_and_launch_keeps_other_images`、`test_agent_calls_the_model_socket_edits_the_file_and_strips_the_secret`、`test_a_finish_call_leaves_the_candidate_file_unchanged`、`test_empty_upstream_returns_a_finish_call_with_token_usage`、`test_relay_posts_the_provider_key_and_ignores_http_proxy`、`test_relay_rejects_the_wrong_capability_alias_and_a_leaked_key`、`test_socket_proxy_checks_the_job_token_and_forwards_to_the_gateway`。容器、网关和预算扣减的证明是 `test_openhands_agent_edits_through_the_gateway_and_settles_tokens`，缺 Docker 时失败，不跳过。本机没有 Docker，这条集成测试没有跑。
 
 技能评测：`Dataset.evaluate_sync` 调度用例，`grade` 仍写分。证明：`test_dataset_evaluate_sync_schedules_each_case`、`test_expired_deadline_raises_before_a_second_grade`。
 
@@ -18,7 +18,7 @@
 
 安装：`environments/openhands` 使用 `uv sync --locked --no-build`。`func-timeout==4.3.5` 没有 wheel，锁文件指向仓库内由官方 sdist 构建、uv 记下哈希的 wheel。runner 在 Docker 可用且标签镜像不存在时构建；命令也写在 README。证明：`test_ci_workflow`、`test_runner_builds_the_openhands_image_when_docker_is_enabled`、`test_runner_stays_up_when_the_openhands_image_build_fails`。沙箱作业目录不再使用固定的公开路径，改由 `tempfile.mkdtemp` 创建。
 
-2026-10-16 变基到 `13bc096` 之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.259s），单元 313 passed、1 warning（24.65s），Gitleaks 8.30.1 无泄漏（git 历史和工作区各扫一次）。变基前同一入口的一次 `/proc` 采样：父进程 VmRSS 峰值 41736 KiB，协议子进程 12264 KiB。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次变基提交的 CI 还没有记入。
+2026-10-16 接入 OpenHands Agent 之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.283s），单元 318 passed、1 warning（35.09s），Gitleaks 8.30.1 无泄漏（git 历史和工作区各扫一次）。入口采样父进程 VmRSS 峰值 283888 KiB，进程树 306484 KiB。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次提交的 CI 还没有记入。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 

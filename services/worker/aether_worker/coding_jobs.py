@@ -12,9 +12,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, NoResultFound
 
+from aether_gateway.model import ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetError, BudgetLedger
 from aether_storage.db import Database
+from aether_worker.coding_model_proxy import CodingModelProxy
 from aether_worker.coding_sandbox import (
     LOG_TAIL_LIMIT,
     CodingSandboxError,
@@ -29,6 +31,8 @@ _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
 LEASE_SECONDS = 30
 _UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout_unconfirmed"})
 _CONFIRMED_STOP = frozenset({"cancelled", "deadline_exceeded", "timeout"})
+CODING_RESERVE_MICRO_USD = 4096
+CODING_RESERVE_TOKENS = 4096
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -151,9 +155,9 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            amount=1,
+            amount=CODING_RESERVE_MICRO_USD,
             role="coding",
-            tokens=1,
+            tokens=CODING_RESERVE_TOKENS,
         ):
             raise CodingError("budget_exceeded")
         reserved = True
@@ -179,39 +183,61 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         with tempfile.TemporaryDirectory(prefix="aether-code-") as temporary:
             root = Path(temporary)
             _materialize(workspace, root)
+            model_token = _issue_coding_token(
+                database,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+                attempt_id=str(fencing),
+            )
+            proxy = CodingModelProxy(database, job_token=model_token)
             try:
-                sandbox = run_coding_sandbox(
-                    root,
-                    job_id=job_id,
-                    stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
-                    deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
-                    on_poll=lambda: _renew_lease(
+                try:
+                    sandbox = run_coding_sandbox(
+                        root,
+                        job_id=job_id,
+                        proxy_dir=proxy.directory,
+                        job_token=model_token,
+                        stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
+                        deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
+                        on_poll=lambda: _renew_lease(
+                            database,
+                            owner_id=owner_id,
+                            project_id=project_id,
+                            operation_id=str(row["operation_id"]),
+                            job_id=job_id,
+                            fencing_token=fencing,
+                        ),
+                    )
+                except CodingSandboxError as exc:
+                    stopped = _sandbox_stop(
                         database,
+                        store,
                         owner_id=owner_id,
                         project_id=project_id,
-                        operation_id=str(row["operation_id"]),
-                        job_id=job_id,
-                        fencing_token=fencing,
-                    ),
-                )
-            except CodingSandboxError as exc:
-                stopped = _sandbox_stop(
-                    database,
-                    store,
+                        row=row,
+                        reserved=reserved,
+                        ledger=ledger,
+                        request_key=request_key,
+                        root=root,
+                        exc=exc,
+                    )
+                    if stopped is not None:
+                        return stopped
+                    raise
+                _settle(
+                    ledger,
                     owner_id=owner_id,
                     project_id=project_id,
-                    row=row,
-                    reserved=reserved,
-                    ledger=ledger,
+                    task_id=task_id,
                     request_key=request_key,
-                    root=root,
-                    exc=exc,
+                    reserved=True,
+                    result=sandbox["result"],
                 )
-                if stopped is not None:
-                    return stopped
-                raise
-            _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=True)
-            reserved = False
+                reserved = False
+            finally:
+                proxy.close()
             result = sandbox["result"]
             passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
             error = None if passed else "test_failed"
@@ -601,7 +627,7 @@ def _publish(
         fencing_token=int(row["fencing_token"]),
         operation_id=str(row["operation_id"]),
     )
-    patch = unified_patch(workspace["base_files"], workspace["files"]).encode()
+    patch = _published_patch(workspace, sandbox)
     result = json.dumps({"kind": "aether.coding_test_result", **sandbox["result"]}, ensure_ascii=False, separators=(",", ":")).encode()
     events = _events(sandbox, error_code, manifest=manifest, patch=patch)
     return _store_terminal(
@@ -732,6 +758,11 @@ def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[s
         "error_code": error_code,
         "network_errno": sandbox["result"].get("network_errno"),
         "credential_present": sandbox["result"].get("credential_present"),
+        "executor": sandbox["result"].get("executor"),
+        "input_tokens": sandbox["result"].get("input_tokens"),
+        "output_tokens": sandbox["result"].get("output_tokens"),
+        "edit_calls": sandbox["result"].get("edit_calls"),
+        "model_requests": sandbox["result"].get("model_requests"),
         "file_manifest": manifest,
         "patch_sha256": hashlib.sha256(patch).hexdigest(),
         "stdout_tail": stdout,
@@ -992,6 +1023,52 @@ def _operation(
         )
 
 
+def _issue_coding_token(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    attempt_id: str,
+) -> str:
+    gateway = ModelGateway(database, upstream_base="", provider_key="")
+    return gateway.issue_token(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        attempt_id=attempt_id,
+        capabilities=["coding:model"],
+        aliases=["coder"],
+    )
+
+
+def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, Any]) -> bytes:
+    result = sandbox.get("result")
+    if isinstance(result, dict):
+        try:
+            edits = int(result.get("edit_calls") or 0)
+        except (TypeError, ValueError):
+            edits = 0
+        patch = result.get("patch")
+        if edits > 0 and isinstance(patch, str) and patch.startswith("--- "):
+            return patch.encode()
+    return unified_patch(workspace["base_files"], workspace["files"]).encode()
+
+
+def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not isinstance(result, dict):
+        return None
+    incoming = result.get("input_tokens")
+    outgoing = result.get("output_tokens")
+    if type(incoming) is not int or type(outgoing) is not int:
+        return None
+    if incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
+        return None
+    return incoming, outgoing
+
+
 def _settle(
     ledger: BudgetLedger,
     *,
@@ -1000,21 +1077,41 @@ def _settle(
     task_id: str,
     request_key: str,
     reserved: bool,
+    result: dict[str, Any] | None = None,
 ) -> None:
     if not reserved:
         return
+    usage = _usage(result)
+    if usage is None:
+        _release_hold(
+            ledger,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+            reserved=True,
+        )
+        return
+    incoming, outgoing = usage
     try:
         ledger.settle(
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            actual=0,
-            input_tokens=0,
-            output_tokens=0,
+            actual=incoming + outgoing,
+            input_tokens=incoming,
+            output_tokens=outgoing,
         )
     except (BudgetError, NoResultFound):
-        return
+        _release_hold(
+            ledger,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+            reserved=True,
+        )
 
 
 def _release_hold(

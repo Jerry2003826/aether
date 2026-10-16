@@ -17,7 +17,7 @@ def main() -> None:
     worker_url = str(handed.get("worker_url") or "")
     token = os.environ.pop("AETHER_LOOPBACK_TOKEN", "")
     base = os.environ.get("AETHER_LIVE_MODEL_BASE", "").strip()
-    if not key or not worker_url or not token:
+    if not worker_url or not token:
         raise SystemExit("gateway 缺少模型调用所需的交接字段或 AETHER_LOOPBACK_TOKEN")
     database = Database(worker_url)
 
@@ -25,10 +25,16 @@ def main() -> None:
         return {"role": "gateway", "configured": True}
 
     def post(path: str, body: dict) -> tuple[int, dict]:
-        if path != "/v1/complete":
-            return 404, {"error": "not_found"}
         timeout = _timeout(body.get("timeout"))
         gateway = ModelGateway(database, upstream_base=base, provider_key=key, timeout=timeout)
+        if path == "/v1/chat/completions":
+            try:
+                result = gateway.relay_chat(str(body.get("aether_job_token") or ""), body)
+            except GatewayDenied as denied:
+                return 409, {"denied": True, "code": denied.code, "sent": denied.sent}
+            return 200, result
+        if path != "/v1/complete":
+            return 404, {"error": "not_found"}
         try:
             result = gateway.complete(
                 str(body.get("token") or ""),

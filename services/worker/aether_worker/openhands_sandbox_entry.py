@@ -1,87 +1,85 @@
-"""Sandbox entry. OpenHands LocalWorkspace runs the protocol. There is no importlib fallback."""
+"""Sandbox entry. OpenHands Agent edits the workspace, then LocalWorkspace runs the protocol."""
 
 from __future__ import annotations
 
+import difflib
 import json
 import os
 import socket
+import socketserver
 import sys
 import tempfile
+import threading
 import time
-import types
 from pathlib import Path
 
 os.environ["OPENHANDS_SUPPRESS_BANNER"] = "1"
+os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
+
+import openhands.tools.file_editor as file_editor_tool
+import openhands.tools.terminal as terminal_tool
+from openhands.sdk import Agent, Conversation, ConversationExecutionStatus, LLM, Tool
+from openhands.sdk.event import ActionEvent
+from openhands.sdk.workspace.local import LocalWorkspace
 
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
-EXECUTOR = "openhands.sdk.LocalWorkspace"
+EXECUTOR = "openhands.sdk.Agent"
+_STATE_DIR = ".aether-state"
+_SKIP = {".git", "__pycache__", _STATE_DIR}
 
 
-def _bind(module: types.ModuleType) -> None:
-    sys.modules[module.__name__] = module
-    parent_name, _, child = module.__name__.rpartition(".")
-    parent = sys.modules.get(parent_name)
-    if parent is not None:
-        setattr(parent, child, module)
+class _Pump(socketserver.ThreadingTCPServer):
+    allow_reuse_address = True
+    daemon_threads = True
+    socket_path = ""
 
 
-def _package(name: str, path: Path | None) -> types.ModuleType:
-    module = types.ModuleType(name)
-    module.__package__ = name
-    if path is not None:
-        module.__path__ = [str(path)]
-        module.__file__ = str(path / "__init__.py")
-    _bind(module)
-    return module
+class _PumpHandler(socketserver.BaseRequestHandler):
+    server: _Pump
+
+    def handle(self) -> None:
+        remote = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            remote.settimeout(30)
+            remote.connect(self.server.socket_path)
+            self.request.settimeout(30)
+            _bridge(self.request, remote)
+        except OSError:
+            return
+        finally:
+            remote.close()
 
 
-def _sdk_directory() -> Path:
-    for entry in sys.path:
-        candidate = Path(entry) / "openhands" / "sdk"
-        if candidate.joinpath("workspace", "local.py").is_file():
-            return candidate
-    raise RuntimeError("openhands_sdk_missing")
+def _bridge(left: socket.socket, right: socket.socket) -> None:
+    def copy(source: socket.socket, target: socket.socket) -> None:
+        try:
+            while True:
+                chunk = source.recv(65536)
+                if not chunk:
+                    break
+                target.sendall(chunk)
+        except OSError:
+            return
+        finally:
+            try:
+                target.shutdown(socket.SHUT_WR)
+            except OSError:
+                return
+
+    forward = threading.Thread(target=copy, args=(left, right), daemon=True)
+    backward = threading.Thread(target=copy, args=(right, left), daemon=True)
+    forward.start()
+    backward.start()
+    forward.join(40)
+    backward.join(40)
 
 
-def _observability_headers_from_env() -> dict[str, str]:
-    return {}
-
-
-def _install_workspace_import_boundary() -> None:
-    """Load the real LocalWorkspace without the unused LLM stack.
-
-    The pinned SDK package initializer imports the agent, conversation, and
-    model clients. Those clients are not used by execute_command, and loading
-    them exceeds the sandbox memory limit of 268435456 bytes. The workspace,
-    event, and conversation packages stay on disk so LocalWorkspace itself is
-    the class shipped in the pinned wheel.
-    """
-    sdk = _sdk_directory()
-    litellm = _package("litellm", None)
-    litellm.suppress_debug_info = True
-    litellm.set_verbose = False
-    _package("openhands", sdk.parent)
-    _package("openhands.sdk", sdk)
-    _package("openhands.sdk.workspace", sdk / "workspace")
-    _package("openhands.sdk.conversation", sdk / "conversation")
-    _package("openhands.sdk.event", sdk / "event")
-    llm = _package("openhands.sdk.llm", None)
-    unused = type("UnusedModelType", (), {})
-    llm.ImageContent = unused
-    llm.Message = unused
-    llm.TextContent = unused
-    streaming = _package("openhands.sdk.llm.streaming", None)
-    streaming.TokenCallbackType = object
-    _package("openhands.sdk.observability", None)
-    laminar = _package("openhands.sdk.observability.laminar", None)
-    laminar.observability_headers_from_env = _observability_headers_from_env
-
-
-# This import follows the boundary on purpose. Running it first executes
-# openhands.sdk's package initializer and exhausts the sandbox memory limit.
-_install_workspace_import_boundary()
-from openhands.sdk.workspace.local import LocalWorkspace
+def _start_pump(socket_path: str) -> _Pump:
+    server = _Pump(("127.0.0.1", 0), _PumpHandler)
+    server.socket_path = socket_path
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
 
 
 def copy_tree(src: Path, dst: Path) -> None:
@@ -135,6 +133,11 @@ def _failure(detail: str) -> dict[str, object]:
         "network_errno": network_errno(),
         "credential_present": credential_present(),
         "executor": EXECUTOR,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "edit_calls": 0,
+        "model_requests": 0,
+        "patch": "",
     }
 
 
@@ -157,11 +160,125 @@ def job_directory() -> Path:
     return Path(tempfile.mkdtemp(prefix="aether-job-"))
 
 
+def _snapshot(root: Path) -> dict[str, str]:
+    found: dict[str, str] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(part in _SKIP for part in relative.parts):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        found[relative.as_posix()] = path.read_text(encoding="utf-8", errors="replace")
+    return found
+
+
+def _lines(value: str) -> list[str]:
+    if not value:
+        return []
+    lines = value.splitlines(keepends=True)
+    if lines and not lines[-1].endswith("\n"):
+        lines[-1] += "\n"
+    return lines
+
+
+def _patch(before: dict[str, str], root: Path) -> str:
+    after = _snapshot(root)
+    chunks: list[str] = []
+    for name in sorted(set(before) | set(after)):
+        old = before.get(name, "")
+        new = after.get(name, "")
+        if old == new:
+            continue
+        chunks.extend(difflib.unified_diff(_lines(old), _lines(new), fromfile=f"a/{name}", tofile=f"b/{name}"))
+    text = "".join(chunks)
+    if not text.startswith("--- "):
+        return ""
+    return text
+
+
+def _blank_report() -> dict[str, object]:
+    return {"input_tokens": 0, "output_tokens": 0, "edit_calls": 0, "model_requests": 0, "patch": ""}
+
+
+def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], job: Path) -> dict[str, object]:
+    usage = agent.llm.metrics.accumulated_token_usage
+    incoming = int(usage.prompt_tokens) if usage is not None else 0
+    outgoing = int(usage.completion_tokens) if usage is not None else 0
+    edits = 0
+    for event in conversation.state.events:
+        if isinstance(event, ActionEvent) and event.tool_name == file_editor_tool.FileEditorTool.name:
+            edits += 1
+    return {
+        "input_tokens": incoming,
+        "output_tokens": outgoing,
+        "edit_calls": edits,
+        "model_requests": len(agent.llm.metrics.token_usages),
+        "patch": _patch(before, job),
+    }
+
+
+def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
+    report = _blank_report()
+    socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
+    token = os.environ.get("AETHER_JOB_TOKEN", "")
+    if not socket_path or not token:
+        return report
+    server: _Pump | None = None
+    try:
+        server = _start_pump(socket_path)
+        port = int(server.server_address[1])
+        alias = os.environ.get("AETHER_MODEL_ALIAS", "openai/coder")
+        llm = LLM(
+            model=alias,
+            api_key=token,
+            base_url=f"http://127.0.0.1:{port}/v1",
+            usage_id="coding",
+            num_retries=0,
+            timeout=30,
+            native_tool_calling=True,
+            stream=False,
+        )
+        agent = Agent(
+            llm=llm,
+            tools=[
+                Tool(name=file_editor_tool.FileEditorTool.name),
+                Tool(name=terminal_tool.TerminalTool.name, params={"terminal_type": "subprocess"}),
+            ],
+            condenser=None,
+            system_prompt="Edit the requested file with file_editor, then call finish. Do not use any other network.",
+        )
+        state = job / _STATE_DIR
+        state.mkdir(parents=True, exist_ok=True)
+        conversation = Conversation(
+            agent=agent,
+            workspace=job,
+            max_iteration_per_run=4,
+            stuck_detection=False,
+            visualizer=None,
+            persistence_dir=state,
+        )
+        target = job / "app.py"
+        conversation.send_message(f"Edit {target} with file_editor str_replace so it returns 42, then call finish.")
+        conversation.run()
+        if conversation.state.execution_status == ConversationExecutionStatus.FINISHED:
+            report = _collect(agent, conversation, before, job)
+    except Exception as exc:
+        sys.stderr.write(f"agent_failed {type(exc).__name__}\n")
+        return report
+    finally:
+        if server is not None:
+            server.shutdown()
+            server.server_close()
+    return report
+
+
 def main() -> None:
     started = time.monotonic()
     try:
         job = job_directory()
         copy_tree(WORK, job)
+        before = _snapshot(job)
+        agent_report = _run_agent(job, before)
         workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
             f"{sys.executable} -I {PROTOCOL}",
@@ -173,6 +290,7 @@ def main() -> None:
         raise
     except Exception as exc:
         emit(_failure(type(exc).__name__), 2)
+    payload.update(agent_report)
     payload["elapsed_seconds"] = round(time.monotonic() - started, 6)
     payload["network_errno"] = network_errno()
     payload["credential_present"] = credential_present()

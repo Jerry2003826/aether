@@ -136,7 +136,7 @@ Worker 是同一个 Python 源码里的另一个进程，不是第二套调度�
 uv run --locked --no-build python scripts/build_openhands_sandbox.py
 ```
 
-基座是 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f`。`JOB_IMAGE` 常量仍是 Alpine digest。
+基座是 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f`。`JOB_IMAGE` 常量仍是 Alpine digest。容器里的 OpenHands Agent 通过挂载的 Unix socket 把模型请求交给网关，供应商 key 留在网关进程。内存与 swap 上限是 805306368 字节。
 
 把 `ensure_database` 返回的三个角色 URL 设进环境。产物目录必须和 API 的 `AETHER_ARTIFACT_ROOT` 是同一个路径。
 

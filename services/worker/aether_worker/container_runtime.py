@@ -74,8 +74,8 @@ def container_logs(name: str, *, limit: int = _LOG_STREAM_LIMIT) -> tuple[bytes,
         container = client.containers.get(name)
     except (NotFound, DockerException):
         return b"", b""
-    stdout = _tail_stream(container.logs(stdout=True, stderr=False, stream=True), limit)
-    stderr = _tail_stream(container.logs(stdout=False, stderr=True, stream=True), limit)
+    stdout = _tail_stream(container.logs(stdout=True, stderr=False, stream=True, follow=False), limit)
+    stderr = _tail_stream(container.logs(stdout=False, stderr=True, stream=True, follow=False), limit)
     return stdout, stderr
 
 
@@ -317,6 +317,7 @@ def _parse_run(args: list[str]) -> dict[str, Any]:
     nano_cpus = None
     tmpfs: dict[str, str] = {}
     user = None
+    workdir = None
     environment: dict[str, str] = {}
     volumes: dict[str, dict[str, str]] = {}
     labels: dict[str, str] = {}
@@ -331,7 +332,7 @@ def _parse_run(args: list[str]) -> dict[str, Any]:
             remove = True
         elif token == "--read-only":
             read_only = True
-        elif token in {"--name", "--network", "--cap-drop", "--cap-add", "--security-opt", "--pids-limit", "--memory", "--memory-swap", "--cpus", "--user", "--label"}:
+        elif token in {"--name", "--network", "--cap-drop", "--cap-add", "--security-opt", "--pids-limit", "--memory", "--memory-swap", "--cpus", "--user", "--label", "--workdir"}:
             index += 1
             value = args[index]
             if token == "--name":
@@ -354,6 +355,8 @@ def _parse_run(args: list[str]) -> dict[str, Any]:
                 nano_cpus = int(float(value) * 1_000_000_000)
             elif token == "--user":
                 user = value
+            elif token == "--workdir":
+                workdir = value
             else:
                 key, _, label_value = value.partition("=")
                 labels[key] = label_value
@@ -394,6 +397,7 @@ def _parse_run(args: list[str]) -> dict[str, Any]:
             "nano_cpus": nano_cpus,
             "tmpfs": tmpfs or None,
             "user": user,
+            "working_dir": workdir,
             "environment": environment or None,
             "volumes": volumes or None,
             "labels": labels or None,

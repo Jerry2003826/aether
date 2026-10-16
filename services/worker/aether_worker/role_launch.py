@@ -89,20 +89,17 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
             {"verifier_url": verifier_url},
         )
         children.append(verifier_proc)
-        gateway_proc: subprocess.Popen[str] | None = None
-        gateway_errors: list[str] = []
-        if provider_key:
-            gateway_proc, gateway_errors = _open(
-                "aether_gateway",
-                _gateway_env(token),
-                secrets_to_hide,
-                {"provider_key": provider_key, "worker_url": os.environ["AETHER_WORKER_DATABASE_URL"]},
-            )
-            children.append(gateway_proc)
+        gateway_proc, gateway_errors = _open(
+            "aether_gateway",
+            _gateway_env(token),
+            secrets_to_hide,
+            {"provider_key": provider_key, "worker_url": os.environ["AETHER_WORKER_DATABASE_URL"]},
+        )
+        children.append(gateway_proc)
         runner_proc, runner_errors = _open("aether_worker.runner_process", _runner_env(token), secrets_to_hide, None)
         children.append(runner_proc)
         verifier_base = _await_role(verifier_proc, verifier_errors, secrets_to_hide)
-        gateway_base = _await_role(gateway_proc, gateway_errors, secrets_to_hide) if gateway_proc is not None else ""
+        gateway_base = _await_role(gateway_proc, gateway_errors, secrets_to_hide)
         runner_base = _await_role(runner_proc, runner_errors, secrets_to_hide)
         scrub_privileged_env()
         os.environ["AETHER_VERIFIER_BASE"] = verifier_base

@@ -14,18 +14,16 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true because the lock, readiness.codegraph_enabled and reports/f15_product_result.json already say the product adapter passed. Ingest parsing stays ADR-F41. R8-B is ADR-F42. OpenHands CI install is uv sync --locked --no-build. The sandbox entry loads LocalWorkspace without the LLM stack so the 268435456-byte limit can hold the protocol child. Integration was not run on this machine: no Docker daemon, Postgres or Temporal. CI must run pack-and-unit, integration and SonarCloud.",
+  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true. Ingest parsing stays ADR-F41. R8-B is ADR-F42. Coding jobs now run OpenHands Agent and Conversation inside the sandbox. Model calls go through ModelGateway.relay_chat and settle by token count. The sandbox memory and swap limit is 805306368. Integration was not run on this machine: no Docker daemon, Postgres or Temporal. CI must run pack-and-unit, integration and SonarCloud.",
   "last_executed_commands": [
-    "uv lock",
-    "uv sync --locked --no-build",
-    ".venv/bin/python scripts/rebuild_spec.py",
-    ".venv/bin/python scripts/verify_freeze.py",
-    ".venv/bin/python -m unittest discover -s tests -p 'test_*.py'",
-    ".venv/bin/pytest -q tests/unit",
+    "uv run --locked --no-build python scripts/rebuild_spec.py",
+    "uv run --locked --no-build python scripts/verify_freeze.py",
+    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
+    "uv run --locked --no-build pytest -q tests/unit",
     "/tmp/gitleaks/gitleaks detect --source . --config .gitleaks.toml --redact --no-banner",
     "/tmp/gitleaks/gitleaks detect --no-git --source . --config .gitleaks.toml --redact --no-banner"
   ],
-  "last_test_result": "Local on 2026-10-16 after rebasing R8-B onto 13bc096. verify_freeze passed with api_operations 50. unittest 76 OK in 1.259s. unit 313 passed, 1 warning in 24.65s. Gitleaks 8.30.1 reported no leaks on the git history and on a working-tree scan. Integration was not run: this machine has no Docker daemon, Postgres or Temporal. Web typecheck and doctor were not run. live_ready stays pending. CI for this rebased commit is not recorded in this file.",
+  "last_test_result": "Local on 2026-10-16 after wiring the OpenHands Agent through ModelGateway.relay_chat. verify_freeze passed with api_operations 50. unittest 76 OK in 1.283s. unit 318 passed, 1 warning in 35.09s. The agent entry sample peaked at 283888 KiB, process tree 306484 KiB. Gitleaks 8.30.1 reported no leaks on the git history and on a working-tree scan. Integration was not run: this machine has no Docker daemon, Postgres or Temporal. Web typecheck and doctor were not run. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

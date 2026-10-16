@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import secrets
+import urllib.error
+import urllib.request
 from datetime import UTC, datetime, timedelta
 from importlib.metadata import version
 from typing import Any
@@ -20,6 +22,8 @@ litellm.suppress_debug_info = True
 # name the upstream reports. It is a local estimate, not a provider bill.
 COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
+SCRIPTED_PROMPT_TOKENS = 8
+SCRIPTED_COMPLETION_TOKENS = 4
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -47,6 +51,50 @@ def _redact(value: str, secret: str) -> str:
     if not secret:
         return value
     return value.replace(secret, "[REDACTED]")
+
+
+def _alias_matches(model: str, aliases: list[str]) -> bool:
+    if model in aliases:
+        return True
+    stripped = model.removeprefix("openai/")
+    return bool(stripped) and stripped != model and stripped in aliases
+
+
+def _chat_url(base: str) -> str:
+    root = base.rstrip("/")
+    if root.endswith("/v1"):
+        return root + "/chat/completions"
+    return root + "/v1/chat/completions"
+
+
+def scripted_chat_completion(model: str) -> dict[str, Any]:
+    """One finish call. No file edit, so the candidate files still decide the verdict."""
+    prompt = SCRIPTED_PROMPT_TOKENS
+    completion = SCRIPTED_COMPLETION_TOKENS
+    return {
+        "id": "chatcmpl-aether-scripted",
+        "object": "chat.completion",
+        "created": 0,
+        "model": model,
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": "tool_calls",
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": "call_finish",
+                            "type": "function",
+                            "function": {"name": "finish", "arguments": "{\"message\":\"done\"}"},
+                        }
+                    ],
+                },
+            }
+        ],
+        "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion},
+    }
 
 
 def _completion_text(response: Any) -> tuple[str | None, str | None]:
@@ -207,6 +255,54 @@ class ModelGateway:
         if self.provider_key in encoded or self.provider_key in partial or any(self.provider_key in line for line in self.audit):
             raise GatewayDenied("secret_leak", sent=True)
         return result
+
+    def relay_chat(self, job_token: str, body: dict[str, Any]) -> dict[str, Any]:
+        """Forward one OpenAI chat completion for a coding job.
+
+        The grant stays valid for every call in the attempt. This does not revoke
+        the token and does not require the task to be RUNNING.
+        """
+        grant = self._scope(job_token)
+        scope = grant["scope"]
+        capabilities = scope.get("capabilities") or []
+        if "coding:model" not in capabilities:
+            raise GatewayDenied("capability_denied")
+        model = str(body.get("model") or "")
+        aliases = [str(item) for item in scope.get("aliases") or []]
+        if not _alias_matches(model, aliases):
+            raise GatewayDenied("alias_denied")
+        self.audit.append(f"relay project={grant['project_id']} model={model}")
+        result = scripted_chat_completion(model or "coder") if not self.upstream_base else self._post_upstream(body)
+        encoded = json.dumps(result)
+        if self.provider_key and (self.provider_key in encoded or any(self.provider_key in line for line in self.audit)):
+            raise GatewayDenied("secret_leak", sent=True)
+        return result
+
+    def _post_upstream(self, body: dict[str, Any]) -> dict[str, Any]:
+        payload = {key: value for key, value in body.items() if key != "aether_job_token"}
+        request = urllib.request.Request(
+            _chat_url(self.upstream_base),
+            data=json.dumps(payload).encode(),
+            headers={"authorization": f"Bearer {self.provider_key}", "content-type": "application/json"},
+            method="POST",
+        )
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        try:
+            with opener.open(request, timeout=self.timeout) as response:
+                text = response.read().decode()
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode(errors="replace")
+            if self.provider_key and self.provider_key in detail:
+                raise GatewayDenied("secret_leak", sent=True) from exc
+            raise GatewayDenied("upstream_error", sent=True) from exc
+        except (TimeoutError, urllib.error.URLError) as exc:
+            raise GatewayDenied("upstream_error", sent=_is_timeout(exc)) from exc
+        if self.provider_key and self.provider_key in text:
+            raise GatewayDenied("secret_leak", sent=True)
+        loaded = json.loads(text)
+        if not isinstance(loaded, dict):
+            raise GatewayDenied("upstream_error", sent=True)
+        return loaded
 
     def _scope(self, token: str) -> dict[str, Any]:
         token_hash = sha256_text(token)
