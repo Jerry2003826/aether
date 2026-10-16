@@ -5,15 +5,22 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from aether_worker.runner import JOB_IMAGE, docker_available
+from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 
 CODING_RUNNER = r"""
-import importlib.util, json, os, sys, time
+import importlib.util, json, os, signal, sys, time
 from pathlib import Path
+
+def _on_term(_signum, _frame):
+    raise SystemExit(143)
+
+signal.signal(signal.SIGTERM, _on_term)
 
 def copy_tree(src, dst):
     for path in sorted(src.rglob("*")):
@@ -85,28 +92,44 @@ def main():
         "credential_present": any(any(part in name for part in ("LIVE_MODEL", "ADMIN_DATABASE", "PASSWORD", "SECRET")) for name in os.environ),
     }
     sys.stdout.write("RESULT " + json.dumps(body, separators=(",", ":")) + "\n")
+    sys.stdout.flush()
     return 0 if failed == 0 and passed > 0 else 1
 
 try:
     code = main()
 except Exception as exc:
     sys.stdout.write("RESULT " + json.dumps({"passed": 0, "failed": 1, "errors": 1, "cases": [{"name": "runner", "verdict": "FAIL", "detail": type(exc).__name__}], "elapsed_seconds": 0, "network_errno": None, "credential_present": False}) + "\n")
+    sys.stdout.flush()
     code = 2
 raise SystemExit(code)
 """
 
 
+CANCEL_GRACE_SECONDS = 10
+LOG_TAIL_LIMIT = 4096
+POLL_SECONDS = 0.25
+
+
 class CodingSandboxError(Exception):
-    def __init__(self, code: str) -> None:
+    def __init__(self, code: str, payload: dict[str, Any] | None = None) -> None:
         super().__init__(code)
         self.code = code
+        self.payload = payload or {}
 
 
-def container_arguments(workspace: Path, image: str) -> list[str]:
+def container_name(job_id: str) -> str:
+    token = "".join(character for character in job_id if character.isalnum())[:32]
+    return f"aether-code-{token}"
+
+
+def container_arguments(workspace: Path, image: str, *, job_id: str | None = None) -> list[str]:
     """Flags only. The caller supplies docker and does not inherit the worker environment."""
+    labels: list[str] = []
+    if job_id is not None:
+        labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding"]
     return [
         "run",
-        "--rm",
+        *labels,
         "--network",
         "none",
         "--read-only",
@@ -146,29 +169,161 @@ def container_arguments(workspace: Path, image: str) -> list[str]:
     ]
 
 
-def run_coding_sandbox(workspace: Path, *, image: str = JOB_IMAGE, timeout_seconds: int = 45) -> dict[str, Any]:
+def stop_arguments(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS) -> list[list[str]]:
+    """Stop, remove, then list. Confirmation is the empty list, not the stop command itself."""
+    return [
+        ["stop", "-t", str(grace_seconds), container_name(job_id)],
+        ["rm", "-f", container_name(job_id)],
+        ["ps", "-aq", "--filter", f"label=aether.coding={job_id}", "--filter", "label=aether.role=coding"],
+    ]
+
+
+def coding_container_ids(job_id: str) -> list[str] | None:
+    if not docker_available():
+        return None
+    completed = _docker(["ps", "-aq", "--filter", f"label=aether.coding={job_id}", "--filter", "label=aether.role=coding"])
+    if completed.returncode != 0:
+        return None
+    return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
+
+
+def container_log_tails(job_id: str) -> dict[str, str]:
+    found = coding_container_ids(job_id)
+    target = found[0] if found else container_name(job_id)
+    completed = _docker(["logs", target])
+    return {"stdout": (completed.stdout or "")[-LOG_TAIL_LIMIT:], "stderr": (completed.stderr or "")[-LOG_TAIL_LIMIT:]}
+
+
+def confirm_coding_stop(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS) -> bool:
+    """True only when a second listing shows no container for this job."""
+    if coding_container_ids(job_id) is None:
+        return False
+    for command in stop_arguments(job_id, grace_seconds=grace_seconds):
+        if command[0] != "ps":
+            _docker(command)
+    for item in coding_container_ids(job_id) or []:
+        _docker(["stop", "-t", str(grace_seconds), item])
+        _docker(["rm", "-f", item])
+    remaining = coding_container_ids(job_id)
+    return remaining == []
+
+
+def release_coding_container(job_id: str) -> None:
+    if not docker_available():
+        return
+    _docker(["rm", "-f", container_name(job_id)])
+    for item in coding_container_ids(job_id) or []:
+        _docker(["rm", "-f", item])
+
+
+def run_coding_sandbox(
+    workspace: Path,
+    *,
+    image: str = JOB_IMAGE,
+    timeout_seconds: int = 45,
+    job_id: str | None = None,
+    stop_requested: Callable[[], bool] | None = None,
+    deadline_reached: Callable[[], bool] | None = None,
+    on_poll: Callable[[], None] | None = None,
+    grace_seconds: int = CANCEL_GRACE_SECONDS,
+    poll_seconds: float = POLL_SECONDS,
+) -> dict[str, Any]:
     if not docker_available() or shutil.which("docker") is None:
         raise CodingSandboxError("sandbox_unavailable")
-    name = f"aether-code-{uuid.uuid4().hex[:16]}"
-    args = container_arguments(workspace, image)
-    args.insert(1, name)
-    args.insert(1, "--name")
-    try:
-        completed = subprocess.run(
-            ["docker", *args],
-            capture_output=True,
-            text=True,
-            timeout=timeout_seconds,
-            check=False,
-            env={"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "LANG": "C.UTF-8"},
-        )
-    except subprocess.TimeoutExpired as exc:
-        subprocess.run(["docker", "rm", "-f", name], capture_output=True, text=True, check=False)
-        raise CodingSandboxError("timeout") from exc
-    result = _result_line(completed.stdout)
-    if completed.returncode not in {0, 1} or result is None:
+    chosen = job_id or str(uuid.uuid4())
+    _ensure_started(workspace, image, chosen)
+    return _wait_until_stopped(
+        chosen,
+        timeout_seconds=timeout_seconds,
+        stop_requested=stop_requested,
+        deadline_reached=deadline_reached,
+        on_poll=on_poll,
+        grace_seconds=grace_seconds,
+        poll_seconds=poll_seconds,
+    )
+
+
+def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
+    existing = coding_container_ids(job_id)
+    if existing is None:
+        raise CodingSandboxError("sandbox_unavailable")
+    if existing:
+        return
+    args = [part for part in container_arguments(workspace, image, job_id=job_id) if part != "--rm"]
+    launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
+    if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")
-    return {"exit_code": completed.returncode, "result": result, "timed_out": False}
+
+
+def _wait_until_stopped(
+    job_id: str,
+    *,
+    timeout_seconds: int,
+    stop_requested: Callable[[], bool] | None,
+    deadline_reached: Callable[[], bool] | None,
+    on_poll: Callable[[], None] | None,
+    grace_seconds: int,
+    poll_seconds: float,
+) -> dict[str, Any]:
+    name = container_name(job_id)
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        if on_poll is not None:
+            on_poll()
+        if stop_requested is not None and stop_requested():
+            _raise_after_stop(job_id, grace_seconds, "cancelled", "cancel_unconfirmed")
+        if deadline_reached is not None and deadline_reached():
+            _raise_after_stop(job_id, grace_seconds, "deadline_exceeded", "deadline_unconfirmed")
+        status = _container_status(name)
+        if status in {"exited", "dead"}:
+            return _collect_exit(name)
+        if time.monotonic() >= deadline:
+            logs = container_log_tails(job_id)
+            if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):
+                raise CodingSandboxError("timeout_unconfirmed", logs)
+            raise CodingSandboxError("timeout", logs)
+        time.sleep(poll_seconds)
+
+
+def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pending_code: str) -> None:
+    logs = container_log_tails(job_id)
+    if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):
+        raise CodingSandboxError(pending_code, logs)
+    raise CodingSandboxError(confirmed_code, logs)
+
+
+def _collect_exit(name: str) -> dict[str, Any]:
+    completed = _docker(["logs", name])
+    logs = {"stdout": (completed.stdout or "")[-LOG_TAIL_LIMIT:], "stderr": (completed.stderr or "")[-LOG_TAIL_LIMIT:]}
+    code = _exit_code(name)
+    _docker(["rm", "-f", name])
+    result = _result_line(logs["stdout"])
+    if code not in {0, 1} or result is None:
+        raise CodingSandboxError("sandbox_failed", logs)
+    return {
+        "exit_code": code,
+        "result": result,
+        "timed_out": False,
+        "stdout_tail": logs["stdout"],
+        "stderr_tail": logs["stderr"],
+    }
+
+
+def _container_status(name: str) -> str | None:
+    completed = _docker(["inspect", "-f", "{{.State.Status}}", name])
+    if completed.returncode != 0:
+        return None
+    return completed.stdout.strip()
+
+
+def _exit_code(name: str) -> int | None:
+    completed = _docker(["inspect", "-f", "{{.State.ExitCode}}", name])
+    if completed.returncode != 0:
+        return None
+    try:
+        return int(completed.stdout.strip())
+    except ValueError:
+        return None
 
 
 def _result_line(stdout: str) -> dict[str, Any] | None:

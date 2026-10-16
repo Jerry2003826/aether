@@ -99,6 +99,8 @@ ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F35 接替。Watch 循�
 
 编码作业：`POST /v1/projects/{id}/coding-jobs` 在任务或基线产物不存在时返回 404 `not_found`，不写 outbox。合法请求 202。worker 消费 `coding.create`，在 `python:3.12-alpine` 里跑所有者放进基线产物的候选和测试。容器断网、只读、丢掉全部 capability、`no-new-privileges`、pid 上限 64、内存和 swap 各 256MiB、1 CPU、`/tmp` 为 tmpfs、用户 65534。不挂 Docker socket，不继承 worker 环境。测试通过且网络探测不是 0、环境里没有凭证名时是 `FINISHED`，否则 `FAILED`。失败后同一任务和作业键再提交走 `coding.retry`，fencing 加一，新建 operation 和 capability。还没失败是 409 `job_not_retryable`。每次尝试在现有账本预留 1 micro-USD 和 1 token，沙箱结束后按实际 0 结算；预留之后进程失败则 `mark_unknown`，未决账单继续占用。补丁、测试结果和事件挂到任务产物。公开合同没有单独的编码作业查询。这次不启动 OpenHands，也不发作业范围的模型调用。
 
+取消和 TTL 见 ADR-F36。任务 `cancel` 把 `resume_state` 写成 `cancel_requested`。作业轮询到这个状态，或任务已是 `CANCELLED`，就先留下限长日志，再用 10 秒 grace 停掉带 `aether.coding=<job id>` 标签的容器，第二次列表为空才写成 `CANCELLED`。事件里 `cancel_state` 是 `confirmed`，`external_effect` 仍是 `unknown`。capability 撤销，该次预留按实际 0 结算。容器还在就不进入终态，租约清掉，已预留账单 `mark_unknown`。租约在 `operations.lease_until`，领取和轮询各续 30 秒。截止时间已到且租约过期才回收；抢不到租约不调用 docker，也不删除作业行。确认停掉后截止时间到达是 `FAILED` / `deadline_exceeded`。`CANCELLED` 不能用同一作业键重试。ADR-F26 的 `LinuxRunner.cancel` 没有改。
+
 技能评测：合法 `skill.evaluate` 返回 202，不插入不能更新的 `QUEUED` 行。`evaluation.create` 仍只插入没有分数的 `QUEUED`。verifier 按数据集清单用 SYS-02 隔离评分器逐项评分，`record_evaluation` 写不可变评测和报告。指标沿用 SYS-07。`baseline_cost` 为 0 且 `candidate_cost` 不为 0 时，在启动容器前记 `REJECTED`，`metrics` 为 NULL，`error_code` 为 `non_finite`。一个 family 是 `INSUFFICIENT_EVIDENCE`，版本变为 `EVALUATING`，不晋升。development 遇到 holdout 是 `dataset_isolated`。终态用 `GET /v1/projects/{id}/evaluations` 查询。`apply_verdict` 同时更新状态列和 `manifest.status`。
 
 有意改写的断言：
@@ -109,11 +111,29 @@ ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F35 接替。Watch 循�
 - `tests/integration/test_sys01_entry.py` 的 `_assert_missing_jobs_are_not_queued`：随机任务、产物、技能 id 从 422 `unsupported` 改为 404 `not_found`。编码作业和评测行数仍是 0。
 - `tests/integration/test_console_browser.py` 的 `test_console_shows_real_states_and_does_not_execute_html`：页面文案改为终态说明。登录后的代码页提交真实作业，状态是「作业已排队，还没有通过结果。」刷新会轮换 CSRF，所以提交前重新读取会话。未登录的窄屏仍是「还没有登录。」
 
-变基前的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1）是 verify_freeze 通过、参考套件 76、单元 232、集成 344。变基到 `6f223f7` 之后还没有重跑全量，上面的次数不能当作变基后的结果。
+新增测试：`tests/unit/test_coding_job_lease.py` 的 `test_stop_uses_a_ten_second_grace_and_checks_the_job_label`、`test_live_lease_blocks_reap_and_unconfirmed_stop_is_not_terminal`；`tests/integration/test_r7_coding_cancel.py` 的 `test_cancel_is_cancelled_only_after_the_container_is_gone`、`test_reaper_does_not_remove_a_leased_job`。这些测试先因缺少函数而失败，补上实现后通过。没有 skip 或 xfail，没有改 `contracts/` 或 `reference/`。
 
-做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。规格第 6 节的取消确认和 TTL 回收在这一笔里还没有。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
+变基到 `6f223f7` 并补上取消确认之后的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 可用，Python 3.13.16）：
 
-下一步：补上取消确认和 TTL 回收，重跑全量后再更新这里的命令和次数。
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit
+# 238 passed in 108.32s
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+  PATH="$HOME/.local/bin:.hermes/.venv/bin:$PATH" uv run --locked --no-build pytest -q tests/integration
+# 351 passed, 1 warning in 319.18s
+uv run --locked --no-build python scripts/doctor.py --require-services
+# exit 0。reports/doctor.json 的本机探测差异没有提交。
+(cd apps/web && pnpm typecheck)
+# exit 0（本机 Node 22.14.0；CI 使用 Node 24）
+```
+
+做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
+
+下一步：同一 PR 保持 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）全绿。若失败或出现新的审查意见，修到全绿再收口。
 
 ## P2-09 公开采集、工具账本、检索可见性与只读推荐（已合入 main，ADR-F34）
 

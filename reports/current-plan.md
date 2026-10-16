@@ -32,8 +32,8 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 (cd apps/web && pnpm typecheck)
 ```
 
-进度：变基冲突已按「保留 ADR-F34 的采集与工具，编码决定改记 ADR-F35」处理。变基后的全量还没有重跑。
+进度：变基冲突已按「保留 ADR-F34 的采集与工具，编码决定改记 ADR-F35」处理。规格第 6 节的取消确认和 TTL 租约回收记为 ADR-F36。失败测试先写，再补实现。
 
-结果：变基前全量通过过。变基后的次数还没有。
+结果：冻结检查通过。参考套件 76。单元 238 passed（108.32s）。集成 351 passed、1 warning（319.18s）。doctor exit 0。web typecheck exit 0（本机 Node 22，CI 用 Node 24）。`reports/doctor.json` 的本机差异没有提交。
 
-阻塞：不启动 OpenHands，也不在沙箱里调用模型。取消确认和 TTL 回收还没有进这一笔。`live_ready` 保持 pending。
+阻塞：不启动 OpenHands，也不在沙箱里调用模型。`live_ready` 保持 pending。
