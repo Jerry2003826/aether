@@ -310,8 +310,10 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
         raise ConsoleCommandError("deploy_rejected")
     evaluation = conn.execute(
         text(
-            "SELECT evaluator_identity, status FROM evaluation_runs "
-            "WHERE project_id = :project_id AND id = :id"
+            "SELECT run.evaluator_identity, run.status, run.candidate_version_id::text AS candidate, report.sha256 AS report_sha256 "
+            "FROM evaluation_runs AS run "
+            "LEFT JOIN artifacts AS report ON report.project_id = run.project_id AND report.id = run.report_artifact_id "
+            "WHERE run.project_id = :project_id AND run.id = :id"
         ),
         {"project_id": project_id, "id": payload["evaluation_id"]},
     ).mappings().first()
@@ -319,15 +321,17 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
         text("SELECT status FROM skill_versions WHERE project_id = :project_id AND id = :id AND skill_id = :skill_id"),
         {"project_id": project_id, "id": payload["target_version_id"], "skill_id": payload["skill_id"]},
     ).mappings().first()
-    approval = conn.execute(
-        text(
-            "SELECT decision FROM approvals WHERE project_id = :project_id AND id = :id "
-            "AND decision = 'approved' AND expires_at > now()"
-        ),
-        {"project_id": project_id, "id": payload["approval_id"]},
-    ).first()
-    if evaluation is None or evaluation["evaluator_identity"] != "aether_verifier" or version is None or version["status"] != "ELIGIBLE" or approval is None:
+    if (
+        evaluation is None
+        or evaluation["evaluator_identity"] != "aether_verifier"
+        or evaluation["status"] != "ELIGIBLE"
+        or evaluation["candidate"] != str(payload["target_version_id"])
+        or (evaluation["report_sha256"] is not None and evaluation["report_sha256"] != payload["report_sha256"])
+        or version is None
+        or version["status"] != "ELIGIBLE"
+    ):
         raise ConsoleCommandError("deploy_rejected")
+    _claim_promotion_approval(conn, owner_id, project_id, payload)
     current = conn.execute(
         text("SELECT version_id::text AS version_id, deployment_version FROM skill_deployments WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary'"),
         {"project_id": project_id, "skill_id": payload["skill_id"]},
@@ -359,9 +363,107 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
     raise ConsoleCommandError("deploy_rejected")
 
 
+def _promotion_digest(skill_id: str, version_id: str) -> str:
+    intent = {"action": "promote", "skill_id": skill_id, "version_id": version_id}
+    return sha256_text(json.dumps(intent, sort_keys=True, separators=(",", ":")))
+
+
+def _claim_promotion_approval(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]) -> None:
+    """Consume an approval that names exactly this promotion, recording the promotion in the operation ledger.
+
+    The consumption commits or rolls back with the deployment row. Approvals that authorized a deployment before
+    promotions were consumed are still refused through the deployment that references them.
+    """
+    approval_id = str(payload["approval_id"])
+    approval = conn.execute(
+        text(
+            "SELECT task_id::text AS task_id, intent_digest, requested_payload, consumed_by_operation_id FROM approvals "
+            "WHERE project_id = :project_id AND id = :id AND owner_id = :owner_id "
+            "AND decision = 'approved' AND expires_at > now() FOR UPDATE"
+        ),
+        {"project_id": project_id, "id": approval_id, "owner_id": owner_id},
+    ).mappings().first()
+    if approval is None:
+        raise ConsoleCommandError("approval_rejected")
+    if approval["consumed_by_operation_id"] is not None or _exists(
+        conn, "SELECT 1 FROM skill_deployments WHERE project_id = :project_id AND approval_id = :id", project_id, approval_id
+    ):
+        raise ConsoleCommandError("approval_consumed")
+    digest = _promotion_digest(str(payload["skill_id"]), str(payload["target_version_id"]))
+    if approval["intent_digest"] != digest:
+        raise ConsoleCommandError("approval_rejected")
+    capability_id = conn.execute(
+        text(
+            "INSERT INTO capability_grants (project_id, task_id, grantee_service, token_hash, capability_type, scope, expires_at, revoked_at, policy_version) "
+            "VALUES (:project_id, :task_id, 'aether_worker', :token_hash, 'skill:promote', CAST(:scope AS jsonb), now(), now(), 'v1') "
+            "RETURNING id::text"
+        ),
+        {
+            "project_id": project_id,
+            "task_id": approval["task_id"],
+            "token_hash": sha256_text(f"skill.promote:{approval_id}"),
+            "scope": json.dumps({"skill_id": str(payload["skill_id"]), "version_id": str(payload["target_version_id"])}),
+        },
+    ).scalar_one()
+    operation_id = conn.execute(
+        text(
+            "INSERT INTO operations (project_id, task_id, intent_key, tool_id, args_sha256, intent_digest, normalized_arguments, "
+            "resource_id, resource_version, idempotency_class, risk, capability_id, approval_id, state, resolved_at) "
+            "VALUES (:project_id, :task_id, :intent_key, 'skill.promote', :digest, :digest, CAST(:arguments AS jsonb), "
+            ":resource_id, :resource_version, 'idempotent_write', :risk, :capability_id, :approval_id, 'CONFIRMED', now()) "
+            "RETURNING id::text"
+        ),
+        {
+            "project_id": project_id,
+            "task_id": approval["task_id"],
+            "intent_key": f"skill.promote:{approval_id}",
+            "digest": digest,
+            "arguments": json.dumps({"action": "promote", "skill_id": str(payload["skill_id"]), "version_id": str(payload["target_version_id"])}),
+            "resource_id": f"skill:{payload['skill_id']}",
+            "resource_version": str(payload["expected_deployment_version"]),
+            "risk": str((approval["requested_payload"] or {}).get("risk", "R2")),
+            "capability_id": capability_id,
+            "approval_id": approval_id,
+        },
+    ).scalar_one()
+    consumed = conn.execute(
+        text(
+            "UPDATE approvals SET consumed_by_operation_id = :operation_id, version = version + 1 "
+            "WHERE project_id = :project_id AND id = :id AND consumed_by_operation_id IS NULL"
+        ),
+        {"operation_id": operation_id, "project_id": project_id, "id": approval_id},
+    ).rowcount
+    if consumed != 1:
+        raise ConsoleCommandError("approval_consumed")
+
+
 def _rollback(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]) -> None:
-    task_id = payload.get("task_id")
-    if not task_id:
+    """Rolling back only lowers exposure, so it needs no new approval; it must name the canary it reverses."""
+    current = conn.execute(
+        text(
+            "SELECT deployment.version_id::text AS version_id, deployment.deployment_version, "
+            "deployment.evaluation_id::text AS evaluation_id, deployment.approval_id::text AS approval_id, "
+            "version.parent_version_id::text AS parent_version_id, active.version_id::text AS active_version_id "
+            "FROM skill_deployments AS deployment "
+            "JOIN skill_versions AS version ON version.project_id = deployment.project_id AND version.id = deployment.version_id "
+            "LEFT JOIN skill_deployments AS active ON active.project_id = deployment.project_id "
+            "AND active.skill_id = deployment.skill_id AND active.slot = 'active' "
+            "WHERE deployment.project_id = :project_id AND deployment.skill_id = :skill_id AND deployment.slot = 'canary' "
+            "FOR UPDATE OF deployment"
+        ),
+        {"project_id": project_id, "skill_id": payload["skill_id"]},
+    ).mappings().first()
+    if current is None:
+        raise ConsoleCommandError("deploy_rejected")
+    if str(current["deployment_version"]) != str(payload["expected_deployment_version"]) or current["version_id"] != payload.get("expected_previous_version_id"):
+        raise ConsoleCommandError("version_conflict")
+    target = str(payload["target_version_id"])
+    if (
+        current["evaluation_id"] != str(payload["evaluation_id"])
+        or current["approval_id"] != str(payload["approval_id"])
+        or target == current["version_id"]
+        or target not in {current["parent_version_id"], current["active_version_id"]}
+    ):
         raise ConsoleCommandError("deploy_rejected")
     try:
         rollback_active(
@@ -369,8 +471,7 @@ def _rollback(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]
             owner_id=owner_id,
             project_id=project_id,
             skill_id=str(payload["skill_id"]),
-            previous_version_id=str(payload["target_version_id"]),
-            task_id=str(task_id),
+            previous_version_id=target,
         )
     except SkillEvalError as exc:
         raise ConsoleCommandError(exc.code) from exc
