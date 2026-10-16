@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 import os
 import socket
+import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import cast
 
 from aether_gateway.model import GatewayDenied, ModelGateway, scripted_chat_completion
@@ -179,6 +181,12 @@ def test_socket_proxy_checks_the_job_token_and_forwards_to_the_gateway(monkeypat
     try:
         refused = _ask(proxy.socket_path, "Bearer other-token", {"model": "coder"})
         accepted = _ask(proxy.socket_path, f"Bearer {_JOB}", {"model": "coder", "messages": []})
+        assert proxy.directory.stat().st_mode & 0o007 == 0
+        assert proxy.socket_path.stat().st_mode & 0o007 == 0
+        assert _acl_perm(proxy.directory, 0x02, 65534) & 0o1
+        assert _acl_perm(proxy.socket_path, 0x02, 65534) & 0o6 == 0o6
+        assert _acl_perm(proxy.directory, 0x20, 0xFFFFFFFF) == 0
+        assert _acl_perm(proxy.socket_path, 0x20, 0xFFFFFFFF) == 0
     finally:
         proxy.close()
         server.shutdown()
@@ -191,6 +199,19 @@ def test_socket_proxy_checks_the_job_token_and_forwards_to_the_gateway(monkeypat
     assert isinstance(forwarded, dict)
     assert forwarded["aether_job_token"] == _JOB
     assert os.environ.get("AETHER_LIVE_MODEL_KEY") in {None, ""}
+
+
+def _acl_perm(path: Path, tag: int, ident: int) -> int:
+    raw = os.getxattr(path, "system.posix_acl_access", follow_symlinks=False)
+    version = struct.unpack_from("<I", raw)[0]
+    assert version == 2
+    offset = 4
+    while offset + 8 <= len(raw):
+        found_tag, perm, found_ident = struct.unpack_from("<HHI", raw, offset)
+        if found_tag == tag and found_ident == ident:
+            return perm
+        offset += 8
+    raise AssertionError((tag, ident))
 
 
 def _ask(path, authorization: str, payload: dict) -> tuple[int, dict]:

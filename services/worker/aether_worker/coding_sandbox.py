@@ -89,8 +89,6 @@ def container_arguments(
         "1",
         "--tmpfs",
         "/tmp:rw,nosuid,nodev,mode=1777",
-        "--workdir",
-        "/tmp",
         "--user",
         "65534:65534",
         "-e",

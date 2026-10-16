@@ -7,6 +7,8 @@ import os
 import secrets
 import shutil
 import socketserver
+import stat
+import struct
 import tempfile
 import threading
 from pathlib import Path
@@ -18,6 +20,14 @@ from aether_worker.loopback import LoopbackError, post_json
 _MAX_BODY = 1_048_576
 _MAX_LINE = 8192
 _CHAT_PATHS = {"/v1/chat/completions", "/chat/completions"}
+_SANDBOX_UID = 65534
+_ACL_USER_OBJ = 0x01
+_ACL_USER = 0x02
+_ACL_GROUP_OBJ = 0x04
+_ACL_MASK = 0x10
+_ACL_OTHER = 0x20
+_ACL_UNDEFINED_ID = 0xFFFFFFFF
+_DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 
 
 class CodingModelProxy:
@@ -28,9 +38,13 @@ class CodingModelProxy:
         self.job_token = job_token
         self._closed = False
         self.directory = Path(tempfile.mkdtemp(prefix="aether-model-"))
-        os.chmod(self.directory, 0o777)
-        self.socket_path = self.directory / "model.sock"
-        self._server = _UnixServer(str(self.socket_path), _Handler)
+        try:
+            _grant_directory(self.directory)
+            self.socket_path = self.directory / "model.sock"
+            self._server = _UnixServer(str(self.socket_path), _Handler)
+        except OSError:
+            shutil.rmtree(self.directory, ignore_errors=True)
+            raise
         self._server.proxy = self
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
@@ -88,7 +102,11 @@ class _UnixServer(socketserver.ThreadingUnixStreamServer):
 
     def server_bind(self) -> None:
         super().server_bind()
-        os.chmod(self.server_address, 0o666)
+        try:
+            _grant_socket(self.server_address)
+        except OSError:
+            self.server_close()
+            raise
 
 
 class _Handler(socketserver.StreamRequestHandler):
@@ -102,6 +120,37 @@ class _Handler(socketserver.StreamRequestHandler):
         method, path, headers, raw = parsed
         status, payload = self.server.proxy.respond(method, path, headers, raw)
         _write_json(self.wfile, status, payload)
+
+
+def _posix_acl(owner: int, named: int) -> bytes:
+    entries = (
+        (_ACL_USER_OBJ, owner, _ACL_UNDEFINED_ID),
+        (_ACL_USER, named, _SANDBOX_UID),
+        (_ACL_GROUP_OBJ, 0, _ACL_UNDEFINED_ID),
+        (_ACL_MASK, named, _ACL_UNDEFINED_ID),
+        (_ACL_OTHER, 0, _ACL_UNDEFINED_ID),
+    )
+    header = struct.pack("<I", 2)
+    body = b"".join(struct.pack("<HHI", tag, perm, ident) for tag, perm, ident in entries)
+    return header + body
+
+
+def _grant_directory(path: Path) -> None:
+    """Owner mode plus traverse for uid 65534. Never leave the directory world-writable."""
+    fd = os.open(path, _DIR_FLAGS)
+    try:
+        os.fchmod(fd, 0o700)
+        os.setxattr(f"/proc/self/fd/{fd}", "system.posix_acl_access", _posix_acl(0o7, 0o5), follow_symlinks=True)
+    finally:
+        os.close(fd)
+
+
+def _grant_socket(path: str | os.PathLike[str]) -> None:
+    """Owner mode plus connect for uid 65534. An ACL failure does not fall back to 0o666."""
+    if not stat.S_ISSOCK(os.lstat(path).st_mode):
+        raise OSError("socket_replaced")
+    os.chmod(path, 0o600)
+    os.setxattr(path, "system.posix_acl_access", _posix_acl(0o6, 0o6), follow_symlinks=False)
 
 
 def _read_http(reader) -> tuple[str, str, dict[str, str], bytes] | None:

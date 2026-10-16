@@ -51,6 +51,13 @@ class _PumpHandler(socketserver.BaseRequestHandler):
             remote.close()
 
 
+def _shutdown_write(target: socket.socket) -> None:
+    try:
+        target.shutdown(socket.SHUT_WR)
+    except OSError:
+        return
+
+
 def _bridge(left: socket.socket, right: socket.socket) -> None:
     def copy(source: socket.socket, target: socket.socket) -> None:
         try:
@@ -62,10 +69,7 @@ def _bridge(left: socket.socket, right: socket.socket) -> None:
         except OSError:
             return
         finally:
-            try:
-                target.shutdown(socket.SHUT_WR)
-            except OSError:
-                return
+            _shutdown_write(target)
 
     forward = threading.Thread(target=copy, args=(left, right), daemon=True)
     backward = threading.Thread(target=copy, args=(right, left), daemon=True)
