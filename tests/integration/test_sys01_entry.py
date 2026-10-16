@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -9,11 +10,13 @@ import sys
 import time
 import uuid
 from collections.abc import Callable
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
 import httpx
 from sqlalchemy import text
+from temporalio.client import Client, ScheduleActionStartWorkflow
 
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactStore
@@ -106,14 +109,14 @@ def test_public_entry_reaches_a_terminal_state(role_urls, clean_db, tmp_path: Pa
         _wait_http(f"http://127.0.0.1:{api_port}/health/live")
         _wait_line(worker_logs, "aether-worker-ready", worker)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
-            _exercise(http, role_urls, worker, worker_logs, secret, artifact_root)
+            _exercise(http, role_urls, worker, worker_logs, secret, artifact_root, queue)
     finally:
         _stop(worker)
         _stop(api)
         secret_path.unlink(missing_ok=True)
 
 
-def _exercise(http: httpx.Client, role_urls, worker, worker_logs: list[str], secret: str, artifact_root: Path) -> None:
+def _exercise(http: httpx.Client, role_urls, worker, worker_logs: list[str], secret: str, artifact_root: Path, task_queue: str) -> None:
     bootstrap = http.post(
         "/v1/auth/bootstrap",
         headers={"Origin": ORIGIN_VALUE},
@@ -168,7 +171,7 @@ def _exercise(http: httpx.Client, role_urls, worker, worker_logs: list[str], sec
     assert found.json()["hits"][0]["text"] == APPLE
     assert found.json()["hits"][0]["document_id"] == job["source_version_id"]
     _assert_unsupported(http, csrf, project_id, role_urls, owner_id)
-    _assert_watch(http, csrf, project_id, source_id, worker, worker_logs, role_urls, owner_id, artifact_root)
+    _assert_watch(http, csrf, project_id, source_id, worker, worker_logs, role_urls, owner_id, artifact_root, task_queue)
 
 
 def _assert_unsupported(http: httpx.Client, csrf: str, project_id: str, role_urls, owner_id: str) -> None:
@@ -201,7 +204,7 @@ def _assert_unsupported(http: httpx.Client, csrf: str, project_id: str, role_url
     assert int(runs) == 0
 
 
-def _assert_watch(http, csrf, project_id, source_id, worker_proc, worker_logs, role_urls, owner_id, artifact_root: Path) -> None:
+def _assert_watch(http, csrf, project_id, source_id, worker_proc, worker_logs, role_urls, owner_id, artifact_root: Path, task_queue: str) -> None:
     created = http.post(
         f"/v1/projects/{project_id}/watches",
         headers=_headers(csrf, "sys01-watch"),
@@ -248,6 +251,7 @@ def _assert_watch(http, csrf, project_id, source_id, worker_proc, worker_logs, r
     )
     assert ran["status"] == "ACTIVE"
     _assert_watch_records(database, owner_id, project_id, draft["id"], artifact_root)
+    _assert_watch_schedule(database, owner_id, project_id, draft["id"], task_queue)
 
 
 def _assert_watch_records(database: Database, owner_id: str, project_id: str, watch_id: str, artifact_root: Path) -> None:
@@ -270,3 +274,31 @@ def _assert_watch_records(database: Database, owner_id: str, project_id: str, wa
             assert hashlib.sha256(data).hexdigest() == row["sha256"]
             matched = True
     assert matched
+
+
+def _assert_watch_schedule(database: Database, owner_id: str, project_id: str, watch_id: str, task_queue: str) -> None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        schedule_id = conn.execute(
+            text("SELECT schedule_id FROM watches WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": watch_id},
+        ).scalar_one()
+    client = asyncio.run(Client.connect(_temporal_address()))
+
+    async def describe_ready():
+        deadline = time.time() + 30
+        last = None
+        while time.time() < deadline:
+            described = await client.get_schedule_handle(str(schedule_id)).describe()
+            last = described
+            if described.info.num_actions >= 1 and described.info.next_action_times:
+                return described
+            await asyncio.sleep(0.3)
+        raise AssertionError(f"schedule 没有循环动作: {last}")
+
+    described = asyncio.run(describe_ready())
+    action = described.schedule.action
+    assert isinstance(action, ScheduleActionStartWorkflow)
+    assert action.task_queue == task_queue
+    assert described.schedule.spec.intervals[0].every == timedelta(seconds=3600)
+    assert described.info.num_actions >= 1
+    assert list(described.info.next_action_times)

@@ -75,27 +75,29 @@ uv run --locked --no-build python scripts/doctor.py --require-services          
 
 ## SYS-01 公开入口接到真实检索，未实现的作业显式 unsupported（分支 `cursor/r6-entry-sys01-ac4b`）
 
-基线 `8b90363`，变基到 `85d27d3`。没有改 `STATUS.json`、`contracts/`、`verification.py`、`acceptance_report.py`、`memory.py`。没有把 `live_ready` 改成通过。
+基线 `8b90363`，变基到 `e2e4c6d`。没有改 `STATUS.json`、`contracts/`、`verification.py`、`acceptance_report.py`、`memory.py`。没有把 `live_ready` 改成通过。
 
 - `POST /v1/projects/{id}/search` 在有 ACTIVE 索引时走 `authorised_search`，没有索引仍是 503 `index_unavailable`。
-- 生产 worker 的 `route_pending` 会把已入队的 url / rss / local_document 采集跑到 SUCCEEDED 或 FAILED，并写出版本、分块和索引代；来源名单对得上的 Watch 从 DRAFT 激活后写出通知和产物。
-- `skill.evaluate` 与编码作业返回 422 `unsupported`，不写 outbox。决定见 ADR-F33（ADR-F30 已被 SYS-02/07 占用，ADR-F31 已被 SYS-04/06 占用，ADR-F32 已被 SYS-08/03 占用）。ADR-F27 里「保持 202 + QUEUED」的旧记录保留。
+- 生产 worker 把已入队的 url / rss / local_document 采集跑到 SUCCEEDED 或 FAILED，并写出版本、分块和索引代。命令已经 DELIVERED、采集仍是 QUEUED 或 RUNNING 时，重启后按索引根目录的 `projects.json` 继续执行。
+- 来源名单对得上的 Watch 变为 ACTIVE 后，在 worker 自己的任务队列上创建 Temporal schedule（间隔 `interval_seconds`），立刻跑第一次。水位变化才写通知和 `watch-run` 产物。
+- `skill.evaluate` 与编码作业返回 422 `unsupported`，不写 outbox。`docs/08_api_ui.md` 的编码作业行改为 unsupported。决定见 ADR-F33（ADR-F30 已被 SYS-02/07 占用，ADR-F31 已被 SYS-04/06 占用，ADR-F32 已被 SYS-08/03 占用）。ADR-F27 里「保持 202 + QUEUED」的旧记录保留。
 - 进程测试从公开 HTTP 开始，不直接调用内部 consumer。
 
 本机回归（Postgres 17.11 + pgvector 0.8.7，Temporal dev server `SERVING`）：
 
 ```text
-uv run --locked --no-build python scripts/verify_freeze.py
-uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'   # Ran 76 tests, OK
-uv run --locked --no-build pytest -q tests/unit                                      # 151 passed
-PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 327 passed
-uv run --locked --no-build python scripts/doctor.py --require-services               # exit 0
-(cd apps/web && pnpm typecheck)                                                      # exit 0（本机 Node 22；CI 使用 Node 24）
+uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit                                   # 200 passed
+AETHER_REQUIRE_SERVICES=1 PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration
+# 333 passed，1 warning（pydantic ReadOnly，既有）
+uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
+(cd apps/web && pnpm typecheck)                                                    # exit 0（本机 Node 22；CI 使用 Node 24）
 ```
 
-环境变量：`AETHER_REQUIRE_SERVICES=1`，`AETHER_ADMIN_DATABASE_URL` 指向本机 Postgres 17，`AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233`。
+环境变量：`AETHER_REQUIRE_SERVICES=1`，`AETHER_ADMIN_DATABASE_URL` 指向本机 Postgres 17，`AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233`。`reports/doctor.json` 的本机探测差异没有提交。
 
-剩余边界：github/arxiv 采集显式拒绝；Watch 第一次激活写通知和产物，循环 Temporal schedule 没有接通；worker 重启后，已经 DELIVERED 的命令不会自己重新发现仍在 QUEUED 的采集。这些没有记成已修复。
+剩余边界：github/arxiv 采集仍显式拒绝；水位没有变化时不发通知；持有 worker 数据库口令的人仍可以伪造账本。这些没有记成已修复。不改变 `live_ready`。
 
 下一步：PR 标为 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。
 

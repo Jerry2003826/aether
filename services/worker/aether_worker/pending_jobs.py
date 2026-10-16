@@ -31,23 +31,23 @@ def execute_queued_ingestions(
         _run_ingestion(database, store, owner_id=owner_id, project_id=project_id, index_root=index_root, job=job)
 
 
-def run_activated_watches(
+def finish_watch_tick(
     database: Database,
     store: ArtifactStore,
     *,
     owner_id: str,
     project_id: str,
+    watch_id: str,
+    trigger_key: str,
 ) -> None:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        watch_ids = conn.execute(
-            text(
-                "SELECT id::text FROM watches WHERE project_id = :project_id AND status = 'ACTIVE' AND last_run_at IS NULL "
-                "ORDER BY created_at, id"
-            ),
-            {"project_id": project_id},
-        ).scalars().all()
-    for watch_id in watch_ids:
-        _run_watch(database, store, owner_id=owner_id, project_id=project_id, watch_id=str(watch_id))
+    _run_watch(
+        database,
+        store,
+        owner_id=owner_id,
+        project_id=project_id,
+        watch_id=watch_id,
+        trigger_key=trigger_key,
+    )
 
 
 def _claim_ingestions(database: Database, *, owner_id: str, project_id: str) -> list[dict[str, Any]]:
@@ -229,14 +229,22 @@ def _finish(
         )
 
 
-def _run_watch(database: Database, store: ArtifactStore, *, owner_id: str, project_id: str, watch_id: str) -> None:
+def _run_watch(
+    database: Database,
+    store: ArtifactStore,
+    *,
+    owner_id: str,
+    project_id: str,
+    watch_id: str,
+    trigger_key: str,
+) -> None:
     result = trigger_watch(
         database,
         owner_id=owner_id,
         project_id=project_id,
         watch_id=watch_id,
         watermark=_watermark(database, owner_id=owner_id, project_id=project_id, watch_id=watch_id),
-        trigger_key=f"activate-{watch_id}",
+        trigger_key=trigger_key,
     )
     if not result["summarized"]:
         return

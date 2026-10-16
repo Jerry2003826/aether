@@ -19,10 +19,14 @@ from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
-from aether_worker.pending_jobs import execute_queued_ingestions, run_activated_watches
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
 from aether_worker.memory import apply_memory_commands
+from aether_worker.pending_jobs import execute_queued_ingestions
+from aether_worker.project_registry import load_projects, save_projects
+from aether_worker.watch_tick import run_watch_tick
+from aether_worker.watches import ensure_watch_schedules
+from aether_worker.watches_workflow import WatchWorkflow
 
 
 def make_executors() -> tuple[concurrent.futures.ThreadPoolExecutor, concurrent.futures.ThreadPoolExecutor]:
@@ -58,6 +62,7 @@ def route_pending(
             )
         ).mappings().all()
     remembered = seen if seen is not None else {}
+    before = dict(remembered)
     grouped: dict[str, dict[str, Any]] = {}
     for row in rows:
         project_id = str(row["project_id"])
@@ -81,12 +86,20 @@ def route_pending(
         except Exception as exc:
             print(f"aether-route-failed project={project_id} error={type(exc).__name__}", flush=True)
     root = index_root_from_env()
+    if seen is not None and remembered != before:
+        save_projects(root, remembered)
+    if _defer_progress():
+        return
     for project_id, owner_id in list(remembered.items()):
         try:
             execute_queued_ingestions(worker, store, owner_id=owner_id, project_id=project_id, index_root=root)
-            run_activated_watches(worker, store, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
             print(f"aether-progress-failed project={project_id} error={type(exc).__name__}", flush=True)
+
+
+def _defer_progress() -> bool:
+    """Test switch. A delivered command can stay QUEUED until a later process resumes it."""
+    return os.environ.get("AETHER_DEFER_PROGRESS", "").strip() == "1"
 
 
 def _intake_pause_seconds() -> float:
@@ -150,14 +163,14 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     worker = Worker(
         client,
         task_queue=resolved.task_queue,
-        workflows=[DurableTaskWorkflow],
-        activities=[prepare_task, execute_task, apply_task_control],
+        workflows=[DurableTaskWorkflow, WatchWorkflow],
+        activities=[prepare_task, execute_task, apply_task_control, run_watch_tick],
     )
     dispatcher = Database(resolved.dispatcher_url)
     database = Database(resolved.worker_url)
     verifier = Database(resolved.verifier_url)
     store = ArtifactStore(resolved.artifact_root, database)
-    seen: dict[str, str] = {}
+    seen = load_projects(index_root_from_env())
     stop = asyncio.Event()
     for signame in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(signame, stop.set)
@@ -179,6 +192,10 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
                     await run_control(control_executor, route_pending, dispatcher, database, verifier, store, seen)
                 except Exception as exc:
                     print(f"aether-route-failed error={type(exc).__name__}", flush=True)
+                try:
+                    await ensure_watch_schedules(client, database, seen, resolved.task_queue)
+                except Exception as exc:
+                    print(f"aether-watch-schedule-failed error={type(exc).__name__}", flush=True)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.25)
                 except TimeoutError:
