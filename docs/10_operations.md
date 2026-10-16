@@ -28,6 +28,8 @@ F00输出`uv.lock`（各独立workspace如有）、`pnpm-lock.yaml`、`infra/ima
 
 开发进程里的 worker 是 `uv run --locked --no-build python -m aether_worker`。它使用已有 Temporal 和 `command_outbox`，不另起调度器。环境变量、命令种类和停启方式见 README「安装与运行」。
 
+操作者仍然导出 `AETHER_VERIFIER_DATABASE_URL` 和 `AETHER_LIVE_MODEL_KEY`。入口把验收库地址交给验收进程，把供应商 key 交给网关进程，把 Docker 探测交给 runner 进程，然后从本进程环境删除这两项并重新执行。重新执行后的 worker 看不到验收库口令、供应商 key，也不打开 Docker 套接字。验收进程只使用 `aether_verifier`。网关进程持有供应商 key，并用 worker 库角色核对任务令牌。runner 进程探测 daemon：`docker info` 返回非空 ServerVersion 才是 enabled，否则作业记录 `runtime=unsupported`。worker 角色不调用 docker。编码沙箱的启动、停止和日志由 runner 按固定动作执行。技能评分在验收进程执行，版本状态仍由 worker 写回。沙箱和评分基座镜像用摘要固定，评分依赖 `pytest==8.3.5` 以哈希校验安装。启动时对已见项目调用产物 `recover`。`get` 会读满账本声明的长度，不把一次短读当成哈希不一致。
+
 PostgreSQL为AETHER与Temporal使用独立数据库/用户，持久volume。Temporal开发模式可以使用独立测试服务，但release必须使用持久服务配置，不能把start-dev的临时状态冒充生产恢复能力。Compose健康检查等待真实ready；迁移作为显式job；命令不能默认删除volume。
 
 全栈镜像digest/arm64支持由实际拉取验证。控制/研究链路的开发目标支持macOS arm64，实际支持以探针为准；完整Linux sandbox安全与故障验收在Linux amd64环境执行。Windows通过WSL2/远端Linux控制，不假设原生Docker安全行为完全相同。
@@ -63,3 +65,5 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 不使用`docker compose down -v`作为普通重启/升级；不自动清空DB；不把任何admin端口映射0.0.0.0；不在前端bundle注入provider key。备份恢复、数据导出、真实PR发布需要显式命令和授权。安装脚本不改机器范围防火墙/安全设置；需要这些权限的部署步骤先生成配置供owner执行/批准，并把相关验收标清。
 
 **备份恢复与 Temporal**：备份只含 AETHER 数据库与产物目录，不含 Temporal 的工作流历史。恢复点之后 Temporal 里发生的事不会随数据库回退：备份后已经完成的任务在恢复时保留当前状态（结果里列在 `kept_live_tasks`），不会被改回排队；恢复把所有 PENDING/DELIVERING 命令改成 STOPPED，不自动重新派发，由所有者核对后重新提交。在用库上恢复前先停 worker 与派发进程。重建到空库时，Temporal 若也是新的，旧工作流不存在，未完成的任务需要重新派发；Temporal 若仍是原来的，工作流仍按原历史运行。
+
+可重复的崩溃演练是 `scripts/run_crash_recovery_drill.py`。它使用名称以 `aether-drill-` 开头的 Temporal 容器和该容器自己的 sqlite，不停止共享开发服务。顺序是备份 Postgres 与 sqlite、只删除演练标记指向的 sqlite、按 `restore-aether` 合并恢复、再读取任务状态和 Temporal 工作流。两边不一致时报告 `relation=diverged`、`action=human_review`，不改写终态。恢复仍是合并，不是把 Temporal 历史回退到备份点。演练写入的备份、sqlite 和报告必须位于当前工作目录内。工作流编号只接受字母、数字、点、下划线和连字符。Postgres 与 sqlite 在容器停止时一起复制。确认值不是 `restore-aether` 或备份哈希不符时，不停止容器，也不删除 sqlite。容器以宿主机 uid 运行，并设置 `USER=temporal` 与 `HOME=/state`，这样镜像 passwd 里没有这个 uid 时仍能创建 sqlite。

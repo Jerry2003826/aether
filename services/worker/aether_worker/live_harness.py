@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
+from aether_worker.sandbox_image import SANDBOX_IMAGE
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
 LIVE_BASE = "AETHER_LIVE_MODEL_BASE"
@@ -42,7 +43,7 @@ CORPUS = (
     {"id": "chunk-rail", "text": "The railway timetable lists the midnight express to York"},
     {"id": "chunk-code", "text": "assert left != right && flag == true"},
 )
-ISOLATION_IMAGE = "python:3.12-alpine"
+ISOLATION_IMAGE = SANDBOX_IMAGE
 ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
 ISOLATION_SCRIPT = (
     "import os,socket\n"

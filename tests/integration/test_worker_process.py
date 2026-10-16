@@ -133,7 +133,7 @@ def _drain(pipe, bucket: list[str]) -> None:
         bucket.append(line)
 
 
-def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str], timeout: float = 30) -> None:
+def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str], timeout: float = 90) -> None:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if any(needle in line for line in bucket):

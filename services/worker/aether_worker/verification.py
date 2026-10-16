@@ -16,9 +16,13 @@ from aether_storage.db import Database
 from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
 from aether_worker.grader_runner import GRADER_PROGRAM as _GRADER_PROGRAM
 from aether_worker.runner import JOB_IMAGE, _docker
+from aether_worker.sandbox_image import grader_dockerfile
 from aether_worker.snapshot import SnapshotRejected, copy_tree, ensure_real_directory, read_tree
 
 GRADER_IMAGE = "aether-grader:local"
+_GRADER_ID: str | None = None
+_DOCKER_IMAGE = "image"
+_DOCKER_INSPECT = "inspect"
 _SKIP_NAMES = {"conftest.py", "pytest.ini", "conftest.pyc"}
 _SHADOW_ROOTS = frozenset({"pytest.py", "pytest", "_pytest", "pluggy.py", "pluggy", "sitecustomize.py", "usercustomize.py"})
 
@@ -101,22 +105,44 @@ def _stage(candidate: Path, suite: Path, destination: Path) -> None:
         raise VerificationError(exc.code) from exc
 
 
-def _ensure_grader_image() -> bool:
-    if _docker(["image", "inspect", GRADER_IMAGE]).returncode == 0:
-        return True
-    if _docker(["image", "inspect", JOB_IMAGE]).returncode != 0:
-        pulled = _docker(["pull", JOB_IMAGE])
-        if pulled.returncode != 0:
-            return False
-    dockerfile = f"FROM {JOB_IMAGE}\nRUN pip install --no-cache-dir pytest==8.3.5\n"
-    built = subprocess.run(
-        ["docker", "build", "-t", GRADER_IMAGE, "-"],
-        input=dockerfile,
-        text=True,
-        capture_output=True,
-        check=False,
-    )
-    return built.returncode == 0
+def _ensure_grader_image() -> str | None:
+    """Build the hash-locked grader and return its image id, never a mutable tag."""
+    global _GRADER_ID
+    if _GRADER_ID and _docker([_DOCKER_IMAGE, _DOCKER_INSPECT, _GRADER_ID]).returncode == 0:
+        return _GRADER_ID
+    dockerfile = grader_dockerfile()
+    stamp = hashlib.sha256(dockerfile.encode()).hexdigest()
+    found = _image_by_stamp(stamp)
+    if found is None:
+        if _docker([_DOCKER_IMAGE, _DOCKER_INSPECT, JOB_IMAGE]).returncode != 0:
+            pulled = _docker(["pull", JOB_IMAGE])
+            if pulled.returncode != 0:
+                return None
+        built = subprocess.run(
+            ["docker", "build", "--label", f"aether.grader_dockerfile={stamp}", "-t", GRADER_IMAGE, "-"],
+            input=dockerfile,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if built.returncode != 0:
+            return None
+        found = _image_by_stamp(stamp)
+    if found is None or not found.startswith("sha256:"):
+        return None
+    _GRADER_ID = found
+    return found
+
+
+def _image_by_stamp(stamp: str) -> str | None:
+    listed = _docker(["images", "--filter", f"label=aether.grader_dockerfile={stamp}", "--format", "{{.ID}}"])
+    if listed.returncode != 0 or not listed.stdout.strip():
+        return None
+    inspected = _docker([_DOCKER_IMAGE, _DOCKER_INSPECT, "--format", "{{.Id}}", listed.stdout.strip().splitlines()[0]])
+    if inspected.returncode != 0:
+        return None
+    image_id = inspected.stdout.strip()
+    return image_id or None
 
 
 def run_grader_container(
@@ -219,7 +245,8 @@ def grade(
         return _result("FAIL", "候选哈希与绑定时不一致", observed_suite, observed_contract, observed_candidate)
     if _shadowed_import(candidate) is not None:
         return _result("FAIL", "候选包含会遮蔽评分器的模块", observed_suite, observed_contract, observed_candidate)
-    if not _ensure_grader_image():
+    grader_image = _ensure_grader_image()
+    if grader_image is None:
         return _result("FAIL", "评分容器不可用", suite_sha256, contract_sha256, observed_candidate)
     protocol = extract_protocol(candidate, suite)
     with tempfile.TemporaryDirectory(prefix="aether-grade-") as temporary:

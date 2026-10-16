@@ -1,23 +1,29 @@
-# SYS-01 后续：变基到含 PR #26 的 main
+# R7 凭证分离、镜像摘要、产物恢复与崩溃演练
 
-任务：把 PR #25 变基到 `cfbc65d`。ADR-F34 是 GitHub/arXiv 采集、工具账本、来源删除缓存和只读推荐。ADR-F35 是任务流程复核（PR #28）。ADR-F36 至 ADR-F38 是编码作业和技能评测（PR #26）。本决定改记为 ADR-F39。
+任务：从 `cc471e3` 做 P2-09 里本路的五项，变基到 `b75fb36`。ADR-F34 至 ADR-F38 已由采集、任务流程和编码作业占用，ADR-F39 已由采集域名、抓取终态和跟踪批准占用，本决定记为 ADR-F40。不改 `contracts/`、`reference/`、验收条件和 `readiness.live_ready`。编码作业、技能评测和 ADR-F39 的采集边界保留 main 已合入的行为。`JOB_IMAGE` 使用同一 digest。
 
-相关合同：不改 `contracts/`、`reference/`、验收标准或 `STATUS.json`。`evaluateSkill` 与 `createCodingJob` 仍按 ADR-F36 至 ADR-F38 受理并跑到可查询终态。不改变 `live_ready`。
+拟改路径：
 
-两边都留下的行为：
+- `services/worker/aether_worker/role_launch.py`、`role_http.py`、`role_client.py`、`verifier_process.py`、`runner_process.py`、`loopback.py`、`sandbox_delegate.py`
+- `services/gateway/aether_gateway/__main__.py`
+- `services/worker/aether_worker/service.py`、`goal_effect.py`、`runner.py`、`verification.py`、`sandbox_image.py`、`startup.py`、`coding_sandbox.py`、`skill_execute.py`
+- `packages/storage/aether_storage/artifacts.py`
+- `services/worker/aether_worker/crash_drill.py`、`scripts/run_crash_recovery_drill.py`
+- `docs/DECISIONS.md`、`docs/10_operations.md`、`README.md`、`infra/images.lock.json` 与由此重建的 `MASTER_SPEC.md`
+- `tests/unit/test_r7_*.py`、`tests/integration/test_r7_*.py`
 
-- URL、RSS、`github_api`、`arxiv_api` 都按 `approved_config.allowed_domains` 做精确主机名比对。空名单拒绝这些远程抓取。URL 与 RSS 的重定向继续比对。
-- `github_api` 与 `arxiv_api` 仍只连接官方主机，或在夹具开关和 `AETHER_INGEST_FIXTURE_HOSTS` 同时满足时连接夹具主机。不跟随重定向，不跟随 `download_url`。非官方主机仍是 `source_host_rejected`。
-- `local_document` 仍读本项目产物。抓取失败仍进入 `fetch_failed`。已激活的跟踪仍可暂停，并在激活时写入 `approved_by`。
-- 工具仍经已审核 manifest、MCP 和操作账本执行。来源删除仍递增 `visibility_epoch` 并丢掉检索缓存。推荐 GET 仍不写画像和曝光。
-- 词法检索仍不调用编码进程。非空 `source_ids` 仍在截断之前过滤。
-- 编码作业和技能评测仍跑到可查询终态。取消仍要确认容器消失。TTL 仍不回收持有租约的作业。围栏、预算、基线和终态事件仍按 ADR-F38。
-- NEEDS_REVIEW 仍有所有者出口。worker 不以所有者名义自动批准。执行前必须有所有者的 `approve_goal`。
-- active elapsed 只累计 RUNNING 与 VERIFYING。排队、审批、暂停和复核不计入。
-- 终态结束本次 workflow run，并在历史达到 5000 或服务端建议时 continue-as-new。工作流 ID 复用是 `REJECT_DUPLICATE`。投递有租约。审批失败写入真实状态，不同载荷仍是 409。超额可对账。已成功任务的答案和验收报告删除返回 409 `evidence_retained`。
+测试命令：
 
-拟改路径：`docs/DECISIONS.md`（ADR-F39）、由此重建的 `MASTER_SPEC.md`、`reports/HANDOFF.md`、`reports/current-plan.md`。代码路径已在本提交：`pending_jobs.py`、`ingest.py`、`remote_sources.py`，以及覆盖白名单的采集测试。
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --no-build pytest -q tests/unit
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration
+(cd apps/web && pnpm typecheck)
+```
 
-测试：不 skip、不 xfail、不删断言、不放宽断言。变基后重跑 `verify_freeze`、参考套件、单元测试，以及 `AETHER_REQUIRE_SERVICES=1` 的集成测试。
+进度：变基到 `b75fb36` 后保留 ADR-F36 至 ADR-F39，本路改为 ADR-F40。`service.py` 同时保留 `dispatch_approved_tools`、`execute_queued_coding_jobs`、`execute_queued_ingestions` 和 `launch_privileged_roles`。`goal_effect.py` 同时保留所有者批准与凭证拆分。演练容器设置 `USER=temporal` 与 `HOME=/state`。回环请求不跟随代理。角色监听用 `handle_request` 轮询。worker 进程里的编码沙箱改由 runner 执行 docker，技能评分改由验收进程执行。
 
-进度：冲突已按两边行为合并，决定是 ADR-F39。三条 P2 已接上：PDF 按媒体类型抽正文，停止的 schedule 确认删除后不再轮询，过滤检索只给允许的位置打分。冻结检查通过，`api_operations` 50。参考套件 76。单元 251 passed。集成第一次 376 passed、1 failed（Hermes 身份探针 commit 为空）；该测试单独重跑通过；全量重跑 377 passed、1 warning。没有 skip。头 `3a28a5f` 的 pack-and-unit、integration 与 SonarCloud 已通过。随后的交接提交另记，通过之前不把新 head 记成通过。不改 `live_ready`。
+结果：变基到 `b75fb36` 之后，2026-10-16 本地冻结检查通过，参考套件 76 OK，单元 277 passed（105.49s），集成 382 passed、1 warning（547.92s）。web typecheck 在 Node 22.14.0 上退出码 0。doctor `--require-services` 退出码 0，`reports/doctor.json` 没有提交。`live_ready` 保持 pending。这次提交的 CI 还没有记入。
+
+阻塞：同一用户仍能打开 Docker socket；网关进程持有 worker 库口令；子进程不自动拉起；演练不碰共享内存 Temporal。

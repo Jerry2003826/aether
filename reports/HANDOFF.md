@@ -1,5 +1,23 @@
 # 交接
 
+## R7 凭证分离、镜像摘要、产物恢复与崩溃演练（分支 `cursor/r7-cred-sandbox-recover-0956`）
+
+基线已变基到 `origin/main` 的 `b75fb36`（PR #25 已合入）。ADR-F34 是公开采集，ADR-F35 是复核出口，ADR-F36、ADR-F37、ADR-F38 是编码作业、取消回收和审查收紧，ADR-F39 是采集域名、抓取终态和跟踪批准。本路凭证、镜像、产物和崩溃演练改记 ADR-F40。没有改 `contracts/`、`reference/`，没有改 F26 结果文件字节，没有把 `readiness.live_ready` 改成 passed。`f26.live_ready` 仍是 false。`service.py` 同时保留 `dispatch_approved_tools`、`execute_queued_coding_jobs`、`execute_queued_ingestions` 和 `launch_privileged_roles`。`goal_effect.py` 同时保留所有者批准和凭证拆分。编码作业的 `JOB_IMAGE` 改为与沙箱相同的 digest，取代 ADR-F36 正文里的 `python:3.12-alpine`。显式传入 `python:3.12-alpine` 的编码测试参数没有改。
+
+凭证：`python -m aether_worker` 把验收库地址经 stdin 交给 `aether_worker.verifier_process`，把供应商 key 交给 `aether_gateway`，把 Docker 探测交给 `aether_worker.runner_process`，然后从环境删除 `AETHER_VERIFIER_DATABASE_URL` 与 `AETHER_LIVE_MODEL_KEY` 并 `execve` 重新执行。`/proc/pid/environ` 只记录启动环境，只弹出变量不够。进程内测试仍可构造带 `verifier_url` 和 `live_model_key` 的 `WorkerEndpoints`。
+
+镜像：沙箱、隔离和 F26 校验都引用 `python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4`。评分镜像用 `--require-hashes` 安装 `pytest==8.3.5`，运行时用构建出的镜像 id。
+
+产物：`serve` 在 `aether-worker-ready` 之前对 `projects.json` 调用 `ArtifactStore.recover`。`get` 循环读到账本长度加一字节。
+
+Docker：`docker info --format {{.ServerVersion}}` 非空才是 `enabled`，否则 `unsupported`。worker 角色不调用 daemon。编码沙箱的 docker 动作由 runner 进程执行。技能评分在验收进程执行，版本状态仍由 worker 写回。`CodingJobResult.status` 仍是 `ACTIVE`。
+
+崩溃演练：`scripts/run_crash_recovery_drill.py` 只接受 `aether-drill-` 加 8 位小写十六进制的容器。备份时先停容器，再一起复制 Postgres 与演练 sqlite，然后才启动。删除该 sqlite 前，路径必须解析到 `aether-drill-` 加 8 位十六进制目录。确认值不是 `restore-aether` 或哈希不符时，不停止容器也不删 sqlite。`SUCCEEDED` 只和 `COMPLETED` 对齐；冲突的终态记 `diverged` / `human_review`，`rewritten` 为 false。不改写终态，不回退 Temporal。容器以宿主机 uid 运行，并设置 `USER=temporal` 与 `HOME=/state`，因为镜像 passwd 没有 CI runner 的 uid 时，进程会在打开 sqlite 之前退出。端口可连之后再等 0.4 秒，容器仍在运行且端口仍可连才算就绪。路径只接受当前工作目录。工作流编号只接受字母、数字、点、下划线和连字符。
+
+审查修复：终态必须成对才算 aligned。Postgres 与 sqlite 都在容器停止期间复制。删除前解析演练目录。恢复前校验确认和哈希。worker 读 `goal_effect.ENDPOINTS`。覆盖 `role-pids.json` 前结束上一组角色进程，且只结束命令行仍是验收、网关或 runner 的进程。回环 HTTP 使用空 `ProxyHandler`，不跟随 `HTTP_PROXY`。角色监听用 `handle_request` 轮询，不调用 `http.server`，也不调用 `serve_forever`。runner 的健康检查使用启动时的探测结果。
+
+变基到 `b75fb36` 之后，2026-10-16 本地：冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 277 passed（105.49s），集成 382 passed、1 warning（547.92s，含崩溃演练、凭证分离、编码技能终态和 ADR-F39 采集测试），web typecheck 在 Node 22.14.0 上退出码 0（CI 使用 Node 24），doctor `--require-services` 退出码 0。`reports/doctor.json` 没有提交。`live_ready` 仍是 pending。这次提交的 CI 还没有记入。
+
 ## SYS-01 后续：PR #23 的八条 Codex 意见（分支 `cursor/r6-entry-followup-168c`）
 
 基线改为 `cfbc65d`（PR #24、PR #28 与 PR #26 已合入 main）。ADR-F34 留给 GitHub/arXiv 采集、工具账本、来源删除缓存和只读推荐。ADR-F35 留给任务流程复核。ADR-F36、ADR-F37 与 ADR-F38 留给编码作业和技能评测。八条意见里仍属于本决定的部分改记为 ADR-F39。域名白名单同时覆盖 `url`、`rss`、`github_api` 和 `arxiv_api`。GitHub 与 arXiv 的官方主机、夹具主机和不跟随重定向都保留；非官方主机仍是 `source_host_rejected`。复核出口、所有者 `approve_goal`、活动时间、continue-as-new、投递租约、幂等冲突和 `evidence_retained` 都保留。编码作业和技能评测仍按 ADR-F36 至 ADR-F38 跑到可查询终态；本决定不改这两条入口的合同和路由。没有改 `contracts/`、`reference/`，没有删断言，也没有把仍成立的断言放宽。`live_ready` 没有改。没有改 `STATUS.json`。
@@ -62,7 +80,7 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 
 ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F36 接替。Watch 循环仍按 ADR-F33。GitHub 与 arXiv 采集、工具账本和检索可见性按已合入的 ADR-F34。复核出口、所有者批准、活动时间和投递租约按已合入的 ADR-F35，本路不改那些行为。`route_pending` 在采集之后先派发已批准工具，再跑编码作业和技能评测。成功的编码状态是冻结检查约束里的 `FINISHED`，没有 `SUCCEEDED`。
 
-编码作业：`POST /v1/projects/{id}/coding-jobs` 在任务或基线产物不存在时返回 404 `not_found`，不写 outbox。合法请求 202。worker 消费 `coding.create`，在 `python:3.12-alpine` 里跑所有者放进基线产物的候选和测试。容器断网、只读、丢掉全部 capability、`no-new-privileges`、pid 上限 64、内存和 swap 各 256MiB、1 CPU、`/tmp` 为 tmpfs、用户 65534。不挂 Docker socket，不继承 worker 环境。测试通过且网络探测不是 0、环境里没有凭证名时是 `FINISHED`，否则 `FAILED`。失败后同一任务和作业键再提交走 `coding.retry`，fencing 加一，新建 operation 和 capability。还没失败是 409 `job_not_retryable`。每次尝试在现有账本预留 1 micro-USD 和 1 token，沙箱结束后按实际 0 结算；预留之后进程失败则 `mark_unknown`，未决账单继续占用。补丁、测试结果和事件挂到任务产物。公开合同没有单独的编码作业查询。这次不启动 OpenHands，也不发作业范围的模型调用。
+编码作业：`POST /v1/projects/{id}/coding-jobs` 在任务或基线产物不存在时返回 404 `not_found`，不写 outbox。合法请求 202。worker 消费 `coding.create`，在 `python:3.12-alpine` 里跑所有者放进基线产物的候选和测试。镜像现由 ADR-F40 的 `JOB_IMAGE` digest 取代这一句里的可变标签。容器断网、只读、丢掉全部 capability、`no-new-privileges`、pid 上限 64、内存和 swap 各 256MiB、1 CPU、`/tmp` 为 tmpfs、用户 65534。不挂 Docker socket，不继承 worker 环境。测试通过且网络探测不是 0、环境里没有凭证名时是 `FINISHED`，否则 `FAILED`。失败后同一任务和作业键再提交走 `coding.retry`，fencing 加一，新建 operation 和 capability。还没失败是 409 `job_not_retryable`。每次尝试在现有账本预留 1 micro-USD 和 1 token，沙箱结束后按实际 0 结算；预留之后进程失败则 `mark_unknown`，未决账单继续占用。补丁、测试结果和事件挂到任务产物。公开合同没有单独的编码作业查询。这次不启动 OpenHands，也不发作业范围的模型调用。
 
 取消和 TTL 见 ADR-F37。任务 `cancel` 把 `resume_state` 写成 `cancel_requested`。作业轮询到这个状态，或任务已是 `CANCELLED`，就先留下限长日志，再用 10 秒 grace 停掉带 `aether.coding=<job id>` 标签的容器，第二次列表为空才写成 `CANCELLED`。事件里 `cancel_state` 是 `confirmed`，`external_effect` 仍是 `unknown`。capability 撤销，该次预留按实际 0 结算。容器还在就不进入终态，租约清掉，已预留账单 `mark_unknown`。租约在 `operations.lease_until`，领取和轮询各续 30 秒。截止时间已到且租约过期才回收；抢不到租约不调用 docker，也不删除作业行。确认停掉后截止时间到达是 `FAILED` / `deadline_exceeded`。`CANCELLED` 不能用同一作业键重试。ADR-F26 的 `LinuxRunner.cancel` 没有改。
 
@@ -167,33 +185,7 @@ CI 在 `771499e` 上全绿：
 
 有意改动的既有断言：`tests/integration/test_console_api.py` 的 `test_recommendations_feedback_and_costs_read_the_ledger`。GET 不再要求写出曝光行，反馈请求不再带 `impression_id`。标题、exploration 为 false、policy_version、反馈条数和检索 503 仍在。去掉的是对曝光行 `collaborative_filtering` 的读取。
 
-先失败再修：实现前 `tests/unit/test_remote_sources.py` 因缺少 `aether_worker.remote_sources` 无法收集。
-
-本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 29.1.3，Hermes v0.22.1）：
-
-```text
-uv run --locked --no-build python scripts/verify_freeze.py
-# exit 0
-uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
-# Ran 76 tests, OK
-uv run --locked --no-build pytest -q tests/unit
-# 231 passed
-AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
-  uv run --locked --no-build pytest -q tests/integration
-# Hermes 不在该进程 PATH：347 passed，1 failed
-# tests/integration/test_hermes_probe.py::test_pinned_hermes_cli_prints_its_real_version
-# reason=hermes_cli_missing
-PATH="$HOME/.local/bin:.hermes/.venv/bin:$PATH" 下重跑该探针和本路 5 条集成用例
-# 6 passed
-uv run --locked --no-build python scripts/doctor.py --require-services
-# exit 0
-```
-
-`reports/doctor.json` 的本机探测差异没有提交。本机 Node 是 `/exec-daemon/node`，web 未改，未重跑 typecheck；CI 使用 Node 24。
-
-剩余边界：BM25 文件里可能还留着已删除文本的字节，返回前按 tombstone 滤掉。持有 worker 数据库口令的人仍可以写账本。本路径不发放 capability。probe 仍返回 unavailable，不打开传输。编码作业和技能评测仍是 unsupported。不改变 `live_ready`。
-
-下一步：PR 标为 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）绿。
+本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 29.1.3，Hermes v0.22.1）：冻结检查通过，参考套件 76，单元 231。集成在 Hermes 不在 PATH 时 347 passed、1 failed（`test_pinned_hermes_cli_prints_its_real_version`）。把 `.hermes/.venv/bin` 放入 PATH 后该探针与本路用例通过。doctor exit 0。PR #24 已合入 `6f223f7`。
 
 ## SYS-08 验收报告与 SYS-03 快照边界（分支 `cursor/r6-report-sys08-sys03-e789`）
 

@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
+from aether_worker.sandbox_delegate import (
+    SandboxDelegateError,
+    remote_completed,
+    remote_logs,
+    remote_run,
+    worker_delegates,
+)
 
 CODING_RUNNER = r"""
 import importlib.util, inspect, json, os, signal, sys, time
@@ -188,7 +195,7 @@ def stop_arguments(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS) ->
 def coding_container_ids(job_id: str) -> list[str] | None:
     if not docker_available():
         return None
-    completed = _docker(["ps", "-aq", "--filter", f"label=aether.coding={job_id}", "--filter", "label=aether.role=coding"])
+    completed = _sandbox_docker(["ps", "-aq", "--filter", f"label=aether.coding={job_id}", "--filter", "label=aether.role=coding"])
     if completed.returncode != 0:
         return None
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
@@ -210,6 +217,11 @@ def read_bounded_tail(stream: BinaryIO, limit: int) -> str:
 
 
 def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
+    if worker_delegates():
+        try:
+            return remote_logs(target, limit, timeout=60)
+        except SandboxDelegateError as exc:
+            raise CodingSandboxError("sandbox_unavailable") from exc
     if shutil.which("docker") is None:
         return {"stdout": "", "stderr": ""}
     process = subprocess.Popen(["docker", "logs", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
@@ -245,10 +257,10 @@ def confirm_coding_stop(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECOND
         return False
     for command in stop_arguments(job_id, grace_seconds=grace_seconds):
         if command[0] != "ps":
-            _docker(command)
+            _sandbox_docker(command)
     for item in coding_container_ids(job_id) or []:
-        _docker(["stop", "-t", str(grace_seconds), item])
-        _docker(["rm", "-f", item])
+        _sandbox_docker(["stop", "-t", str(grace_seconds), item])
+        _sandbox_docker(["rm", "-f", item])
     remaining = coding_container_ids(job_id)
     return remaining == []
 
@@ -256,9 +268,9 @@ def confirm_coding_stop(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECOND
 def release_coding_container(job_id: str) -> None:
     if not docker_available():
         return
-    _docker(["rm", "-f", container_name(job_id)])
+    _sandbox_docker(["rm", "-f", container_name(job_id)])
     for item in coding_container_ids(job_id) or []:
-        _docker(["rm", "-f", item])
+        _sandbox_docker(["rm", "-f", item])
 
 
 def run_coding_sandbox(
@@ -273,7 +285,7 @@ def run_coding_sandbox(
     grace_seconds: int = CANCEL_GRACE_SECONDS,
     poll_seconds: float = POLL_SECONDS,
 ) -> dict[str, Any]:
-    if not docker_available() or shutil.which("docker") is None:
+    if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
         raise CodingSandboxError("sandbox_unavailable")
     chosen = job_id or str(uuid.uuid4())
     _ensure_started(workspace, image, chosen)
@@ -294,8 +306,16 @@ def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
         raise CodingSandboxError("sandbox_unavailable")
     if existing:
         return
-    args = [part for part in container_arguments(workspace, image, job_id=job_id) if part != "--rm"]
-    launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
+    if worker_delegates():
+        if image != JOB_IMAGE:
+            raise CodingSandboxError("sandbox_unavailable")
+        try:
+            launched = remote_run(workspace, job_id, timeout=180)
+        except SandboxDelegateError as exc:
+            raise CodingSandboxError("sandbox_unavailable") from exc
+    else:
+        args = [part for part in container_arguments(workspace, image, job_id=job_id) if part != "--rm"]
+        launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
     if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")
 
@@ -341,7 +361,7 @@ def _collect_exit(name: str) -> dict[str, Any]:
     captured = _bounded_logs(name, limit=LOG_CAPTURE_LIMIT)
     logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
     code = _exit_code(name)
-    _docker(["rm", "-f", name])
+    _sandbox_docker(["rm", "-f", name])
     result = _result_line(captured["stdout"])
     if code not in {0, 1} or result is None:
         raise CodingSandboxError("sandbox_failed", logs)
@@ -355,20 +375,29 @@ def _collect_exit(name: str) -> dict[str, Any]:
 
 
 def _container_status(name: str) -> str | None:
-    completed = _docker(["inspect", "-f", "{{.State.Status}}", name])
+    completed = _sandbox_docker(["inspect", "-f", "{{.State.Status}}", name])
     if completed.returncode != 0:
         return None
     return completed.stdout.strip()
 
 
 def _exit_code(name: str) -> int | None:
-    completed = _docker(["inspect", "-f", "{{.State.ExitCode}}", name])
+    completed = _sandbox_docker(["inspect", "-f", "{{.State.ExitCode}}", name])
     if completed.returncode != 0:
         return None
     try:
         return int(completed.stdout.strip())
     except ValueError:
         return None
+
+
+def _sandbox_docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    if not worker_delegates():
+        return _docker(args, timeout=timeout)
+    try:
+        return remote_completed(args, timeout=60 if timeout is None else timeout)
+    except SandboxDelegateError as exc:
+        raise CodingSandboxError("sandbox_unavailable") from exc
 
 
 def _result_line(stdout: str) -> dict[str, Any] | None:

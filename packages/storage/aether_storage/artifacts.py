@@ -209,7 +209,7 @@ class ArtifactStore:
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(path, flags)
         try:
-            data = os.read(fd, row["byte_size"] + 1)
+            data = self._read_upto(fd, int(row["byte_size"]) + 1)
         finally:
             os.close(fd)
         if len(data) != row["byte_size"] or hashlib.sha256(data).hexdigest() != row["sha256"]:
@@ -693,6 +693,19 @@ class ArtifactStore:
             except json.JSONDecodeError as exc:
                 raise ArtifactError("journal_corrupt", f"日志第 {index} 行损坏") from exc
         return rows
+
+    @staticmethod
+    def _read_upto(fd: int, limit: int) -> bytes:
+        """Read until limit bytes or EOF. A single short read is not the whole file."""
+        chunks: list[bytes] = []
+        remaining = limit
+        while remaining > 0:
+            block = os.read(fd, remaining)
+            if not block:
+                break
+            chunks.append(block)
+            remaining -= len(block)
+        return b"".join(chunks)
 
     @staticmethod
     def _read_all(fd: int) -> bytes:

@@ -8,6 +8,8 @@ import functools
 import json
 import os
 import signal
+import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from sqlalchemy import text
 from temporalio.client import Client
 from temporalio.worker import Worker
 
+import aether_worker.goal_effect as goal_effect
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.coding_jobs import execute_queued_coding_jobs
@@ -22,6 +25,10 @@ from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
+from aether_worker.loopback import post_json
+from aether_worker.skill_eval import apply_verdict
+from aether_worker.role_launch import launch_privileged_roles, reject_privileged_worker_env, stop_children, stop_recorded_roles
+from aether_worker.startup import recover_started_projects
 from aether_worker.memory import apply_memory_commands
 from aether_worker.pending_jobs import execute_queued_ingestions
 from aether_worker.skill_execute import execute_pending_skill_evaluations
@@ -51,7 +58,7 @@ def index_root_from_env() -> Path:
 def route_pending(
     dispatcher: Database,
     worker: Database,
-    verifier: Database,
+    verifier: Database | None,
     store: ArtifactStore,
     seen: dict[str, str] | None = None,
 ) -> None:
@@ -98,7 +105,7 @@ def _group_pending(rows: list[Any], remembered: dict[str, str]) -> dict[str, dic
 def _apply_grouped(
     grouped: dict[str, dict[str, Any]],
     worker: Database,
-    verifier: Database,
+    verifier: Database | None,
     store: ArtifactStore,
 ) -> None:
     for project_id, bucket in grouped.items():
@@ -108,7 +115,10 @@ def _apply_grouped(
             if kinds & set(CONSOLE_KINDS):
                 apply_console_commands(worker, owner_id=owner_id, project_id=project_id, store=store)
             if kinds & set(VERIFIER_KINDS):
-                apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
+                if verifier is None:
+                    _forward_verifier(owner_id, project_id)
+                else:
+                    apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
             if any(kind.startswith("memory.") for kind in kinds):
                 apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
@@ -118,7 +128,7 @@ def _apply_grouped(
 def _execute_remembered(
     remembered: dict[str, str],
     worker: Database,
-    verifier: Database,
+    verifier: Database | None,
     store: ArtifactStore,
     root: Path,
 ) -> None:
@@ -136,7 +146,10 @@ def _execute_remembered(
         except Exception as exc:
             print(f"aether-coding-failed project={project_id} error={type(exc).__name__}", flush=True)
         try:
-            execute_pending_skill_evaluations(verifier, worker, store, owner_id=owner_id, project_id=project_id)
+            if verifier is None:
+                _skill_evaluations_via_role(worker, owner_id=owner_id, project_id=project_id)
+            else:
+                execute_pending_skill_evaluations(verifier, worker, store, owner_id=owner_id, project_id=project_id)
         except Exception as exc:
             print(f"aether-skill-eval-failed project={project_id} error={type(exc).__name__}", flush=True)
 
@@ -168,17 +181,54 @@ def _research_provider() -> str:
     raise SystemExit("AETHER_RESEARCH_PROVIDER 只能是 live 或 scripted")
 
 
+def _skill_evaluations_via_role(worker: Database, *, owner_id: str, project_id: str) -> None:
+    """Grade in the verifier process, then write the version status from the worker."""
+    endpoints = goal_effect.ENDPOINTS
+    if endpoints is None or not endpoints.verifier_base or not endpoints.loopback_token:
+        return
+    body = post_json(
+        f"{endpoints.verifier_base.rstrip('/')}/v1/skill-evaluations",
+        endpoints.loopback_token,
+        {"owner_id": owner_id, "project_id": project_id},
+        timeout=180,
+    )
+    outcomes = body.get("outcomes")
+    if not isinstance(outcomes, list):
+        return
+    for item in outcomes:
+        if not isinstance(item, dict):
+            continue
+        verdict = item.get("verdict")
+        version_id = item.get("version_id")
+        if isinstance(verdict, dict) and isinstance(version_id, str) and version_id:
+            apply_verdict(worker, owner_id=owner_id, project_id=project_id, version_id=version_id, verdict=verdict)
+
+
+def _forward_verifier(owner_id: str, project_id: str) -> None:
+    endpoints = goal_effect.ENDPOINTS
+    if endpoints is None or not endpoints.verifier_base or not endpoints.loopback_token:
+        raise RuntimeError("verifier_unavailable")
+    post_json(
+        f"{endpoints.verifier_base.rstrip('/')}/v1/commands",
+        endpoints.loopback_token,
+        {"owner_id": owner_id, "project_id": project_id},
+        timeout=60,
+    )
+
+
 def endpoints_from_env() -> WorkerEndpoints:
-    missing = [
-        name
-        for name in ("AETHER_WORKER_DATABASE_URL", "AETHER_VERIFIER_DATABASE_URL", "AETHER_DISPATCHER_DATABASE_URL", "AETHER_TEMPORAL_ADDRESS")
-        if not os.environ.get(name)
-    ]
+    role = os.environ.get("AETHER_PROCESS_ROLE", "")
+    required = ["AETHER_WORKER_DATABASE_URL", "AETHER_DISPATCHER_DATABASE_URL", "AETHER_TEMPORAL_ADDRESS"]
+    if role != "worker":
+        required.append("AETHER_VERIFIER_DATABASE_URL")
+    missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise SystemExit("worker 缺少环境变量: " + ", ".join(missing))
+    verifier_url = "" if role == "worker" else os.environ["AETHER_VERIFIER_DATABASE_URL"]
+    live_key = "" if role == "worker" else os.environ.get("AETHER_LIVE_MODEL_KEY", "")
     return WorkerEndpoints(
         worker_url=os.environ["AETHER_WORKER_DATABASE_URL"],
-        verifier_url=os.environ["AETHER_VERIFIER_DATABASE_URL"],
+        verifier_url=verifier_url,
         dispatcher_url=os.environ["AETHER_DISPATCHER_DATABASE_URL"],
         artifact_root=Path(os.environ.get("AETHER_ARTIFACT_ROOT", "data/artifacts")),
         temporal_address=os.environ["AETHER_TEMPORAL_ADDRESS"],
@@ -187,63 +237,84 @@ def endpoints_from_env() -> WorkerEndpoints:
         research_provider=_research_provider(),
         live_model_base=os.environ.get("AETHER_LIVE_MODEL_BASE", "").strip(),
         live_model_alias=os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip(),
-        live_model_key=os.environ.get("AETHER_LIVE_MODEL_KEY", ""),
+        live_model_key=live_key,
+        verifier_base=os.environ.get("AETHER_VERIFIER_BASE", ""),
+        gateway_base=os.environ.get("AETHER_GATEWAY_BASE", ""),
+        runner_base=os.environ.get("AETHER_RUNNER_BASE", ""),
+        loopback_token=os.environ.get("AETHER_LOOPBACK_TOKEN", ""),
     )
+
+
+def _endpoints_for_process() -> tuple[WorkerEndpoints, list[subprocess.Popen[str]]]:
+    reject_privileged_worker_env()
+    if os.environ.get("AETHER_PROCESS_ROLE") == "worker":
+        return endpoints_from_env(), []
+    launch_privileged_roles()
+    os.execve(sys.executable, [sys.executable, "-m", "aether_worker"], dict(os.environ))
+    raise SystemExit("worker 没有完成凭证交接")
 
 
 async def serve(endpoints: WorkerEndpoints | None = None) -> None:
-    resolved = endpoints or endpoints_from_env()
-    configure(resolved)
-    activity_executor, control_executor = make_executors()
+    children: list[subprocess.Popen[str]] = []
     try:
-        client = await Client.connect(resolved.temporal_address)
-    except Exception:
-        activity_executor.shutdown(wait=False, cancel_futures=False)
-        control_executor.shutdown(wait=False, cancel_futures=False)
-        raise
-    loop = asyncio.get_running_loop()
-    loop.set_default_executor(activity_executor)
-    set_control_executor(control_executor)
-    worker = Worker(
-        client,
-        task_queue=resolved.task_queue,
-        workflows=[DurableTaskWorkflow, WatchWorkflow],
-        activities=[prepare_task, execute_task, apply_task_control, run_watch_tick],
-    )
-    dispatcher = Database(resolved.dispatcher_url)
-    database = Database(resolved.worker_url)
-    verifier = Database(resolved.verifier_url)
-    store = ArtifactStore(resolved.artifact_root, database)
-    seen = load_projects(index_root_from_env())
-    stop = asyncio.Event()
-    for signame in (signal.SIGTERM, signal.SIGINT):
-        loop.add_signal_handler(signame, stop.set)
-    try:
-        async with worker:
-            print("aether-worker-ready", flush=True)
-            while not stop.is_set():
-                try:
-                    await deliver_pending(
-                        dispatcher,
-                        client,
-                        task_queue=resolved.task_queue,
-                        workflow=DurableTaskWorkflow,
-                        intake_pause_seconds=resolved.intake_pause_seconds,
-                    )
-                except Exception as exc:
-                    print(f"aether-deliver-failed error={type(exc).__name__}", flush=True)
-                try:
-                    await run_control(control_executor, route_pending, dispatcher, database, verifier, store, seen)
-                except Exception as exc:
-                    print(f"aether-route-failed error={type(exc).__name__}", flush=True)
-                try:
-                    await ensure_watch_schedules(client, database, seen, resolved.task_queue)
-                except Exception as exc:
-                    print(f"aether-watch-schedule-failed error={type(exc).__name__}", flush=True)
-                try:
-                    await asyncio.wait_for(stop.wait(), timeout=0.25)
-                except TimeoutError:
-                    continue
+        if endpoints is None:
+            endpoints, children = _endpoints_for_process()
+        resolved = endpoints
+        configure(resolved)
+        activity_executor, control_executor = make_executors()
+        try:
+            client = await Client.connect(resolved.temporal_address)
+        except Exception:
+            activity_executor.shutdown(wait=False, cancel_futures=False)
+            control_executor.shutdown(wait=False, cancel_futures=False)
+            raise
+        loop = asyncio.get_running_loop()
+        loop.set_default_executor(activity_executor)
+        set_control_executor(control_executor)
+        worker = Worker(
+            client,
+            task_queue=resolved.task_queue,
+            workflows=[DurableTaskWorkflow, WatchWorkflow],
+            activities=[prepare_task, execute_task, apply_task_control, run_watch_tick],
+        )
+        dispatcher = Database(resolved.dispatcher_url)
+        database = Database(resolved.worker_url)
+        verifier = Database(resolved.verifier_url) if resolved.verifier_url else None
+        store = ArtifactStore(resolved.artifact_root, database)
+        recover_started_projects(store, index_root_from_env())
+        seen = load_projects(index_root_from_env())
+        stop = asyncio.Event()
+        for signame in (signal.SIGTERM, signal.SIGINT):
+            loop.add_signal_handler(signame, stop.set)
+        try:
+            async with worker:
+                print("aether-worker-ready", flush=True)
+                while not stop.is_set():
+                    try:
+                        await deliver_pending(
+                            dispatcher,
+                            client,
+                            task_queue=resolved.task_queue,
+                            workflow=DurableTaskWorkflow,
+                            intake_pause_seconds=resolved.intake_pause_seconds,
+                        )
+                    except Exception as exc:
+                        print(f"aether-deliver-failed error={type(exc).__name__}", flush=True)
+                    try:
+                        await run_control(control_executor, route_pending, dispatcher, database, verifier, store, seen)
+                    except Exception as exc:
+                        print(f"aether-route-failed error={type(exc).__name__}", flush=True)
+                    try:
+                        await ensure_watch_schedules(client, database, seen, resolved.task_queue)
+                    except Exception as exc:
+                        print(f"aether-watch-schedule-failed error={type(exc).__name__}", flush=True)
+                    try:
+                        await asyncio.wait_for(stop.wait(), timeout=0.25)
+                    except TimeoutError:
+                        continue
+        finally:
+            activity_executor.shutdown(wait=False, cancel_futures=False)
+            control_executor.shutdown(wait=False, cancel_futures=False)
     finally:
-        activity_executor.shutdown(wait=False, cancel_futures=False)
-        control_executor.shutdown(wait=False, cancel_futures=False)
+        stop_children(children)
+        stop_recorded_roles()
