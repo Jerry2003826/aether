@@ -1,5 +1,26 @@
 # 交接
 
+## 系统审计第一轮 · C 组 P2-04 收紧（分支 `cursor/sysfix-c2-f4de`）
+
+PR #16 已合入 main `b735f28`。所有者批准了 P2-04 的三项收紧，并批准相应修改验收用例 `test_owner_can_roll_a_canary_back_through_the_api`。本分支从 `b735f28` 开出，决定与剩余风险写在 `docs/DECISIONS.md` 的 ADR-F27 P2-04 段。`STATUS.json` 的 `live_ready`、`product_engineering` 未改，没有新迁移。
+
+- 回滚只回到曾部署过的版本：目标是 active 版本，或操作账本里有已确认的 `skill.promote` 曾把它放上 canary。
+- 晋升要求不可变评测报告：verifier 在 `record_evaluation` 的事务里写 JSON 报告，哈希同时记在只有 verifier 能插入的评测行里；worker 晋升时核对命令哈希、评测行哈希、产物账本哈希三者相等，再重读字节重算，并核对报告指向本次评测与本候选版本。缺少任何一项都拒绝，且不消耗审批。
+- `skill.evaluate` 保持现有契约 202 + QUEUED，不实现执行器；QUEUED 评测不能晋升。
+- 为让验收用例先部署父版本，晋升可以替换已有 canary（须给出当前部署版本号与当前 canary 版本）。
+
+先失败的证据：
+
+| 提交 | P2-04 用例结果 |
+| --- | --- |
+| `0f4fb37` 只改测试 | 8 failed：无报告晋升被投递成功；其余因 `record_evaluation` 不能写报告而失败 |
+| `0fccccc` 加报告写入、尚无校验 | 5 failed、5 passed：回滚到从未部署的 v1、无报告晋升、worker 改写账本哈希、替换磁盘字节都被投递成功；验收用例在 canary 上晋升 v2 被拒 |
+| `88b4a12` 校验 | 10 passed |
+
+「借用另一份报告的真实哈希」在旧代码上就被拒（旧代码只在有报告时比对哈希），作为反例保留。验收用例原有两条断言（回滚命令 DELIVERED、canary 指向 v1）不变，另加两个版本状态的断言；其余 P2-04 用例在需要晋升成功的位置改用真实报告哈希，这样每条用例失败的原因只剩它要测的那一项。
+
+全量回归：待填。
+
 ## 系统审计第一轮 · C 组修复（分支 `cursor/sysfix-c-f4de`）
 
 已 rebase 到 main `bbf2811`（含 PR #14 A 组的 P0/P1-01~03 修复与 Alembic `0012_artifact_identity`，以及 PR #15 B 组的 P1-04~06、P2-01/05/07 修复）。审计在 PR #13（`reports/audits/system_round1/`）。本组只修 P1-07、P1-08、P1-09、P2-04、P2-06 的 SSRF 网段与 MCP argv、P2-08；其余条目由另外两组处理，本分支没有碰。每项先把复现用例移植进 `tests/` 并确认失败，再修。决定与剩余风险见 `docs/DECISIONS.md` 的 ADR-F27（F25、F26 已由 A、B 使用）。`STATUS.json` 的 `live_ready`、`product_engineering` 未改。
@@ -25,13 +46,8 @@ PR 标为 ready 后 Codex 在 `b87e6b9` 上提了 5 条 P1（没有 Critical）�
 - 恢复把退役的索引代改回 ACTIVE，撞 `one_active_lexical_generation_per_project` 使整个恢复中止：`index_generations.state/activated_at` 保留当前值。用例 `test_restore_keeps_the_index_generation_activated_after_the_backup`。同类问题一起修：产物与任务产物的 `classification` 也保留当前值，否则记忆 claim 会变回可当资料的 `project_private`（用例 `test_restore_keeps_a_classification_decided_after_the_backup`）。
 - 产物逐个替换中途失败会留下一半，且数据库已提交：改为先在同级暂存目录合并完整，数据库事务提交前才整体换入。用例 `test_a_restore_that_cannot_stage_every_file_changes_nothing`。
 
-**待所有者决定（停在这里，没有改验收条件）**，详见 ADR-F27 的 P2-04 段：
+当时留给所有者决定的三项（`skill.evaluate` 的契约、回滚目标限于曾部署版本、晋升要求不可变评测报告）已在 PR #16 合并后获批，处理见上一节「P2-04 收紧」。
 
-1. 修复计划要求 `skill.evaluate` 在执行器接上前返回「未实现」，但 `test_console_api` 断言 202 + QUEUED。
-2. Codex P1「回滚目标限于曾部署过的版本」：审计验收用例 `test_owner_can_roll_a_canary_back_through_the_api` 要求回滚到从未部署、仍是 QUARANTINED 的父版本 v1 成功。收紧会让这条验收用例失败。
-3. Codex P1「晋升必须有不可变的评测报告」：同一验收用例用不写报告的 `record_evaluation` 和任意 `report_sha256` 晋升并要求成功。收紧需要 verifier 写报告产物，并改这条验收用例传真实哈希。
-
-2、3 若批准收紧，需要同时批准修改该验收用例（先让 v1 经过部署、评测带报告产物）。
 - B 没有改工作流和迁移，bbf2811 的工作流与 80f1d39 相同，不需要新的回放历史。B 的 `docs/06_security.md` 改动与本组的 SSRF/MCP 段落自动合并。
 
 全量回归（head `4c38026`，本机 Postgres 17 + Temporal dev server）：
