@@ -233,6 +233,57 @@ def test_research_prompt_requests_version_equals_form() -> None:
     assert "version=" in prompt
 
 
+def test_research_prompt_requires_numeric_value_and_unit_from_each_source() -> None:
+    prompt = _research_prompt(_read_sources(), ["src-zh", "src-en", "src-piano"])
+    assert "每条来源都要写出笔记里的数值和单位" in prompt
+    assert "src-zh 和 src-en 都必须写出数字 100 和该笔记里的单位" in prompt
+
+
+def test_length_finish_still_outranks_a_missing_fact() -> None:
+    assert _research_verdict(False, "length", required_fact=False) == ("fail", "output_truncated")
+
+
+def test_missing_number_is_not_labelled_citation_mismatch() -> None:
+    report = _comparison().replace("沸点是 100", "沸点相同")
+    assert "100" not in report
+    assert _report_cites(report, _read_sources()) is False
+    assert _research_verdict(False, None, required_fact=False) == ("fail", "missing_required_fact")
+
+
+@pytest.mark.parametrize("fact", ["沸点相同", "沸点是一百"])
+def test_omitted_required_number_is_missing_required_fact(monkeypatch, fact: str) -> None:
+    _env(monkeypatch)
+
+    def launch(prompt: str, _env: dict[str, str]) -> str:
+        if "比较" in prompt:
+            written = _comparison().replace("沸点是 100", fact)
+            assert "100" not in written
+            return written
+        return "not-a-patch"
+
+    report = run_f26_acceptance(encode=_encode, verify=_verify, launch=launch, protocol=_protocol, isolate=_isolate)
+    assert report["research"]["status"] == "fail"
+    assert report["research"]["citations_cover_sources"] is False
+    assert report["research"]["reason"] == "missing_required_fact"
+    assert report["status"] == "failed"
+
+
+def test_wrong_citation_with_the_number_present_stays_citation_mismatch(monkeypatch) -> None:
+    _env(monkeypatch)
+
+    def launch(prompt: str, _env: dict[str, str]) -> str:
+        if "比较" in prompt:
+            written = _comparison().replace("version 1", "version 9")
+            assert "100" in written
+            return written
+        return "not-a-patch"
+
+    report = run_f26_acceptance(encode=_encode, verify=_verify, launch=launch, protocol=_protocol, isolate=_isolate)
+    assert report["research"]["status"] == "fail"
+    assert report["research"]["citations_cover_sources"] is False
+    assert report["research"]["reason"] == "citation_mismatch"
+
+
 class _FinishUpstream(BaseHTTPRequestHandler):
     finish_reason = "stop"
     content = "完整回答"

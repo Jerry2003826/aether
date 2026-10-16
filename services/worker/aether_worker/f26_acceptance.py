@@ -298,6 +298,8 @@ def _research_prompt(sources: list[dict[str, Any]], ranked: list[str]) -> str:
         "只根据下列检索结果，用中文比较 src-zh 和 src-en：两点相同之处和不同之处。"
         "两条都要写出 source_id、完整 sha256 和 offset。"
         "每条来源的版本单独写成 version=N，N 必须是该来源自己的版本号。"
+        "每条来源都要写出笔记里的数值和单位。"
+        "src-zh 和 src-en 都必须写出数字 100 和该笔记里的单位，不能省略数字，也不能改成中文数字。"
         "与沸点无关的条目不要写成证据。"
         "笔记没写的不要补。\n" + "\n".join(lines)
     )
@@ -369,10 +371,21 @@ def _report_cites(report: str, sources: list[dict[str, Any]]) -> bool:
     return True
 
 
-def _research_verdict(citations: bool, finish_reason: str | None) -> tuple[str, str | None]:
-    """A length finish is an incomplete report even when the citations already match."""
+def _research_verdict(
+    citations: bool,
+    finish_reason: str | None,
+    *,
+    required_fact: bool = True,
+) -> tuple[str, str | None]:
+    """A length finish is an incomplete report even when the citations already match.
+
+    `required_fact` is the same presence check as `_report_cites`: the report
+    must contain `100`. Missing that number is not a citation mismatch.
+    """
     if finish_reason == "length":
         return "fail", "output_truncated"
+    if not required_fact:
+        return "fail", "missing_required_fact"
     if citations:
         return "pass", None
     return "fail", "citation_mismatch"
@@ -923,7 +936,11 @@ def run_f26_acceptance(
                 research["report"] = stored
                 research["report_sha256"] = hashlib.sha256(report_text.encode()).hexdigest()
                 research["citations_cover_sources"] = citations
-                research["status"], research["reason"] = _research_verdict(citations, _research_finish(fresh))
+                research["status"], research["reason"] = _research_verdict(
+                    citations,
+                    _research_finish(fresh),
+                    required_fact="100" in stored,
+                )
             except Exception as exc:
                 research["status"] = NOT_RUN if str(exc) == "openhands_venv_missing" else "fail"
                 research["reason"] = "openhands_venv_missing" if str(exc) == "openhands_venv_missing" else redact_secret(f"{type(exc).__name__}:{exc}", secret)

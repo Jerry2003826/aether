@@ -1,5 +1,31 @@
 # 交接
 
+## F26 缺事实不再记成引用失败（分支 `cursor/f26-missing-fact-1f84`）
+
+基线 `887444a`（PR #18 已合入）。没有改 `contracts/`、`reference/`，也没有放宽「报告必须包含 `100`」。没有改 `STATUS.json` 的 `live_ready`。本机没有 live model key。所有者需要重跑 `scripts/run_f26_acceptance.py`。
+
+PR #18 合入后的 live 运行里，比较报告没有写出数字 `100`。`_report_cites` 失败，`_research_verdict` 记成 `citation_mismatch`。现在：
+
+- 报告里没有 `100`（包括写成「一百」）时，原因是 `missing_required_fact`。`citations_cover_sources` 仍为否，状态仍是 fail。
+- 数字还在，但版本或引用不对，原因仍是 `citation_mismatch`。
+- `finish_reason=length` 仍优先于缺事实。
+- 研究提示要求每条来源写出笔记里的数值和单位，并写明 src-zh 与 src-en 都要写出数字 `100` 和单位。
+
+`_report_cites` 里的 `100` 检查没有改。决定见 ADR-F29。
+
+先失败再修：旧代码上，省略数字的验收原因是 `citation_mismatch`；提示里没有「每条来源都要写出笔记里的数值和单位」。
+
+本机回归：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py    # exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'  # Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit               # 151 passed
+uv run --locked --no-build pytest -q tests/unit/test_f26_acceptance.py  # 30 passed
+```
+
+下一步：PR 标为 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。所有者重跑 live F26。
+
 ## F26 验收与研究路径的两处不稳定（分支 `cursor/f26-hardening-1f84`）
 
 基线 `0767a5e`，实现提交 `bfca959`。没有改 `contracts/`、`reference/`、验收通过条件的判定口径，也没有改 `STATUS.json` 的 `live_ready`。本机没有 live model key，不能重跑真实 DeepSeek。所有者需要重跑 `scripts/run_f26_acceptance.py` 和 `scripts/run_live_task_check.py`。
