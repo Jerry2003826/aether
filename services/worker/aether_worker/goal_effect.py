@@ -222,7 +222,7 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
     if endpoints.research_provider == "scripted":
-        answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+        answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources, snapshot_sha=_snapshot)
     else:
         answer = _ensure_live_answer(
             endpoints,
@@ -650,14 +650,15 @@ def _ensure_verification(
     )
     if cached is not None:
         return cached
+    model_mode, offline = _generation_mode(verifier, owner_id, project_id, task_id, configured=endpoints.research_provider)
     report = {
         "criterion_id": CRITERION_ID,
         "artifact_id": artifact_id,
         "observed_sha256": observed,
         "ledger_sha256": ledger,
         "verifier_version": VERIFIER_VERSION,
-        "model_mode": "scripted",
-        "offline": True,
+        "model_mode": model_mode,
+        "offline": offline,
         "pipeline": "pass",
         "byte_integrity": "pass" if byte_ok else "fail",
         "goal_completion": goal_state,
@@ -1100,6 +1101,8 @@ def _ensure_live_answer(
             cost_micro_usd=None if result.get("actual_cost_micro_usd") is None else int(result["actual_cost_micro_usd"]),
             upstream_model=None if result.get("upstream_model") is None else str(result["upstream_model"]),
             requested_alias=None if result.get("requested_alias") is None else str(result["requested_alias"]),
+            cost_source=str(result.get("cost_source") or "unreported"),
+            pricing_version=None if result.get("pricing_version") is None else str(result["pricing_version"]),
         )
         if not output:
             if book_result == "overrun":
@@ -1110,7 +1113,8 @@ def _ensure_live_answer(
             "reported_input_tokens": input_tokens,
             "reported_output_tokens": output_tokens,
             "reported_cost_micro_usd": result.get("actual_cost_micro_usd"),
-            "cost_source": "provider_response" if result.get("actual_cost_micro_usd") is not None else "unreported",
+            "cost_source": str(result.get("cost_source") or "unreported") if result.get("actual_cost_micro_usd") is not None else "unreported",
+            "pricing_version": result.get("pricing_version") if result.get("actual_cost_micro_usd") is not None else None,
             "upstream_model": result.get("upstream_model"),
             "requested_alias": result.get("requested_alias"),
             "book_result": book_result,
@@ -1153,7 +1157,9 @@ def _ensure_live_answer(
             "input_tokens": recorded.get("reported_input_tokens"),
             "output_tokens": recorded.get("reported_output_tokens"),
             "cost_micro_usd": recorded.get("reported_cost_micro_usd"),
-            "cost_status": "known" if recorded.get("cost_source") == "provider_response" else "unknown",
+            "cost_status": "estimated" if recorded.get("cost_source") == "local_price_estimate" else "unknown",
+            "cost_source": recorded.get("cost_source"),
+            "pricing_version": recorded.get("pricing_version"),
             "usage_status": "known" if book_result == "settled" else "unknown",
         },
     )
@@ -1194,6 +1200,7 @@ def _ensure_answer(
     task_id: str,
     goal: str,
     sources: list[str],
+    snapshot_sha: str,
 ) -> str | None:
     existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
@@ -1205,6 +1212,7 @@ def _ensure_answer(
         return ""
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
+    _record_scripted_generation(database, owner_id=owner_id, project_id=project_id, task_id=task_id, snapshot_sha=snapshot_sha)
     stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
@@ -1226,6 +1234,37 @@ def _ensure_answer(
         payload={"calls": 1, "model_mode": "scripted", "offline": True},
     )
     return str(stored["artifact_id"])
+
+
+def _record_scripted_generation(database: Database, *, owner_id: str, project_id: str, task_id: str, snapshot_sha: str) -> None:
+    """The scripted answer gets the same generation row a live call has, at zero cost."""
+    detail = {"model_mode": "scripted", "source_snapshot_sha256": snapshot_sha}
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
+                "VALUES (:project_id, :task_id, :request_key, :digest, 'research', 'scripted', 0, 'scripted', CAST(:detail AS jsonb)) "
+                "ON CONFLICT (project_id, task_id, request_key) DO NOTHING"
+            ),
+            {
+                "project_id": project_id,
+                "task_id": task_id,
+                "request_key": f"research-{task_id}",
+                "digest": sha256_text(canonical_json(detail)),
+                "detail": json.dumps(detail),
+            },
+        )
+
+
+def _generation_mode(database: Database, owner_id: str, project_id: str, task_id: str, *, configured: str) -> tuple[str, bool]:
+    """The mode of the recorded generation; the configured provider only when nothing was recorded."""
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        status = conn.execute(
+            text("SELECT usage_status FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"),
+            {"project_id": project_id, "task_id": task_id, "request_key": f"research-{task_id}"},
+        ).scalar()
+    scripted = status == "scripted" if status is not None else configured == "scripted"
+    return ("scripted", True) if scripted else ("live", False)
 
 
 def _answer_text(data: bytes | None) -> str:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import secrets
 from datetime import UTC, datetime, timedelta
+from importlib.metadata import version
 from typing import Any
 
 import litellm
@@ -14,6 +15,11 @@ from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 litellm.suppress_debug_info = True
+
+# LiteLLM's response_cost is looked up in its bundled price table by the model
+# name the upstream reports. It is a local estimate, not a provider bill.
+COST_SOURCE = "local_price_estimate"
+PRICING_VERSION = f"litellm-{version('litellm')}"
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -163,7 +169,9 @@ class ModelGateway:
                 "input_tokens": usage.prompt_tokens,
                 "output_tokens": usage.completion_tokens,
                 "actual_cost_micro_usd": cost,
-                "cost_status": "known" if cost is not None else "unknown",
+                "cost_status": "estimated" if cost is not None else "unknown",
+                "cost_source": COST_SOURCE if cost is not None else "unreported",
+                "pricing_version": PRICING_VERSION if cost is not None else None,
             }
         self.audit.append(f"model project={project_id} alias={alias} outcome={result['usage_status']}")
         encoded = json.dumps(result)

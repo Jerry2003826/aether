@@ -511,11 +511,14 @@ class BudgetLedger:
         cost_micro_usd: int | None,
         upstream_model: str | None,
         requested_alias: str | None,
+        cost_source: str,
+        pricing_version: str | None,
     ) -> str:
         """Store the provider response before any later artifact write.
 
-        Known tokens are booked even when the price is missing. A reported
-        price above the reservation is kept and not settled as if it fit.
+        Known tokens are booked even when the price is missing. Missing token
+        usage keeps both money and tokens held as unknown; it is not an overrun.
+        A price above the reservation is kept and not settled as if it fit.
         """
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             account = conn.execute(
@@ -540,7 +543,7 @@ class BudgetLedger:
                 book_result = "settled"
                 usage_status = "known"
                 actual = cost_micro_usd
-            elif tokens_fit and cost_micro_usd is None:
+            elif reported_tokens is None or (tokens_fit and cost_micro_usd is None):
                 book_result = "held"
                 usage_status = "unknown"
                 actual = None
@@ -556,7 +559,8 @@ class BudgetLedger:
                     "reported_input_tokens": input_tokens,
                     "reported_output_tokens": output_tokens,
                     "reported_cost_micro_usd": cost_micro_usd,
-                    "cost_source": "provider_response" if cost_micro_usd is not None else "unreported",
+                    "cost_source": cost_source if cost_micro_usd is not None else "unreported",
+                    "pricing_version": pricing_version if cost_micro_usd is not None else None,
                     "reconciliation": "unreconciled" if book_result == "overrun" else "booked",
                     "upstream_model": upstream_model,
                     "requested_alias": requested_alias,
@@ -565,7 +569,7 @@ class BudgetLedger:
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = :usage_status, actual_micro_usd = :actual, "
-                    "input_tokens = :input_tokens, output_tokens = :output_tokens, model_revision = :upstream, "
+                    "input_tokens = :input_tokens, output_tokens = :output_tokens, model_revision = :upstream, pricing_version = :pricing_version, "
                     "usage_detail = CAST(:detail AS jsonb), completed_at = CASE WHEN :usage_status = 'known' THEN now() ELSE completed_at END "
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
                 ),
@@ -575,6 +579,7 @@ class BudgetLedger:
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "upstream": upstream_model,
+                    "pricing_version": pricing_version if cost_micro_usd is not None else None,
                     "detail": json.dumps(detail),
                     "project_id": project_id,
                     "task_id": task_id,
