@@ -6,7 +6,10 @@ restart keeps the same wait; production does not set it.
 
 ``pause``, ``resume`` and ``cancel`` are separate commands. They are applied before
 the next side effect. A positive intake pause can be interrupted by one of those
-commands; older histories keep the original sleep.
+commands; older histories keep the original sleep. Histories recorded before
+``execute-interruptible`` still wait for the whole execute activity. Newer runs
+apply a pause or cancel while that activity is in flight, and the activity keeps
+the provider receipt.
 """
 
 from datetime import timedelta
@@ -79,7 +82,7 @@ class DurableTaskWorkflow:
                 if kind in _CONTROL:
                     controlled = await workflow.execute_activity(apply_task_control, activity_input, start_to_close_timeout=timedelta(seconds=60))
                     if kind == "resume" and controlled.get("resumed") is True:
-                        await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+                        await self._execute_task(activity_input)
                     continue
                 prepared = await workflow.execute_activity(prepare_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
                 if prepared.get("status") == "prepared" and pause > timedelta(0):
@@ -94,10 +97,28 @@ class DurableTaskWorkflow:
                 if prepared.get("status") == "prepared":
                     blocked = await self._drain_controls(task_id)
                 if prepared.get("status") == "prepared" and not blocked:
-                    await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+                    await self._execute_task(activity_input)
             if self._closed:
                 break
         return list(self._applied)
+
+    async def _execute_task(self, activity_input: dict[str, str]) -> None:
+        """Let a queued pause or cancel reach the database while execute is running."""
+        if workflow.patched("execute-interruptible"):
+            handle = workflow.start_activity(
+                execute_task,
+                activity_input,
+                start_to_close_timeout=timedelta(seconds=60),
+                cancellation_type=workflow.ActivityCancellationType.TRY_CANCEL,
+            )
+            while not handle.done():
+                await workflow.wait_condition(lambda: handle.done() or self._has_control())
+                if not self._has_control():
+                    break
+                await self._drain_controls(activity_input["task_id"])
+            await handle
+            return
+        await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
 
 
 def _activity_input(task_id: str, item: dict) -> dict[str, str]:

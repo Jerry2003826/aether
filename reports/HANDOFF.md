@@ -1,8 +1,26 @@
 # 交接
 
-第四轮审计修复在 `cursor/audit-round4-repairs-7618`，基线 `07cc2ae`。本机没有 key。`live_ready` 没有因为这次改动而变化。细节在 `reports/audits/gpt_round4/REPAIR_RESULT.md`。
+PR #9 已由用户合并进 main，合并提交 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。main 上 pack-and-unit 与 integration 均为 success。SonarCloud 对这个合并提交是 neutral（Quality Gate not computed）；PR 当时的 quality gate passed。巡检开始时没有开放的 PR。F00–F27 在 `tasks/backlog.yaml` 与 `STATUS.json` 仍是 done。`readiness` 里 kernel、product、live_ready、codegraph 仍是 passed。`comparative_evidence` 仍是 `not_run`，不声称领先。
 
-`c32e4d3` 上的真实研究任务被误判失败：回答里的「资料1」被当成资料中没有的数字。引用标签不再参与这个检查。回答若把沸点写成九十度或别的数字，仍然失败，原因会写成 `unsupported_number:'…'`。请再跑一次 live task check。F26 在那次已经通过。
+第五轮审计基线仍是合并提交 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。Codex 在 PR #9 上的 P1 与 R5-01 到 R5-05 在同一分支 `cursor/audit-round5-repairs-7618`。对象对调、时段改错、比较关系反转都不能成功；目标多问一项而资料没有时是 `unverifiable`。正确转述可以成功。空正文和 token 超额都把已知 token 计入总账。任务已经 PAUSED 或 CANCELLED 后，还没发出的调用不会再发出。已有答案的重试和最终成功提交都会再核对墙钟。原样引用去重后，`project_private` 资料仍能被选为来源。验收版本是 `goal-artifact-7`。细节在 `reports/audits/gpt_round5/REPAIR_RESULT.md`。
+
+本机没有 live model key。不把 `live_task_check` 或 F26 标成失败，也不改 `live_ready`。R5 合入前尚需监督者用真实 key 重跑 `scripts/run_live_task_check.py` 和 `scripts/run_f26_acceptance.py`。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+339 passed, 1 warning in 248.28s
+EXIT:0
+```
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+324 passed, 1 warning in 237.74s
+EXIT:0
+```
+
+第四轮审计修复曾在 `cursor/audit-round4-repairs-7618`，基线 `07cc2ae`。`live_ready` 没有因为这些改动而变化。
+
+`c32e4d3` 上的真实研究任务被误判失败：回答里的「资料1」被当成资料中没有的数字。引用标签不再参与这个检查。回答若把沸点写成九十度或别的数字，仍然失败，原因会写成 `unsupported_number:'…'`。该修正已随 PR #9 进入 main。F26 在那次已经通过。
 
 研究调用行为变了：短引用不再单独判成功，显式来源损坏会停，预算按将发出的文本估算。监督者若要重跑，用原来的命令：
 

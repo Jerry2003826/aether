@@ -1,11 +1,23 @@
 """Goal completion is stricter than a short citation overlap."""
 
-from aether_worker.research import estimate_tokens, fact_satisfied, goal_completion_detail, goal_completion_state, required_facts
+from aether_worker.research import (
+    estimate_provider_request_tokens,
+    estimate_tokens,
+    fact_satisfied,
+    goal_completion_detail,
+    goal_completion_state,
+    required_facts,
+)
 
 
 def test_tokenizer_counts_a_long_prompt_without_a_provider_report() -> None:
     counted = estimate_tokens("token " * 2000)
     assert counted >= 2000
+
+
+def test_provider_request_reserves_more_than_the_raw_prompt() -> None:
+    prompt = "只根据下列资料回答目标。\n目标：沸点\n\n[资料1]\n水在一百摄氏度沸腾"
+    assert estimate_provider_request_tokens(prompt) > estimate_tokens(prompt)
 
 
 def test_short_quote_does_not_complete_the_goal() -> None:
@@ -18,7 +30,9 @@ def test_short_quote_does_not_complete_the_goal() -> None:
 def test_same_number_in_a_paraphrase_can_pass() -> None:
     fact = "接口请求上限为每分钟六十次。"
     goal = "根据资料回答接口每分钟的请求限额。"
-    assert fact_satisfied("每分钟六十次。", fact, goal)
+    answer = "每分钟六十次。"
+    assert fact_satisfied(answer, fact, goal)
+    assert goal_completion_state(answer=answer, goal=goal, source_text=fact) == "pass"
 
 
 def test_a_different_number_is_not_the_same_fact() -> None:
@@ -51,6 +65,17 @@ def test_invented_boiling_point_is_still_rejected() -> None:
         assert goal_completion_state(answer=answer, goal=BOILING_GOAL, source_text=BOILING_FACT) != "pass"
         assert detail.startswith("unsupported_number:")
         assert "一百" not in detail or "九十" in detail or "90" in detail or "一百二十" in detail
+
+
+def test_swapped_values_and_unit_changes_do_not_cover_the_fact() -> None:
+    source = "接口请求上限为每分钟六十次。\n实验设备每九十天完成一次保养。"
+    goal = "请根据资料分别回答接口请求上限和实验设备保养周期。"
+    swapped = "接口请求上限为每分钟九十次。\n实验设备每六十天完成一次保养。"
+    assert goal_completion_detail(answer=swapped, goal=goal, source_text=source) == "missing_fact"
+    assert goal_completion_state(answer=swapped, goal=goal, source_text=source) != "pass"
+    fact = "室温记录为六十摄氏度。"
+    assert goal_completion_state(answer="室温记录为六十华氏度。", goal="根据资料回答室温。", source_text=fact) != "pass"
+    assert goal_completion_detail(answer="室温记录为六十华氏度。", goal="根据资料回答室温。", source_text=fact) == "missing_fact"
 
 
 def test_two_overlapping_lines_are_both_required() -> None:

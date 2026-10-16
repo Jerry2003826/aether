@@ -6,7 +6,7 @@ type View = "overview" | "tasks" | "approvals" | "knowledge" | "discover" | "ski
 type Phase = "loading" | "offline" | "error" | "login" | "ready";
 
 type Project = { id: string; name: string };
-type Task = { id: string; status: string; projection_updated_at: string | null; budget: { unknown_request_count: number } };
+type Task = { id: string; status: string; projection_updated_at: string | null; budget: { unknown_request_count: number; observed_micro_usd: number } };
 type Approval = { id: string; decision: string; expires_at: string };
 type Source = { id: string; locator: string; index_status: string };
 type Memory = { id: string; claim: string; epistemic_status: string };
@@ -14,7 +14,7 @@ type Recommendation = { source_id: string; title: string; reasons: string[]; exp
 type Skill = { id: string; name: string; description: string; versions: { status: string }[] };
 type Watch = { id: string; purpose: string; status: string };
 type Evaluation = { id: string; purpose: string; status: string; metrics: unknown };
-type Cost = { actual_known_micro_usd: number; unknown_request_count: number; held_micro_usd: number };
+type Cost = { actual_known_micro_usd: number; unknown_request_count: number; held_micro_usd: number; observed_micro_usd: number };
 
 const VIEWS: View[] = ["overview", "tasks", "approvals", "knowledge", "discover", "skills", "settings"];
 const LONG_TEXT = "控制台需要完整显示中文长文本，不能在中间截断。".repeat(12);
@@ -280,7 +280,7 @@ export default function ConsolePage() {
               <p>项目 {projects.find((item) => item.id === projectId)?.name}</p>
               <p>活跃任务 {tasks.length}，待审批 {approvals.length}。</p>
               <p>
-                已知费用 {costs?.actual_known_micro_usd ?? 0}，冻结 {costs?.held_micro_usd ?? 0}，未知请求 {costs?.unknown_request_count ?? 0}。
+                已知费用 {costs?.actual_known_micro_usd ?? 0}，冻结 {costs?.held_micro_usd ?? 0}，未知请求 {costs?.unknown_request_count ?? 0}，超额 {costs?.observed_micro_usd ?? 0}。
               </p>
               {tasks.length === 0 ? <p>还没有任务。可以新建。</p> : null}
             </>
@@ -302,7 +302,7 @@ export default function ConsolePage() {
                     {task.id} · {task.status}
                   </p>
                   <p>{task.projection_updated_at ? `投影时间 ${task.projection_updated_at}` : "投影尚未更新。"}</p>
-                  <p>未知费用请求 {task.budget.unknown_request_count}</p>
+                  <p>未知费用请求 {task.budget.unknown_request_count}，超额 {task.budget.observed_micro_usd}</p>
                 </article>
               ))}
             </>

@@ -130,6 +130,20 @@ def estimate_tokens(text: str) -> int:
     return max(counted, cjk)
 
 
+_CHAT_OVERHEAD_TOKENS = 8
+
+
+def estimate_provider_request_tokens(prompt: str) -> int:
+    """Count the chat request the gateway actually sends, not the bare prompt.
+
+    ModelGateway.complete wraps the prompt as a user message. cl100k on the raw
+    string undercounts that framing. The chat-shaped string plus a small slack
+    is a local upper bound, not the provider's tokenizer invoice.
+    """
+    framed = f"<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant"
+    return estimate_tokens(framed) + _CHAT_OVERHEAD_TOKENS
+
+
 def required_facts(*, source_text: str, goal: str) -> list[str]:
     """Every source line that overlaps the goal. One overlap is not the whole question."""
     goal_text = goal.strip()
@@ -158,11 +172,158 @@ def _substantive_numbers(answer: str) -> list[str]:
     return _numbers(_CITATION_LABEL.sub(" ", answer))
 
 
+_UNITS = (
+    "摄氏度",
+    "华氏度",
+    "开尔文",
+    "毫升",
+    "千克",
+    "公里",
+    "小时",
+    "分钟",
+    "秒钟",
+    "毫米",
+    "厘米",
+    "次",
+    "天",
+    "升",
+    "米",
+    "克",
+    "秒",
+    "度",
+)
+
+
+def _cjk_bigrams(text: str) -> set[str]:
+    chars = [char for char in text if "\u4e00" <= char <= "\u9fff"]
+    return {chars[index] + chars[index + 1] for index in range(len(chars) - 1)}
+
+
+def _unit_span(text: str, end: int) -> tuple[str, int]:
+    rest = text[end:]
+    trimmed = rest.lstrip(" \t")
+    offset = end + (len(rest) - len(trimmed))
+    for unit in _UNITS:
+        if trimmed.startswith(unit):
+            return unit, offset + len(unit)
+    return "", end
+
+
+_PERIODS = ("毫秒", "分钟", "秒钟", "小时", "秒", "天", "年", "月", "周")
+_POLARITY = (
+    ("不超过", "ceiling"),
+    ("不少于", "exceed"),
+    ("不低于", "exceed"),
+    ("至多", "ceiling"),
+    ("至少", "exceed"),
+    ("最多", "ceiling"),
+    ("最少", "exceed"),
+    ("上限", "ceiling"),
+    ("下限", "exceed"),
+    ("超过", "exceed"),
+    ("高于", "exceed"),
+    ("以内", "ceiling"),
+)
+_SUBJECT_NOISE = tuple(dict.fromkeys((*_PERIODS, *(word for word, _kind in _POLARITY), "接受", "发送", "允许", "可以", "请求", "完成", "一次", "每", "为", "的")))
+_GOAL_PART_SPLIT = re.compile(r"以及|和|与")
+_GOAL_PART_STOP = "根据资料请分别说明回答给出多少什么请求"
+
+
+def _rightmost(text: str, words: tuple[str, ...]) -> str:
+    """Longest period word nearest the number. A short word inside a longer one does not win."""
+    best = ""
+    best_at = -1
+    for word in sorted(set(words), key=len, reverse=True):
+        at = text.rfind(word)
+        if at < 0:
+            continue
+        if best and best_at <= at < best_at + len(best):
+            continue
+        if not best or at + len(word) >= best_at + len(best):
+            best = word
+            best_at = at
+    return best
+
+
+def _polarity(text: str) -> str:
+    best = ""
+    best_at = -1
+    kind = ""
+    for word, label in sorted(_POLARITY, key=lambda item: len(item[0]), reverse=True):
+        at = text.rfind(word)
+        if at < 0:
+            continue
+        if best and best_at <= at < best_at + len(best):
+            continue
+        if not best or at + len(word) >= best_at + len(best):
+            best = word
+            best_at = at
+            kind = label
+    return kind
+
+
+def _subject_bigrams(prefix: str) -> frozenset[str]:
+    cleaned = prefix
+    for word in sorted(_SUBJECT_NOISE, key=len, reverse=True):
+        cleaned = cleaned.replace(word, "")
+    return frozenset(_cjk_bigrams(cleaned))
+
+
+def _bindings(text: str) -> list[tuple[str, str, str, str, frozenset[str]]]:
+    """Bind each number to its unit, period, comparison and local subject."""
+    found: list[tuple[str, str, str, str, frozenset[str]]] = []
+    for match in _NUMBER.finditer(text):
+        unit, _unit_end = _unit_span(text, match.end())
+        prefix = text[max(0, match.start() - 24) : match.start()]
+        for separator in ("\n", "。", "；", "，", "、", "：", "“", "”", "\"", ":"):
+            if separator in prefix:
+                prefix = prefix.rsplit(separator, 1)[-1]
+        found.append((match.group(), unit, _rightmost(prefix, _PERIODS), _polarity(prefix), _subject_bigrams(prefix)))
+    return found
+
+
+def _binding_covered(
+    binding: tuple[str, str, str, str, frozenset[str]],
+    answers: list[tuple[str, str, str, str, frozenset[str]]],
+) -> bool:
+    number, unit, period, polarity, subjects = binding
+    for other_number, other_unit, other_period, other_polarity, other_subjects in answers:
+        if other_number != number or other_unit != unit:
+            continue
+        if period and period != other_period:
+            continue
+        if polarity and other_polarity and polarity != other_polarity:
+            continue
+        if not other_subjects <= subjects:
+            continue
+        return True
+    return False
+
+
+def _unsupported_goal_part(goal: str, facts: list[str]) -> bool:
+    """A goal that asks for two things is not done when one thing has no source."""
+    parts = [part.strip() for part in _GOAL_PART_SPLIT.split(goal) if len(_cjk_bigrams(part)) >= 1]
+    if len(parts) < 2:
+        return False
+    covered: set[str] = set()
+    for fact in facts:
+        covered |= _tokens(fact)
+    stop = _tokens(_GOAL_PART_STOP)
+    for part in parts:
+        content = _tokens(part) - stop
+        if content and not content & covered:
+            return True
+    return False
+
+
 def _covers(answer: str, fact: str) -> bool:
     if fact in answer:
         return True
-    numbers = _numbers(fact)
-    return bool(numbers) and all(number in _substantive_numbers(answer) for number in numbers)
+    bindings = _bindings(fact)
+    if not bindings:
+        return False
+    answers = _bindings(_CITATION_LABEL.sub(" ", answer))
+    return all(_binding_covered(binding, answers) for binding in bindings)
 
 
 def fact_satisfied(answer: str, fact: str, goal: str) -> bool:
@@ -189,6 +350,8 @@ def goal_completion_detail(*, answer: str, goal: str, source_text: str) -> str:
             extras.append(number)
     if extras:
         return "unsupported_number:" + ",".join(f"'{number}'" for number in extras)
+    if _unsupported_goal_part(goal, facts):
+        return "unsupported_goal_part"
     if any(not _covers(answer, fact) for fact in facts):
         return "missing_fact"
     return ""
@@ -197,7 +360,7 @@ def goal_completion_detail(*, answer: str, goal: str, source_text: str) -> str:
 def goal_completion_state(*, answer: str, goal: str, source_text: str) -> str:
     """Separate goal satisfaction from a short citation overlap."""
     detail = goal_completion_detail(answer=answer, goal=goal, source_text=source_text)
-    if detail == "no_supported_fact":
+    if detail in {"no_supported_fact", "unsupported_goal_part"}:
         return "unverifiable"
     if detail:
         return "fail"

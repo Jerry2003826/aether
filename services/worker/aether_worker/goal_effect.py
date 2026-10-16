@@ -26,7 +26,7 @@ from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.research import (
     cites_fact,
-    estimate_tokens,
+    estimate_provider_request_tokens,
     goal_completion_detail,
     goal_completion_state,
     record_verification,
@@ -36,8 +36,12 @@ from aether_worker.research import (
 )
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-5"
+VERIFIER_VERSION = "goal-artifact-7"
 OUTPUT_TOKEN_CAP = 256
+# Local dispatch ceiling, not a provider price list. A model priced above this
+# bound can still report an overrun after the bill arrives.
+INPUT_MICRO_USD_PER_TOKEN = 100
+OUTPUT_MICRO_USD_PER_TOKEN = 400
 DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -572,9 +576,6 @@ def _ensure_verification(
     elif goal_state == "unverifiable":
         outcome = "unverifiable"
         detail = "字节与合同可以通过，离线摘录不能确认目标完成"
-    elif goal_state == "uncited":
-        outcome = "fail"
-        detail = "回答没有引用所依据的资料原句"
     elif goal_state != "pass":
         outcome = "fail"
         detail = goal_detail or "回答没有覆盖目标"
@@ -752,7 +753,7 @@ def _source_snapshot(
             rows = conn.execute(
                 text(
                     "SELECT id::text AS id, sha256 FROM artifacts "
-                    "WHERE project_id = :project_id AND deleted_at IS NULL AND task_id IS NULL "
+                    "WHERE project_id = :project_id AND deleted_at IS NULL "
                     "AND media_type = 'text/plain' AND classification = 'project_private' "
                     "ORDER BY created_at, id"
                 ),
@@ -768,7 +769,7 @@ def _source_snapshot(
                     ),
                     {"project_id": project_id, "id": item},
                 ).mappings().first()
-                if row is None or row["deleted_at"] is not None or row["task_id"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
+                if row is None or row["deleted_at"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
                     return [], sha256_text("invalid"), "invalid", [str(item)]
                 rows.append(row)
     texts: list[str] = []
@@ -778,7 +779,7 @@ def _source_snapshot(
         artifact_id = str(row["id"])
         try:
             data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
-        except ArtifactError:
+        except (ArtifactError, OSError):
             if explicit:
                 return [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
             parts.append(f"{artifact_id}:unreadable")
@@ -835,6 +836,21 @@ def _task_start_payload(database: Database, project_id: str, task_id: str) -> di
     return {}
 
 
+def request_cost_ceiling(*, input_tokens: int, output_tokens: int) -> int:
+    """Worst-case micro-USD for one bounded request before it is sent."""
+    return input_tokens * INPUT_MICRO_USD_PER_TOKEN + output_tokens * OUTPUT_MICRO_USD_PER_TOKEN
+
+
+def _live_dispatch_plan(*, prompt: str, tokens_left: int, cost_left: int) -> dict[str, int] | None:
+    """Refuse the call when the framed request cannot fit the remaining budget."""
+    input_estimate = estimate_provider_request_tokens(prompt)
+    output_cap = min(OUTPUT_TOKEN_CAP, max(0, tokens_left - input_estimate))
+    amount = request_cost_ceiling(input_tokens=input_estimate, output_tokens=output_cap)
+    if output_cap < 1 or amount < 1 or cost_left < amount:
+        return None
+    return {"output_cap": output_cap, "amount": amount, "tokens": input_estimate + output_cap}
+
+
 def _budget_from_payload(value: Any) -> dict[str, Any]:
     spec = dict(DEFAULT_BUDGET)
     if isinstance(value, dict):
@@ -867,6 +883,25 @@ def _mark_budget_exhausted(database: Database, *, owner_id: str, project_id: str
     return {"status": actual, "task_id": task_id, "stop_reason": "budget_exhausted"}
 
 
+def _deadline_exceeded_on(conn: Any, project_id: str, task_id: str) -> bool:
+    created = conn.execute(
+        text("SELECT created_at FROM tasks WHERE project_id = :project_id AND id = :id"),
+        {"project_id": project_id, "id": task_id},
+    ).scalar_one()
+    active = conn.execute(
+        text("SELECT active_seconds FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id"),
+        {"project_id": project_id, "task_id": task_id},
+    ).scalar()
+    if active is None:
+        return False
+    return (datetime.now(UTC) - created).total_seconds() > int(active)
+
+
+def _past_deadline(database: Database, owner_id: str, project_id: str, task_id: str) -> bool:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return _deadline_exceeded_on(conn, project_id, task_id)
+
+
 def _task_age_seconds(database: Database, owner_id: str, project_id: str, task_id: str) -> float:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         created = conn.execute(
@@ -890,6 +925,8 @@ def _ensure_live_answer(
 ) -> str | dict[str, str] | None:
     existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
+        if _past_deadline(database, owner_id, project_id, task_id):
+            return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
         return existing["id"]
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
@@ -924,8 +961,10 @@ def _ensure_live_answer(
     tokens_left = token_ceiling - int(account["tokens_used"]) - int(account["tokens_held"])
     cost_left = cost_ceiling - int(account["actual_known_micro_usd"]) - int(account["held_micro_usd"])
     prompt = research_prompt(goal=goal, sources=fresh)
-    input_estimate = estimate_tokens(prompt)
-    output_cap = min(OUTPUT_TOKEN_CAP, max(0, tokens_left - input_estimate))
+    plan = _live_dispatch_plan(prompt=prompt, tokens_left=tokens_left, cost_left=cost_left)
+    if plan is None:
+        return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="reservation")
+    output_cap = int(plan["output_cap"])
     request_key = f"research-{task_id}"
     prompt_sha = sha256_text(prompt)
     prepared = ledger.prepare_model_call(
@@ -933,9 +972,9 @@ def _ensure_live_answer(
         project_id=project_id,
         task_id=task_id,
         request_key=request_key,
-        amount=max(0, cost_left),
+        amount=int(plan["amount"]),
         role="research",
-        tokens=max(0, input_estimate + output_cap),
+        tokens=int(plan["tokens"]),
         model_alias=endpoints.live_model_alias,
         prompt_sha256=prompt_sha,
         output_cap=output_cap,
@@ -947,7 +986,10 @@ def _ensure_live_answer(
     if action in {"unreconciled", "conflict"}:
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型调用结果未能对账", code="live_call_unreconciled")
     if action == "send":
-        remaining = max(0.05, float(spec["active_seconds"]) - _task_age_seconds(database, owner_id, project_id, task_id))
+        remaining = float(spec["active_seconds"]) - _task_age_seconds(database, owner_id, project_id, task_id)
+        if remaining <= 0:
+            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
         gateway = ModelGateway(
             database,
             upstream_base=endpoints.live_model_base,
@@ -960,6 +1002,10 @@ def _ensure_live_answer(
             capabilities=["knowledge:read"],
             aliases=[endpoints.live_model_alias],
         )
+        blocked = _block_execution(database, owner_id, project_id, task_id)
+        if blocked is not None:
+            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return {"status": blocked, "task_id": task_id}
         try:
             result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
         except GatewayDenied:
@@ -969,9 +1015,6 @@ def _ensure_live_answer(
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游超时", code="upstream_timeout")
         output = str(result.get("output") or "").strip()
-        if not output:
-            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
-            return ""
         input_tokens = result.get("input_tokens")
         output_tokens = result.get("output_tokens")
         book_result = ledger.record_model_response(
@@ -986,6 +1029,10 @@ def _ensure_live_answer(
             upstream_model=None if result.get("upstream_model") is None else str(result["upstream_model"]),
             requested_alias=None if result.get("requested_alias") is None else str(result["requested_alias"]),
         )
+        if not output:
+            if book_result == "overrun":
+                return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型回报超出预留，需要对账", code="budget_unreconciled")
+            return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型没有返回可用回答", code="empty_answer")
         recorded = {
             "output": output,
             "reported_input_tokens": input_tokens,
@@ -1222,7 +1269,19 @@ def _commit_terminal(database: Database, *, owner_id: str, project_id: str, task
                 updated = _update_status(conn, project_id=project_id, task_id=task_id, status="PAUSED", allowed=PAUSEABLE_STATUSES, resume_state="pause_requested")
                 return updated or state
             return state
-        updated = _update_status(conn, project_id=project_id, task_id=task_id, status=status, allowed=("VERIFYING", "RUNNING"))
+        commit_status = status
+        resume_for_commit = None
+        if status == "SUCCEEDED" and _deadline_exceeded_on(conn, project_id, task_id):
+            commit_status = "FAILED"
+            resume_for_commit = "budget_exhausted"
+        updated = _update_status(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            status=commit_status,
+            allowed=("VERIFYING", "RUNNING"),
+            resume_state=resume_for_commit,
+        )
         if updated is not None:
             return updated
         current = conn.execute(

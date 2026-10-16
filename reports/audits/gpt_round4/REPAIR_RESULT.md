@@ -66,3 +66,28 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 ## 缺口
 
 没有用真实 key 重跑 `scripts/run_live_task_check.py` 和 F26。研究路径的完成判定更严，短引用可能不再成功。`to_thread` 不能取消已经发出的供应商请求。价格仍然来自供应商回报或缺失，不是本地价目表。审计包里的 SQLite 58 项没有在本机重跑。
+
+## Codex 跟进（PR #9 合入之后）
+
+PR #9 已由用户合并为 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。合入时 main 的 pack-and-unit 与 integration 成功。SonarCloud 对合并提交是 neutral（Quality Gate not computed）；该 PR 的 quality gate 当时 passed。下面八项是合入后仍未解决的 P1，不是把验收改松。
+
+- 数字覆盖：每个数字要带上紧随的单位和邻近主语。六十次与九十天对调、六十摄氏度写成六十华氏度，都是 `missing_fact`。整句被引用时仍然覆盖。沸点原句里的「资料1」仍不计入无依据数字。
+- 引用：`goal_completion` 可以通过，但回答没有资料原句或 12 字重叠时，结论是 `citation_fail`，任务不成功。验收版本改为 `goal-artifact-6`。
+- 空正文：先 `record_model_response`，已知 token 和费用入账，然后 `NEEDS_REVIEW`（`empty_answer`），不把这次调用标成 unknown。
+- 费用上限：派发前按输入 100 micro-USD/token、输出 400 micro-USD/token 估算本次最坏费用。剩余金额装不下就不插入预留、不发请求。这是本地派发上限，不是供应商价目；更贵的模型仍可能在账单之后变成 `observed`。
+- token：预留使用 chat 包装后的估算，大于裸 prompt。裸估算加 1 个 token 的额度不再派发。
+- `observed`：快照、任务预算和 `/costs` 单独给出 `observed_micro_usd` 与 `observed_request_count`，不并进 `actual_known_micro_usd`。150000 对 预留 的超额仍是 `actual_micro_usd=150000`，公开视图能看见这笔超额。
+- 暂停/取消：`workflow.patched("execute-interruptible")` 在 `execute_task` 进行时排空控制命令。测试通过 workflow signal，而不是直接改数据库。回执保留，任务不是 `SUCCEEDED`。旧的 `4ba3b2f` 历史没有这个标记，仍走原来的 `execute_activity`。
+- 线程池：活动池满时，控制投递走单独的 `aether-control` 执行器。
+
+一并处理的 P2：剩余时间不大于 0 时不派发，也不再把超时抬到 0.05 秒。显式来源文件不存在时与损坏一样 `NEEDS_REVIEW`。降级 `0011` 前先把 `observed` 行改成 `unknown`，金额写入 `usage_detail`，再恢复旧的 CHECK。
+
+全量：
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+324 passed, 1 warning in 237.74s
+EXIT:0
+```
+
+本机没有 live model key。不把 `live_task_check` 或 F26 标成失败，也不改 `live_ready`。`comparative_evidence` 仍是 `not_run`。R4 合入后尚需监督者用真实 key 重跑 `scripts/run_live_task_check.py`。`to_thread` 仍不能取消已经发出的 HTTP。本地费用上限不是供应商价目。审计包里的 SQLite 58 项没有重跑。
