@@ -15,6 +15,7 @@ from typing import Any
 
 from reference.models import CodingJobRequest, CodingJobResult
 
+from aether_worker.container_runtime import execute_docker
 from aether_worker.loopback import LoopbackError, get_json
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
@@ -154,7 +155,7 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
 def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
         raise RunnerError("docker_forbidden")
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=timeout)
+    return execute_docker(args, timeout=timeout)
 
 
 def probe_docker_daemon() -> dict[str, str]:

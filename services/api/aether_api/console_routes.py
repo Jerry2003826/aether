@@ -13,6 +13,22 @@ from fastapi import FastAPI, Query, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from aether_api.body_models import (
+    CodingJobBody,
+    ConnectorBody,
+    DeployBody,
+    EvaluationBody,
+    FeedbackBody,
+    IngestionBody,
+    ModelProbeBody,
+    SearchBody,
+    SkillEvaluateBody,
+    SkillImportBody,
+    SourceCreateBody,
+    SourcePatchBody,
+    WatchCreateBody,
+    WatchPatchBody,
+)
 from aether_api.control import (
     _accepted,
     _claim_idempotency,
@@ -42,10 +58,7 @@ _ERRORS = {
     429: {"description": "被限流"},
     503: {"description": "依赖不可用"},
 }
-_SOURCE_KINDS = {"url", "rss", "local_document", "github_api", "arxiv_api"}
 _INGESTIBLE_KINDS = {"url", "rss", "local_document", "github_api", "arxiv_api"}
-_FEEDBACK_KINDS = {"click", "save", "helpful", "dwell", "hide", "unsave"}
-_SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
 
 
 def register_console_routes(app: FastAPI, settings: Settings) -> None:
@@ -135,10 +148,7 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.post("/v1/projects/{project_id}/ingestions", status_code=202, operation_id="createIngestion", responses=_ERRORS)
     def create_ingestion(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
-        if set(body) != {"source_id"}:
-            raise ApiError(422, "invalid_ingestion", "采集请求不合法")
-        source_id = str(body["source_id"])
-        _task_id(source_id)
+        source_id = IngestionBody.model_validate(body).source_id
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
@@ -251,14 +261,12 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.post("/v1/projects/{project_id}/skills", status_code=202, operation_id="createSkill", responses=_ERRORS)
     def create_skill(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
-        if set(body) != {"bundle_artifact_id"}:
-            raise ApiError(422, "invalid_skill", "技能导入不合法")
-        _task_id(str(body["bundle_artifact_id"]))
+        bundle_artifact_id = SkillImportBody.model_validate(body).bundle_artifact_id
         skill_id = str(uuid.uuid4())
         command = {
             "skill_id": skill_id,
             "version_id": str(uuid.uuid4()),
-            "bundle_artifact_id": str(body["bundle_artifact_id"]),
+            "bundle_artifact_id": bundle_artifact_id,
             "name": "q" + uuid.uuid4().hex[:8],
         }
         return _accept(app, settings, request, project_id, "skill.import", {"bundle_artifact_id": command["bundle_artifact_id"]}, command, skill_id)
@@ -556,42 +564,11 @@ def _time(value: str | None) -> str | None:
 
 
 def _source_create_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or set(body) - {"kind", "locator", "allowed_domains", "fetch_interval_seconds"}:
-        raise ApiError(422, "invalid_source", "来源不合法")
-    kind = body.get("kind")
-    locator = body.get("locator")
-    domains = body.get("allowed_domains") or []
-    interval = body.get("fetch_interval_seconds", 3600)
-    if kind not in _SOURCE_KINDS or not isinstance(locator, str) or not locator.strip() or len(locator) > 4000:
-        raise ApiError(422, "invalid_source", "来源不合法")
-    if not isinstance(domains, list) or any(not isinstance(item, str) or not item for item in domains):
-        raise ApiError(422, "invalid_source", "域名不合法")
-    if not isinstance(interval, int) or isinstance(interval, bool) or interval < 60:
-        raise ApiError(422, "invalid_source", "抓取间隔不合法")
-    return {"kind": kind, "locator": locator, "allowed_domains": domains, "fetch_interval_seconds": interval}
+    return SourceCreateBody.model_validate(body).model_dump()
 
 
 def _source_patch_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or not body or set(body) - {"allowed_domains", "fetch_interval_seconds", "status"}:
-        raise ApiError(422, "invalid_source", "来源更新不合法")
-    parsed = _source_create_body(
-        {
-            "kind": "url",
-            "locator": "placeholder",
-            "allowed_domains": body.get("allowed_domains", []),
-            "fetch_interval_seconds": body.get("fetch_interval_seconds", 3600),
-        }
-    )
-    result: dict[str, Any] = {}
-    if "allowed_domains" in body:
-        result["allowed_domains"] = parsed["allowed_domains"]
-    if "fetch_interval_seconds" in body:
-        result["fetch_interval_seconds"] = parsed["fetch_interval_seconds"]
-    if "status" in body:
-        if body["status"] not in {"ACTIVE", "PAUSED"}:
-            raise ApiError(422, "invalid_source", "来源状态不合法")
-        result["status"] = body["status"]
-    return result
+    return SourcePatchBody.model_validate(body).model_dump(exclude_unset=True)
 
 
 def _source_row(conn: Any, project_id: str, row: Any) -> dict[str, Any]:
@@ -624,46 +601,11 @@ def _source_row(conn: Any, project_id: str, row: Any) -> dict[str, Any]:
 
 
 def _search_body(body: dict[str, Any], project_id: str) -> dict[str, Any]:
-    if not isinstance(body, dict) or set(body) - {"project_id", "query", "mode", "limit", "source_ids"}:
-        raise ApiError(422, "invalid_search", "检索请求不合法")
-    query = body.get("query")
-    mode = body.get("mode", "hybrid")
-    limit = body.get("limit", 8)
-    source_ids = body.get("source_ids") or []
-    if body.get("project_id") != project_id or not isinstance(query, str) or not query.strip() or len(query) > 4000:
-        raise ApiError(422, "invalid_search", "检索请求不合法")
-    if mode not in {"lexical", "dense", "hybrid"}:
-        raise ApiError(422, "invalid_search", "检索模式不合法")
-    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 50:
-        raise ApiError(422, "invalid_search", "检索条数不合法")
-    if not isinstance(source_ids, list):
-        raise ApiError(422, "invalid_search", "来源过滤不合法")
-    for item in source_ids:
-        _task_id(str(item))
-    return {"query": query.strip(), "mode": mode, "limit": limit, "source_ids": [str(item) for item in source_ids]}
+    return SearchBody.model_validate(body, context={"project_id": project_id}).model_dump()
 
 
 def _feedback_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or "user" in body or set(body) - {"event_id", "impression_id", "source_id", "kind", "dwell_seconds", "event_time"}:
-        raise ApiError(422, "invalid_feedback", "反馈不合法")
-    _task_id(str(body.get("event_id")))
-    _task_id(str(body.get("source_id")))
-    if body.get("impression_id") is not None:
-        _task_id(str(body["impression_id"]))
-    if body.get("kind") not in _FEEDBACK_KINDS or not isinstance(body.get("event_time"), str):
-        raise ApiError(422, "invalid_feedback", "反馈不合法")
-    _time(str(body["event_time"]))
-    dwell = body.get("dwell_seconds")
-    if dwell is not None and (isinstance(dwell, bool) or not isinstance(dwell, (int, float)) or dwell < 0):
-        raise ApiError(422, "invalid_feedback", "停留时间不合法")
-    return {
-        "event_id": str(body["event_id"]),
-        "impression_id": None if body.get("impression_id") is None else str(body["impression_id"]),
-        "source_id": str(body["source_id"]),
-        "kind": body["kind"],
-        "dwell_seconds": dwell,
-        "event_time": body["event_time"],
-    }
+    return FeedbackBody.model_validate(body).model_dump()
 
 
 def _manifest(value: Any) -> dict[str, Any]:
@@ -682,44 +624,11 @@ def _manifest(value: Any) -> dict[str, Any]:
 
 
 def _evaluate_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or _SCORE_KEYS & set(body) or set(body) - {"candidate_version_id", "baseline_version_id", "dataset_manifest_id", "budget"}:
-        raise ApiError(422, "invalid_evaluation", "评测请求不能自带分数")
-    _task_id(str(body.get("candidate_version_id")))
-    _task_id(str(body.get("dataset_manifest_id")))
-    if body.get("baseline_version_id") is not None:
-        _task_id(str(body["baseline_version_id"]))
-    if not isinstance(body.get("budget"), dict):
-        raise ApiError(422, "invalid_evaluation", "评测预算不合法")
-    return {
-        "candidate_version_id": str(body["candidate_version_id"]),
-        "baseline_version_id": None if body.get("baseline_version_id") is None else str(body["baseline_version_id"]),
-        "dataset_manifest_id": str(body["dataset_manifest_id"]),
-        "budget": body["budget"],
-        "configuration": {"kind": "skill.evaluate"},
-    }
+    return SkillEvaluateBody.model_validate(body).model_dump()
 
 
 def _deploy_body(body: dict[str, Any]) -> dict[str, Any]:
-    required = {"action", "target_version_id", "evaluation_id", "expected_previous_version_id", "approval_id", "report_sha256"}
-    if not isinstance(body, dict) or set(body) != required:
-        raise ApiError(422, "invalid_deploy", "部署请求不合法")
-    if body["action"] not in {"promote", "rollback"}:
-        raise ApiError(422, "invalid_deploy", "部署动作不合法")
-    for key in ("target_version_id", "evaluation_id", "approval_id"):
-        _task_id(str(body[key]))
-    if body["expected_previous_version_id"] is not None:
-        _task_id(str(body["expected_previous_version_id"]))
-    digest = body["report_sha256"]
-    if not isinstance(digest, str) or len(digest) != 64:
-        raise ApiError(422, "invalid_deploy", "报告哈希不合法")
-    return {
-        "action": body["action"],
-        "target_version_id": str(body["target_version_id"]),
-        "evaluation_id": str(body["evaluation_id"]),
-        "expected_previous_version_id": body["expected_previous_version_id"],
-        "approval_id": str(body["approval_id"]),
-        "report_sha256": digest,
-    }
+    return DeployBody.model_validate(body).model_dump()
 
 
 def _require_artifact(app: FastAPI, owner: str, project_id: str, artifact_id: str) -> None:
@@ -792,65 +701,15 @@ def _coding_job_row(conn: Any, project_id: str, task_id: str, job_key: str) -> d
 
 
 def _coding_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or set(body) != {"task_id", "base_artifact_id", "job_key", "objective"}:
-        raise ApiError(422, "invalid_coding_job", "编码作业不合法")
-    _task_id(str(body["task_id"]))
-    _task_id(str(body["base_artifact_id"]))
-    job_key = body["job_key"]
-    objective = body["objective"]
-    if not isinstance(job_key, str) or not job_key.strip() or len(job_key) > 128:
-        raise ApiError(422, "invalid_coding_job", "作业键不合法")
-    if not isinstance(objective, str) or not objective.strip() or len(objective) > 4000:
-        raise ApiError(422, "invalid_coding_job", "目标不合法")
-    return {
-        "task_id": str(body["task_id"]),
-        "base_artifact_id": str(body["base_artifact_id"]),
-        "job_key": job_key.strip(),
-        "objective": objective.strip(),
-    }
+    return CodingJobBody.model_validate(body).model_dump()
 
 
 def _watch_create_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or set(body) != {"purpose", "source_ids", "schedule", "budget"}:
-        raise ApiError(422, "invalid_watch", "跟踪请求不合法")
-    purpose = body["purpose"]
-    sources = body["source_ids"]
-    schedule = body["schedule"]
-    if not isinstance(purpose, str) or not purpose.strip() or not isinstance(sources, list) or not sources:
-        raise ApiError(422, "invalid_watch", "跟踪请求不合法")
-    for source_id in sources:
-        _task_id(str(source_id))
-    if not isinstance(schedule, dict) or set(schedule) - {"interval_seconds", "timezone"} or not isinstance(schedule.get("interval_seconds"), int):
-        raise ApiError(422, "invalid_watch", "跟踪计划不合法")
-    if isinstance(schedule["interval_seconds"], bool) or schedule["interval_seconds"] < 300:
-        raise ApiError(422, "invalid_watch", "跟踪间隔不合法")
-    if not isinstance(body["budget"], dict):
-        raise ApiError(422, "invalid_watch", "跟踪预算不合法")
-    return {
-        "purpose": purpose,
-        "source_ids": [str(item) for item in sources],
-        "schedule": {"interval_seconds": schedule["interval_seconds"], "timezone": schedule.get("timezone", "Australia/Melbourne")},
-        "budget": body["budget"],
-    }
+    return WatchCreateBody.model_validate(body).model_dump()
 
 
 def _watch_patch_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or not body or set(body) - {"status", "interval_seconds", "expected_source_ids"}:
-        raise ApiError(422, "invalid_watch", "跟踪更新不合法")
-    result: dict[str, Any] = {}
-    if "status" in body:
-        if body["status"] not in {"ACTIVE", "PAUSED"}:
-            raise ApiError(422, "invalid_watch", "跟踪状态不合法")
-        result["status"] = body["status"]
-    if "interval_seconds" in body:
-        if isinstance(body["interval_seconds"], bool) or not isinstance(body["interval_seconds"], int) or body["interval_seconds"] < 300:
-            raise ApiError(422, "invalid_watch", "跟踪间隔不合法")
-        result["interval_seconds"] = body["interval_seconds"]
-    if "expected_source_ids" in body:
-        if not isinstance(body["expected_source_ids"], list):
-            raise ApiError(422, "invalid_watch", "来源列表不合法")
-        result["expected_source_ids"] = [str(item) for item in body["expected_source_ids"]]
-    return result
+    return WatchPatchBody.model_validate(body).model_dump(exclude_unset=True)
 
 
 def _watch(row: Any) -> dict[str, Any]:
@@ -868,17 +727,7 @@ def _watch(row: Any) -> dict[str, Any]:
 
 
 def _evaluation_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or _SCORE_KEYS & set(body) or set(body) != {"purpose", "dataset_manifest_id", "configuration", "budget"}:
-        raise ApiError(422, "invalid_evaluation", "评测请求不能自带分数")
-    if body["purpose"] not in {"development", "validation", "release"} or not isinstance(body["configuration"], dict) or not isinstance(body["budget"], dict):
-        raise ApiError(422, "invalid_evaluation", "评测请求不合法")
-    _task_id(str(body["dataset_manifest_id"]))
-    return {
-        "purpose": body["purpose"],
-        "dataset_manifest_id": str(body["dataset_manifest_id"]),
-        "configuration": body["configuration"],
-        "budget": body["budget"],
-    }
+    return EvaluationBody.model_validate(body).model_dump()
 
 
 def _evaluation(row: Any) -> dict[str, Any]:
@@ -898,28 +747,7 @@ def _evaluation(row: Any) -> dict[str, Any]:
 
 
 def _connector_body(body: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"project_id", "connector_key", "transport", "manifest", "secret_value"}
-    if not isinstance(body, dict) or set(body) - allowed or set(body) & {"project_id", "connector_key", "transport", "manifest"} != {"project_id", "connector_key", "transport", "manifest"}:
-        raise ApiError(422, "invalid_connector", "连接器不合法")
-    _task_id(str(body["project_id"]))
-    if body["transport"] not in {"stdio", "streamable_http"} or not isinstance(body["connector_key"], str) or not body["connector_key"].strip():
-        raise ApiError(422, "invalid_connector", "连接器不合法")
-    if not isinstance(body["manifest"], dict):
-        raise ApiError(422, "invalid_connector", "清单不合法")
-    secret = body.get("secret_value")
-    if secret is not None and not isinstance(secret, str):
-        raise ApiError(422, "invalid_connector", "密钥不合法")
-    manifest = {key: value for key, value in body["manifest"].items() if key != "secret_value"}
-    raw = json.dumps(manifest, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-    return {
-        "connector_id": str(uuid.uuid4()),
-        "project_id": str(body["project_id"]),
-        "connector_key": body["connector_key"].strip(),
-        "transport": body["transport"],
-        "manifest": manifest,
-        "manifest_sha256": sha256_text(raw),
-        "secret_reference": None if not secret else "sha256:" + sha256_text(secret),
-    }
+    return ConnectorBody.model_validate(body).model_dump()
 
 
 def _connector_public(row: Any) -> dict[str, Any]:
@@ -949,12 +777,7 @@ def _find_connector(app: FastAPI, owner: str, connector_id: str) -> dict[str, An
 
 
 def _model_probe_body(body: dict[str, Any]) -> None:
-    if not isinstance(body, dict) or set(body) != {"alias", "allow_billable_probe", "max_cost_micro_usd"}:
-        raise ApiError(422, "invalid_probe", "模型探针不合法")
-    if not isinstance(body["alias"], str) or not body["alias"].strip() or body["allow_billable_probe"] is not True:
-        raise ApiError(422, "invalid_probe", "模型探针不合法")
-    if isinstance(body["max_cost_micro_usd"], bool) or not isinstance(body["max_cost_micro_usd"], int) or body["max_cost_micro_usd"] < 1:
-        raise ApiError(422, "invalid_probe", "费用上限不合法")
+    ModelProbeBody.model_validate(body)
 
 
 def _zero_cost() -> dict[str, int]:

@@ -9,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from pydantic_evals import Case, Dataset
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactError, ArtifactStore
@@ -146,12 +147,7 @@ def _grade_payload(store: ArtifactStore, *, owner_id: str, project_id: str, payl
     candidate_bytes = _candidate_bytes(store, owner_id=owner_id, project_id=project_id, version_id=str(payload["candidate_version_id"]))
     candidate = parse_candidate(candidate_bytes)
     deadline = evaluation_deadline(payload.get("budget"), now=time.monotonic())
-    grades = []
-    for case in dataset["cases"]:
-        remaining = None if deadline is None else deadline - time.monotonic()
-        if remaining is not None and remaining <= 0:
-            raise SkillEvalError("deadline_exceeded")
-        grades.append(_grade_case(candidate["files"], case["suite_files"], dataset["contract"], timeout_seconds=remaining))
+    grades = _evaluate_cases(dataset["cases"], candidate["files"], dataset["contract"], deadline)
     metrics = metrics_from_grades(
         grades,
         baseline_passes=int(dataset["baseline_passes"]),
@@ -191,6 +187,39 @@ def _candidate_bytes(store: ArtifactStore, *, owner_id: str, project_id: str, ve
         raise SkillEvalError("version_missing")
     data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(artifact_id))
     return data
+
+
+def _evaluate_cases(
+    cases: list[dict[str, Any]],
+    candidate_files: dict[str, str],
+    contract: str,
+    deadline: float | None,
+) -> list[dict[str, Any]]:
+    """pydantic-evals schedules cases. grade() still runs in this verifier process."""
+    first: list[BaseException] = []
+
+    def task(inputs: dict[str, Any]) -> dict[str, Any]:
+        if first:
+            return {"skipped": True}
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            exc: BaseException = SkillEvalError("deadline_exceeded")
+            first.append(exc)
+            raise exc
+        try:
+            return _grade_case(candidate_files, inputs["case"]["suite_files"], contract, timeout_seconds=remaining)
+        except Exception as exc:
+            first.append(exc)
+            raise
+
+    dataset = Dataset(
+        name="aether-skill-grade",
+        cases=[Case(name=f"case-{index}", inputs={"case": case}) for index, case in enumerate(cases)],
+    )
+    report = dataset.evaluate_sync(task, max_concurrency=1, progress=False)
+    if first:
+        raise first[0]
+    return [item.output for item in report.cases]
 
 
 def _grade_case(

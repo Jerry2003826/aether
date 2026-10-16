@@ -24,6 +24,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
+from aether_worker.runner import _docker
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
@@ -295,14 +296,14 @@ def _linux_isolation(secret: str) -> dict[str, Any]:
         return {"status": NOT_RUN, "reason": "not_linux"}
     if shutil.which("docker") is None:
         return {"status": NOT_RUN, "reason": "docker_missing"}
-    info = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
+    info = _docker(["info"])
     if info.returncode != 0:
         return {"status": NOT_RUN, "reason": "docker_unavailable"}
     command = _isolation_command()
     if secret and any(secret in part for part in command):
         return {"status": "fail", "reason": "secret_in_command"}
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+        completed = _docker(command[1:], timeout=90)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"status": NOT_RUN, "reason": redact_secret(type(exc).__name__, secret)}
     output = redact_secret((completed.stdout or "") + (completed.stderr or ""), secret)

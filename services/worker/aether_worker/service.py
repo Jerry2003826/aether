@@ -34,6 +34,7 @@ from aether_worker.pending_jobs import execute_queued_ingestions
 from aether_worker.skill_execute import execute_pending_skill_evaluations
 from aether_worker.tool_gateway import dispatch_approved_tools
 from aether_worker.project_registry import load_projects, save_projects
+from aether_worker.runtime_config import intake_pause_seconds, load_runtime_settings, research_provider
 from aether_worker.watch_tick import run_watch_tick
 from aether_worker.watches import ensure_watch_schedules
 from aether_worker.watches_workflow import WatchWorkflow
@@ -52,7 +53,7 @@ async def run_control(executor: concurrent.futures.Executor, func, /, *args):
 
 
 def index_root_from_env() -> Path:
-    return Path(os.environ.get("AETHER_INDEX_ROOT", "data/indexes"))
+    return load_runtime_settings().index_root
 
 
 def route_pending(
@@ -156,29 +157,15 @@ def _execute_remembered(
 
 def _defer_progress() -> bool:
     """Test switch. A delivered command can stay QUEUED until a later process resumes it."""
-    return os.environ.get("AETHER_DEFER_PROGRESS", "").strip() == "1"
+    return load_runtime_settings().defer_progress
 
 
 def _intake_pause_seconds() -> float:
-    raw = os.environ.get("AETHER_INTAKE_PAUSE_SECONDS", "0").strip()
-    if raw == "":
-        return 0.0
-    try:
-        value = float(raw)
-    except ValueError as exc:
-        raise SystemExit("AETHER_INTAKE_PAUSE_SECONDS 必须是非负秒数") from exc
-    if value < 0:
-        raise SystemExit("AETHER_INTAKE_PAUSE_SECONDS 必须是非负秒数")
-    return value
+    return intake_pause_seconds(load_runtime_settings().intake_pause_seconds)
 
 
 def _research_provider() -> str:
-    raw = os.environ.get("AETHER_RESEARCH_PROVIDER", "live").strip().lower()
-    if raw in {"", "live"}:
-        return "live"
-    if raw == "scripted":
-        return "scripted"
-    raise SystemExit("AETHER_RESEARCH_PROVIDER 只能是 live 或 scripted")
+    return research_provider(load_runtime_settings().research_provider)
 
 
 def _skill_evaluations_via_role(worker: Database, *, owner_id: str, project_id: str) -> None:
@@ -224,23 +211,24 @@ def endpoints_from_env() -> WorkerEndpoints:
     missing = [name for name in required if not os.environ.get(name)]
     if missing:
         raise SystemExit("worker 缺少环境变量: " + ", ".join(missing))
+    cfg = load_runtime_settings()
     verifier_url = "" if role == "worker" else os.environ["AETHER_VERIFIER_DATABASE_URL"]
     live_key = "" if role == "worker" else os.environ.get("AETHER_LIVE_MODEL_KEY", "")
     return WorkerEndpoints(
         worker_url=os.environ["AETHER_WORKER_DATABASE_URL"],
         verifier_url=verifier_url,
         dispatcher_url=os.environ["AETHER_DISPATCHER_DATABASE_URL"],
-        artifact_root=Path(os.environ.get("AETHER_ARTIFACT_ROOT", "data/artifacts")),
+        artifact_root=cfg.artifact_root,
         temporal_address=os.environ["AETHER_TEMPORAL_ADDRESS"],
-        task_queue=os.environ.get("AETHER_TASK_QUEUE", "aether-tasks"),
-        intake_pause_seconds=_intake_pause_seconds(),
-        research_provider=_research_provider(),
-        live_model_base=os.environ.get("AETHER_LIVE_MODEL_BASE", "").strip(),
-        live_model_alias=os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip(),
+        task_queue=cfg.task_queue,
+        intake_pause_seconds=intake_pause_seconds(cfg.intake_pause_seconds),
+        research_provider=research_provider(cfg.research_provider),
+        live_model_base=cfg.live_model_base.strip(),
+        live_model_alias=cfg.live_model_alias.strip(),
         live_model_key=live_key,
-        verifier_base=os.environ.get("AETHER_VERIFIER_BASE", ""),
-        gateway_base=os.environ.get("AETHER_GATEWAY_BASE", ""),
-        runner_base=os.environ.get("AETHER_RUNNER_BASE", ""),
+        verifier_base=cfg.verifier_base,
+        gateway_base=cfg.gateway_base,
+        runner_base=cfg.runner_base,
         loopback_token=os.environ.get("AETHER_LOOPBACK_TOKEN", ""),
     )
 

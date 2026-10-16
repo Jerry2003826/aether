@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import psutil
+
 from aether_worker.loopback import LoopbackError, get_json
 
 _PROCESS_ROLE = "AETHER_PROCESS_ROLE"
@@ -314,10 +316,9 @@ def _role_pid(item: object, skip: set[int]) -> int | None:
 
 
 def _is_recorded_role(pid: int) -> bool:
-    command = Path(f"/proc/{pid}/cmdline")
     try:
-        text = command.read_bytes().replace(b"\x00", b" ").decode(_ENCODING, "replace")
-    except OSError:
+        text = " ".join(psutil.Process(pid).cmdline())
+    except (psutil.Error, OSError):
         return False
     return any(name in text for name in _ROLE_COMMANDS)
 

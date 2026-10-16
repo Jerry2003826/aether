@@ -1,14 +1,26 @@
-# R8-C 威胁情报浏览器，变基到 13bc096
+# R8-B 开源库替换
 
-任务：把 Playwright / Tor 路径接到已合并的 R8-A（`13bc096`，ADR-F41）上。ADR-F42 已被未合并的 PR #31 占用，本决定记为 ADR-F43。不改 `contracts/`、`reference/` 和 `readiness.live_ready`。
+任务：变基到 `ab1ebef` 之后，把编码执行、技能用例调度、API 请求体、非密钥配置、密钥扫描和容器/进程检查换成固定版本的开源库。沙箱策略、凭证分离、预算账本、ArtifactStore、SSRF、审批和 CodeGraph adapter 保持手写。采集解析已是 ADR-F41，威胁情报浏览器已是 ADR-F43，本决定记为 ADR-F42。不改 `contracts/`、`reference/` 和 `readiness.live_ready`。
 
-已改：
+拟改路径：
 
-- 采集与浏览器共用 `net_guard.assert_public_target`，有 IPv4 时用 IPv4
-- 子 frame 的 document 请求中止
-- 访问审计写入 `audit_events`
-- Tor 代理在内部链路地址上就绪后才启动浏览器；夹具模式等同一地址的 8080
-- SOCKS 只绑定该内部地址，出口网卡不提供代理
-- `playwright==1.64.0`
+- `services/worker/aether_worker/coding_sandbox.py`、`openhands_sandbox_entry.py`、`coding_protocol.py`、`openhands_image.py`、`container_runtime.py`
+- `services/worker/aether_worker/skill_execute.py`、`secret_scan.py`、`runtime_config.py`、`role_launch.py`、`runner.py`
+- `services/api/aether_api/body_models.py`、`settings.py` 以及调用这些模型的路由
+- `infra/openhands-sandbox.Dockerfile`、`.github/workflows/ci.yml`、`.gitleaks.toml`
+- `docs/DECISIONS.md`、`docs/04_execution.md`、`docs/08_api_ui.md`、`docs/10_operations.md`、`README.md`、`MASTER_SPEC.md`
 
-结果：冻结检查通过。威胁浏览器单元测试 27 passed。本机没有 Docker。`0c19274` 的 pull_request integration 是 `392 passed, 4 warnings in 656.17s`。同一次提交的 push integration 有 1 个失败：PDF 作业在正文版本写入后仍是 RUNNING，因为未测量文本启动了 Hub 嵌入下载。`6cdfa0e` 整批跳过向量，两次 integration 都失败。`6a44eb5` 只跳过未测量正文，测量向量照常写入，90 秒没有加长。该提交的 push 与 pull_request integration 都是 `392 passed, 4 warnings`。Sonar `new_security_rating` 是 1。`live_ready` 保持 pending。
+测试命令：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --no-build pytest -q tests/unit
+gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
+```
+
+进度：七项替换都接到库调用。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 改为 true。
+
+结果：这一笔变基提交还没有重跑测试。上一笔在 `a2b9313` 上的结果是冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 290 passed、1 warning（21.43s）。`live_ready` 保持 pending。
+
+阻塞：编码镜像要在 CI 的 Docker 上构建后，集成测试才能看到 OpenHands 容器终态。

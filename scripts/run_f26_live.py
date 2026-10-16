@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 ALLOWED_OUT = Path("reports/f26_live_result.json")
 RESULT_PATH = ROOT / "reports" / "f26_live_result.json"
 sys.path.insert(0, str(ROOT / "services" / "worker"))
+sys.path.append(str(ROOT))
 
 from aether_worker.live_harness import LIVE_KEY, redact_secret, run_live_probe
 

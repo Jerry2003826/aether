@@ -2,16 +2,18 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
-import threading
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from aether_worker.container_runtime import container_logs
+from aether_worker.openhands_image import launch_image
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
@@ -20,103 +22,6 @@ from aether_worker.sandbox_delegate import (
     remote_run,
     worker_delegates,
 )
-
-CODING_RUNNER = r"""
-import importlib.util, inspect, json, os, signal, sys, time
-from pathlib import Path
-
-def _on_term(_signum, _frame):
-    raise SystemExit(143)
-
-signal.signal(signal.SIGTERM, _on_term)
-
-def copy_tree(src, dst):
-    for path in sorted(src.rglob("*")):
-        rel = path.relative_to(src)
-        if any(part in {".git", "__pycache__"} for part in rel.parts):
-            continue
-        if path.is_symlink():
-            raise RuntimeError("symlink")
-        target = dst.joinpath(*rel.parts)
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        if not path.is_file():
-            raise RuntimeError("special")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(path.read_bytes())
-
-def main():
-    started = time.monotonic()
-    dst = Path("/tmp/job")
-    dst.mkdir(parents=True, exist_ok=True)
-    copy_tree(Path("/work"), dst)
-    sys.path.insert(0, str(dst))
-    cases = []
-    passed = 0
-    failed = 0
-    tests = sorted(path for path in dst.glob("test_*.py") if path.is_file() and not path.is_symlink())
-    for path in tests:
-        spec = importlib.util.spec_from_file_location(path.stem, path)
-        if spec is None or spec.loader is None:
-            failed += 1
-            cases.append({"name": path.stem, "verdict": "FAIL", "detail": "import"})
-            continue
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[path.stem] = module
-        spec.loader.exec_module(module)
-        for attr in sorted(dir(module)):
-            if not attr.startswith("test_"):
-                continue
-            fn = getattr(module, attr)
-            if not callable(fn):
-                continue
-            try:
-                value = fn()
-            except Exception as exc:
-                failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": type(exc).__name__})
-                continue
-            if inspect.iscoroutine(value):
-                value.close()
-                failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": "async"})
-                continue
-            passed += 1
-            cases.append({"name": path.stem + "." + attr, "verdict": "PASS", "detail": ""})
-    errno = None
-    try:
-        sock = __import__("socket").socket()
-        sock.settimeout(1)
-        sock.connect(("1.1.1.1", 443))
-        errno = 0
-    except OSError as exc:
-        errno = exc.errno
-    if not cases:
-        failed += 1
-        cases.append({"name": "suite", "verdict": "FAIL", "detail": "no_tests"})
-    body = {
-        "passed": passed,
-        "failed": failed,
-        "errors": 0,
-        "cases": cases,
-        "elapsed_seconds": round(time.monotonic() - started, 6),
-        "network_errno": errno,
-        "credential_present": any(any(part in name for part in ("LIVE_MODEL", "ADMIN_DATABASE", "PASSWORD", "SECRET")) for name in os.environ),
-    }
-    sys.stdout.write("RESULT " + json.dumps(body, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-    return 0 if failed == 0 and passed > 0 else 1
-
-try:
-    code = main()
-except Exception as exc:
-    sys.stdout.write("RESULT " + json.dumps({"passed": 0, "failed": 1, "errors": 1, "cases": [{"name": "runner", "verdict": "FAIL", "detail": type(exc).__name__}], "elapsed_seconds": 0, "network_errno": None, "credential_present": False}) + "\n")
-    sys.stdout.flush()
-    code = 2
-raise SystemExit(code)
-"""
-
 
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
@@ -172,14 +77,15 @@ def container_arguments(workspace: Path, image: str, *, job_id: str | None = Non
         "-e",
         "LANG=C.UTF-8",
         "-e",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "PATH=/usr/local/bin:/usr/bin:/bin:/opt/openhands/.venv/bin",
+        "-e",
+        "OPENHANDS_SUPPRESS_BANNER=1",
         "-v",
         f"{workspace.resolve()}:/work:ro",
         image,
-        "python",
+        "/opt/openhands/.venv/bin/python",
         "-I",
-        "-c",
-        CODING_RUNNER,
+        "/opt/aether/openhands_sandbox_entry.py",
     ]
 
 
@@ -224,24 +130,11 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
             raise CodingSandboxError("sandbox_unavailable") from exc
     if shutil.which("docker") is None:
         return {"stdout": "", "stderr": ""}
-    process = subprocess.Popen(["docker", "logs", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout: list[str] = []
-    stderr: list[str] = []
-    assert process.stdout is not None and process.stderr is not None
-    threads = [
-        threading.Thread(target=_collect_tail, args=(process.stdout, limit, stdout)),
-        threading.Thread(target=_collect_tail, args=(process.stderr, limit, stderr)),
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    process.wait()
-    return {"stdout": stdout[0] if stdout else "", "stderr": stderr[0] if stderr else ""}
-
-
-def _collect_tail(stream: BinaryIO, limit: int, sink: list[str]) -> None:
-    sink.append(read_bounded_tail(stream, limit))
+    stdout, stderr = container_logs(target)
+    return {
+        "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
+        "stderr": read_bounded_tail(io.BytesIO(stderr), limit),
+    }
 
 
 def container_log_tails(job_id: str) -> dict[str, str]:
@@ -314,7 +207,11 @@ def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
     else:
-        args = [part for part in container_arguments(workspace, image, job_id=job_id) if part != "--rm"]
+        try:
+            runtime_image = launch_image(image, JOB_IMAGE)
+        except LookupError as exc:
+            raise CodingSandboxError("sandbox_unavailable") from exc
+        args = [part for part in container_arguments(workspace, runtime_image, job_id=job_id) if part != "--rm"]
         launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
     if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")

@@ -17,6 +17,15 @@ jobs:
           node-version: "24"
       - name: Resolve control-plane lock
         run: uv sync --locked --no-build
+      - name: Resolve OpenHands lock
+        run: uv sync --frozen
+        working-directory: environments/openhands
+      - name: Gitleaks
+        run: |
+          curl -fsSL -o /tmp/gitleaks.tar.gz https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz
+          echo "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb  /tmp/gitleaks.tar.gz" | sha256sum -c
+          tar -xzf /tmp/gitleaks.tar.gz -C /tmp
+          /tmp/gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
       - name: Pack self-check and reference tests
         run: |
           uv run --locked --no-build python scripts/verify_freeze.py
@@ -78,6 +87,8 @@ jobs:
         run: uv run --locked --no-build playwright install --with-deps chromium
       - name: Install pinned Hermes and probe it
         run: uv run --locked --no-build python scripts/install_hermes.py
+      - name: Build OpenHands coding image
+        run: uv run --locked --no-build python scripts/build_openhands_sandbox.py
       - name: Integration tests and doctor
         env:
           AETHER_REQUIRE_SERVICES: "1"

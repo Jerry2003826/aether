@@ -1,0 +1,11 @@
+title = "AETHER"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Named fixtures and one recorded CodeGraph result. Product source stays scanned."
+paths = [
+  '''tests/integration/test_round1_p1_09_backup_restore.py''',
+  '''reports/f15_product_result.json''',
+]

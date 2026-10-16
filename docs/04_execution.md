@@ -68,7 +68,7 @@ Actor 的可选决定是 `call_tools`、`submit_candidate`、`request_clarificat
 
 ## 6. OpenHands job 生命周期
 
-`QUEUED -> STARTING -> ACTIVE -> EXPORTING -> FINISHED`，失败/取消分支。每 job 一个隔离仓库副本与工作目录；使用已批准的 base_commit 导出，不把 host git worktree 的 `.git` 指针和主机仓库挂入沙箱。
+`QUEUED -> STARTING -> ACTIVE -> EXPORTING -> FINISHED`，失败/取消分支。每 job 一个隔离仓库副本与工作目录；使用已批准的 base_commit 导出，不把 host git worktree 的 `.git` 指针和主机仓库挂入沙箱。产品编码作业在既有断网只读沙箱里调用固定的 OpenHands 1.54.0 `LocalWorkspace.execute_command` 跑测试协议，不调用模型，也不把 SDK 事件当作可信证据。
 
 模型走 job-scoped gateway token；任务自身只能在这个预算里调用指定模型。token 即使被该 job 的 shell 看到也不能调用管理/审批/其他项目接口。SDK 内部事件不直接作为 trusted evidence。
 

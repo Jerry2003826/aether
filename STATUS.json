@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-16",
   "artifact_type": "core_done_live_pending",
-  "current_task": "R8-C threat browser ADR-F43",
+  "current_task": "R8-B open-source replacements ADR-F42",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,13 +14,15 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. Commit 6a44eb5 writes measured vectors and skips live encode only for unmeasured text on the worker path. Push run 38971544094 and PR run 38971552108 both passed integration with 392 passed, 4 warnings. Sonar new_security_rating is 1. Approval Agent did not approve. Do not merge.",
+  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true because the lock, readiness.codegraph_enabled and reports/f15_product_result.json already say the product adapter passed. Ingest parsing stays ADR-F41. The threat browser on main ab1ebef is ADR-F43. R8-B is ADR-F42. Integration was not run on this machine: no Docker daemon, Postgres or Temporal. CI must run pack-and-unit, integration and SonarCloud.",
   "last_executed_commands": [
     "uv run --locked --no-build python scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
-    "uv run --locked --no-build pytest -q tests/unit/test_retrieval.py"
+    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
+    "uv run --locked --no-build pytest -q tests/unit",
+    "gitleaks 8.30.1 detect --config .gitleaks.toml"
   ],
-  "last_test_result": "6a44eb5 push run 38971544094 integration: 392 passed, 4 warnings in 708.88s. PR run 38971552108 integration: 392 passed, 4 warnings in 762.14s. Both pack-and-unit jobs passed. Sonar quality gate OK, new_security_rating actualValue 1. Local before that commit: verify_freeze passed, tests/unit/test_retrieval.py 17 passed. live_ready stays pending.",
+  "last_test_result": "Rebase of R8-B onto ab1ebef is in progress. This intermediate commit was not retested by itself. The previous R8-B result before this rebase was verify_freeze api_operations 50, unittest 76 OK, unit 290 passed with 1 warning. Main ab1ebef recorded threat-browser CI green. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -198,7 +200,7 @@
     "status": "done",
     "ci_run": "38694676859",
     "live_ready": false,
-    "codegraph_enabled": false,
+    "codegraph_enabled": true,
     "comparative_evidence": "not_run"
   }
 }

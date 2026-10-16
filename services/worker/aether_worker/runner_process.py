@@ -7,6 +7,7 @@ import subprocess
 
 from aether_worker.coding_sandbox import LOG_CAPTURE_LIMIT, _bounded_logs, container_arguments, container_name
 from aether_worker.net_guard import fixtures_enabled
+from aether_worker.openhands_image import launch_image
 from aether_worker.role_http import serve_role
 from aether_worker.runner import JOB_IMAGE, _docker, probe_docker_daemon
 from aether_worker.threat_launch import ThreatLaunchError, docker_cleanup, docker_runner, execute_container
@@ -102,7 +103,11 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
 def _run(workspace: object, job_id: object) -> subprocess.CompletedProcess[str]:
     root = accepted_workspace(workspace)
     job = accepted_job(job_id)
-    args = [part for part in container_arguments(root, JOB_IMAGE, job_id=job) if part != "--rm"]
+    try:
+        image = launch_image(JOB_IMAGE, JOB_IMAGE)
+    except LookupError:
+        return subprocess.CompletedProcess(["docker"], 1, "", "image_unavailable")
+    args = [part for part in container_arguments(root, image, job_id=job) if part != "--rm"]
     return _docker(["run", "-d", "--name", container_name(job), *args[1:]])
 
 
