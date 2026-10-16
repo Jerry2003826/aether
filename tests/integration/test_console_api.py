@@ -1,4 +1,3 @@
-import json
 import uuid
 from datetime import UTC, datetime, timedelta
 
@@ -109,23 +108,22 @@ def test_recommendations_feedback_and_costs_read_the_ledger(client, role_urls) -
     recommended = client.get(f"/v1/projects/{project_id}/recommendations")
     assert recommended.status_code == 200, recommended.text
     body = recommended.json()
+    assert body["impression_id"] is None
     assert body["items"][0]["title"] == "笔记 " + HTML
     assert body["items"][0]["exploration"] is False
     assert body["policy_version"] == "score-v1"
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        stored = conn.execute(
-            text("SELECT propensity_details FROM recommendation_impressions WHERE id = :id"),
-            {"id": body["impression_id"]},
+        impressions = conn.execute(
+            text("SELECT COUNT(*) FROM recommendation_impressions WHERE project_id = :project_id"),
+            {"project_id": project_id},
         ).scalar_one()
-    details = stored if isinstance(stored, dict) else json.loads(stored)
-    assert details["collaborative_filtering"] is False
+    assert int(impressions) == 0
     event_id = str(uuid.uuid4())
     feedback = client.post(
         f"/v1/projects/{project_id}/feedback",
         headers=_headers(csrf, "console-feedback"),
         json={
             "event_id": event_id,
-            "impression_id": body["impression_id"],
             "source_id": body["items"][0]["source_id"],
             "kind": "hide",
             "event_time": "2026-10-15T00:00:00Z",

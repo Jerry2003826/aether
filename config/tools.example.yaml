@@ -122,6 +122,15 @@ tools:
   result_type: OperationResult
   required_capability: external:draft
   enforcement: MCP annotations cannot lower this risk or skip approval.
+- id: external.notify
+  risk: R2
+  idempotency: non_idempotent
+  approval: required
+  argument_fields:
+    text: string
+  result_type: OperationResult
+  required_capability: external:notify
+  enforcement: A lost response is not retried. A terminal task status stays terminal.
 mcp:
   default: disabled_until_reviewed
   accept_tool_schema_changes_automatically: false

@@ -28,7 +28,7 @@ API前缀`/v1`，JSON字段snake_case，时间UTC RFC3339；UI按Australia/Melbo
 | /v1/projects/{project_id}/search | POST | query、filters、mode；返回hits/来源/索引版本/degraded |
 | /v1/projects/{project_id}/memories | GET/POST | 搜索或用户明确添加记忆；proposed不能自动confirmed |
 | /v1/projects/{project_id}/memories/{memory_id} | PATCH/DELETE | 用户纠正/删除；生成新revision或tombstone |
-| /v1/projects/{project_id}/recommendations | GET | 推荐列表、impression_id、真实特征解释 |
+| /v1/projects/{project_id}/recommendations | GET | 只读推荐列表。不写画像、不写曝光；impression_id 为空，直到显式的 rank 写入 |
 | /v1/projects/{project_id}/feedback | POST | idempotent event；user不在body中自报 |
 | /v1/projects/{project_id}/skills | GET/POST | 列表/导入quarantine；脚本不自动运行 |
 | /v1/projects/{project_id}/skills/{skill_id}/evaluate | POST | 独立evaluator job；actor不能指定最终分数 |

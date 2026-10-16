@@ -43,6 +43,41 @@ def _profile(conn: Any, project_id: str) -> dict[str, Any]:
     return {"id": row["id"], "profile_version": int(row["profile_version"]), "feature_config": config}
 
 
+def _ordered(conn: Any, project_id: str, candidates: list[dict[str, Any]], explore: bool) -> tuple[list[dict[str, Any]], dict[str, float]]:
+    hidden = {
+        str(item)
+        for item in conn.execute(
+            text(
+                "SELECT source_id::text FROM feedback_events "
+                "WHERE project_id = :project_id AND kind = 'hide' AND deleted_at IS NULL"
+            ),
+            {"project_id": project_id},
+        ).scalars()
+    }
+    visible = [item for item in candidates if not item.get("deleted") and str(item["source_id"]) not in hidden]
+    ordered = sorted(visible, key=lambda item: (-float(item["goal_match"]), str(item["source_id"])))
+    reasons = [
+        {"source_id": str(item["source_id"]), "reason": "当前目标匹配", "goal_match": float(item["goal_match"])}
+        for item in ordered
+    ]
+    probabilities: dict[str, float] = {}
+    if explore and ordered:
+        count = len(ordered)
+        best = str(ordered[0]["source_id"])
+        for item in ordered:
+            source_id = str(item["source_id"])
+            probabilities[source_id] = (1 - EXPLORATION_RATE) + (EXPLORATION_RATE / count) if source_id == best else EXPLORATION_RATE / count
+    return reasons, probabilities
+
+
+def _profile_version(conn: Any, project_id: str) -> int:
+    value = conn.execute(
+        text("SELECT profile_version FROM profile_snapshots WHERE project_id = :project_id ORDER BY profile_version DESC LIMIT 1"),
+        {"project_id": project_id},
+    ).scalar()
+    return 0 if value is None else int(value)
+
+
 def rank_candidates(
     database: Database,
     *,
@@ -51,31 +86,9 @@ def rank_candidates(
     candidates: list[dict[str, Any]],
     explore: bool = False,
 ) -> dict[str, Any]:
-    """Rank visible candidates. Exploration stays off unless the caller turns it on."""
+    """Rank visible candidates and record the exposure. Exploration stays off unless the caller turns it on."""
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        hidden = {
-            str(item)
-            for item in conn.execute(
-                text(
-                    "SELECT source_id::text FROM feedback_events "
-                    "WHERE project_id = :project_id AND kind = 'hide' AND deleted_at IS NULL"
-                ),
-                {"project_id": project_id},
-            ).scalars()
-        }
-        visible = [item for item in candidates if not item.get("deleted") and str(item["source_id"]) not in hidden]
-        ordered = sorted(visible, key=lambda item: (-float(item["goal_match"]), str(item["source_id"])))
-        reasons = [
-            {"source_id": str(item["source_id"]), "reason": "当前目标匹配", "goal_match": float(item["goal_match"])}
-            for item in ordered
-        ]
-        probabilities: dict[str, float] = {}
-        if explore and ordered:
-            count = len(ordered)
-            best = str(ordered[0]["source_id"])
-            for item in ordered:
-                source_id = str(item["source_id"])
-                probabilities[source_id] = (1 - EXPLORATION_RATE) + (EXPLORATION_RATE / count) if source_id == best else EXPLORATION_RATE / count
+        reasons, probabilities = _ordered(conn, project_id, candidates, explore)
         profile = _profile(conn, project_id)
         impression_id = str(uuid.uuid4())
         conn.execute(
@@ -90,7 +103,7 @@ def rank_candidates(
                 "profile_id": profile["id"],
                 "policy": POLICY_VERSION,
                 "candidates": json.dumps(reasons, ensure_ascii=False),
-                "displayed": json.dumps([item["source_id"] for item in ordered]),
+                "displayed": json.dumps([item["source_id"] for item in reasons]),
                 "propensity": json.dumps({"explore": explore, "probabilities": probabilities, "collaborative_filtering": False}),
             },
         )
@@ -102,6 +115,29 @@ def rank_candidates(
         "probabilities": probabilities,
         "collaborative_filtering": False,
         "profile_version": int(profile["profile_version"]),
+    }
+
+
+def preview_candidates(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    candidates: list[dict[str, Any]],
+    explore: bool = False,
+) -> dict[str, Any]:
+    """Same ordering as rank_candidates, without a profile snapshot or an impression."""
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        reasons, probabilities = _ordered(conn, project_id, candidates, explore)
+        profile_version = _profile_version(conn, project_id)
+    return {
+        "impression_id": None,
+        "policy_version": POLICY_VERSION,
+        "explore": explore,
+        "items": reasons,
+        "probabilities": probabilities,
+        "collaborative_filtering": False,
+        "profile_version": profile_version,
     }
 
 

@@ -213,4 +213,10 @@ class OperationLedger:
 
     def _mark_task(self, owner_id: str, project_id: str, task_id: str, status: str) -> None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-            conn.execute(text("UPDATE tasks SET status = :status, version = version + 1 WHERE id = :id"), {"status": status, "id": task_id})
+            conn.execute(
+                text(
+                    "UPDATE tasks SET status = :status, version = version + 1 "
+                    "WHERE id = :id AND project_id = :project_id AND status NOT IN ('SUCCEEDED', 'FAILED', 'CANCELLED')"
+                ),
+                {"status": status, "id": task_id, "project_id": project_id},
+            )

@@ -28,7 +28,7 @@ from aether_api.errors import ApiError
 from aether_api.memory_routes import _enqueue
 from aether_api.settings import Settings
 from aether_domain.security import sha256_text
-from aether_worker.recommendations import rank_candidates
+from aether_worker.recommendations import preview_candidates
 from aether_worker.retrieval import RetrievalError
 from aether_worker.search_api import authorised_search
 
@@ -42,7 +42,7 @@ _ERRORS = {
     503: {"description": "依赖不可用"},
 }
 _SOURCE_KINDS = {"url", "rss", "local_document", "github_api", "arxiv_api"}
-_INGESTIBLE_KINDS = {"url", "rss", "local_document"}
+_INGESTIBLE_KINDS = {"url", "rss", "local_document", "github_api", "arxiv_api"}
 _FEEDBACK_KINDS = {"click", "save", "helpful", "dwell", "hide", "unsave"}
 _SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
 
@@ -192,7 +192,7 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
             ).mappings().all()
         titles = {row["id"]: row["locator"] for row in rows}
         candidates = [{"source_id": row["id"], "goal_match": 1.0, "deleted": False} for row in rows]
-        ranked = rank_candidates(_db(app), owner_id=owner, project_id=project_id, candidates=candidates, explore=False)
+        ranked = preview_candidates(_db(app), owner_id=owner, project_id=project_id, candidates=candidates, explore=False)
         items = [
             {
                 "source_id": item["source_id"],

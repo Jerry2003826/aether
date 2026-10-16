@@ -38,6 +38,16 @@ def read_cached_result(conn: Any, project_id: str, key: str, *, generation_id: s
     return None if found is None else dict(found)
 
 
+def advance_visibility_epoch(conn: Any, project_id: str) -> int:
+    """Drop this project's search cache and publish a new visibility epoch."""
+    _drop_project_cache(project_id)
+    epoch = conn.execute(
+        text("UPDATE projects SET visibility_epoch = visibility_epoch + 1 WHERE id = :id RETURNING visibility_epoch"),
+        {"id": project_id},
+    ).scalar_one()
+    return int(epoch)
+
+
 def _drop_project_cache(project_id: str) -> None:
     for cache_key in list(_SEARCH_CACHE):
         if cache_key[0] == project_id:
