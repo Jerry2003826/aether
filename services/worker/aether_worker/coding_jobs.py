@@ -247,7 +247,8 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                         owner_id=owner_id,
                         project_id=project_id,
                         task_id=task_id,
-                        status=restore_status,
+                        status=restore_status[0],
+                        version=restore_status[1],
                     )
             result = sandbox["result"]
             passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
@@ -1080,35 +1081,46 @@ def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     return incoming, outgoing
 
 
-def _ensure_model_runnable(database: Database, *, owner_id: str, project_id: str, task_id: str) -> str | None:
-    """Model admission accepts RUNNING and VERIFYING. A queued coding task is moved for the attempt."""
+# _admit only accepts RUNNING and VERIFYING. A coding attempt borrows RUNNING from these
+# statuses and puts the previous one back. Pause, cancel and PAUSED stay put.
+_ADMISSION_BORROW = {"QUEUED", "DRAFT", "WAITING_APPROVAL", "NEEDS_REVIEW", "FAILED", "SUCCEEDED"}
+
+
+def _ensure_model_runnable(database: Database, *, owner_id: str, project_id: str, task_id: str) -> tuple[str, int] | None:
+    """Move a task to RUNNING for model admission. The returned status and version are restored afterwards."""
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
-            text("SELECT status, resume_state FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
+            text("SELECT status, resume_state, version FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
             {"project_id": project_id, "id": task_id},
         ).mappings().first()
-        if row is None or str(row["resume_state"] or "") in {"pause_requested", "cancel_requested"} or str(row["status"]) == "CANCELLED":
+        if row is None or str(row["resume_state"] or "") in {"pause_requested", "cancel_requested"} or str(row["status"]) in {"CANCELLED", "PAUSED"}:
             raise CodingError("task_not_runnable")
         status = str(row["status"])
         if status in {"RUNNING", "VERIFYING"}:
             return None
-        if status != "QUEUED":
+        if status not in _ADMISSION_BORROW:
             raise CodingError("task_not_runnable")
-        conn.execute(
-            text("UPDATE tasks SET status = 'RUNNING' WHERE project_id = :project_id AND id = :id AND status = 'QUEUED'"),
-            {"project_id": project_id, "id": task_id},
-        )
-    return "QUEUED"
+        version = conn.execute(
+            text(
+                "UPDATE tasks SET status = 'RUNNING', version = version + 1 "
+                "WHERE project_id = :project_id AND id = :id AND status = :status RETURNING version"
+            ),
+            {"project_id": project_id, "id": task_id, "status": status},
+        ).scalar()
+        if version is None:
+            raise CodingError("task_not_runnable")
+    return status, int(version)
 
 
-def _restore_task_status(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str) -> None:
+def _restore_task_status(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str, version: int) -> None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text(
-                "UPDATE tasks SET status = :status WHERE project_id = :project_id AND id = :id AND status = 'RUNNING' "
+                "UPDATE tasks SET status = :status, version = version + 1 "
+                "WHERE project_id = :project_id AND id = :id AND status = 'RUNNING' AND version = :version "
                 "AND COALESCE(resume_state, '') NOT IN ('pause_requested', 'cancel_requested')"
             ),
-            {"status": status, "project_id": project_id, "id": task_id},
+            {"status": status, "version": version, "project_id": project_id, "id": task_id},
         )
 
 

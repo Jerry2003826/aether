@@ -18,7 +18,7 @@
 
 安装：`environments/openhands` 使用 `uv sync --locked --no-build`。`func-timeout==4.3.5` 没有 wheel，锁文件指向仓库内由官方 sdist 构建、uv 记下哈希的 wheel。runner 在 Docker 可用且标签镜像不存在时构建；命令也写在 README。证明：`test_ci_workflow`、`test_runner_builds_the_openhands_image_when_docker_is_enabled`、`test_runner_stays_up_when_the_openhands_image_build_fails`。沙箱作业目录不再使用固定的公开路径，改由 `tempfile.mkdtemp` 创建。
 
-2026-10-16 收紧编码对话准入之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.402s），单元 320 passed、1 warning（44.63s），Gitleaks 8.30.1 无泄漏（git 历史和工作区各扫一次）。`test_rewritten_tests_cannot_pass` 在本机跑过：Agent 把断言改成 `assert True` 后，判定仍失败，测试文件回到基线。`test_replayed_ticket_and_over_budget_are_rejected_before_the_provider` 和 `test_openhands_agent_edits_through_the_gateway_and_settles_tokens` 没有跑。本机没有 Docker、Postgres 和 Temporal，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。`git fetch origin main` 之后 `origin/main` 仍是 `13bc096`，没有再变基。这次提交的 CI 还没有记入。
+2026-10-16 收紧编码对话准入之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.402s），单元 320 passed、1 warning（44.63s），Gitleaks 8.30.1 无泄漏（git 历史和工作区各扫一次）。`test_rewritten_tests_cannot_pass` 在本机跑过：Agent 把断言改成 `assert True` 后，判定仍失败，测试文件回到基线。`test_replayed_ticket_and_over_budget_are_rejected_before_the_provider` 和 `test_openhands_agent_edits_through_the_gateway_and_settles_tokens` 没有跑。本机没有 Docker、Postgres 和 Temporal，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。`51bc731` 的 integration 失败：`test_public_coding_job_and_skill_eval_reach_terminal_states` 的重试停在 `FAILED`。任务在完整 worker 里会停在 `WAITING_APPROVAL` 等状态，原先只允许从 `QUEUED` 借用 `RUNNING`，第二次尝试在进沙箱前被拒绝。现在也从 `DRAFT`、`WAITING_APPROVAL`、`NEEDS_REVIEW`、`FAILED`、`SUCCEEDED` 借用，并在版本号未变时改回。暂停和取消仍拒绝。这次修正的 CI 还没有记入。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 
