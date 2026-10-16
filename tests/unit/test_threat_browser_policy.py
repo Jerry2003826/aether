@@ -35,7 +35,7 @@ from aether_worker.threat_browser import (
     intent_digest,
 )
 from aether_worker import runner_process
-from aether_worker.threat_launch import ThreatLaunchError, browser_command, docker_runner, setup_commands
+from aether_worker.threat_launch import ThreatLaunchError, browser_command, docker_runner, link_binding, setup_commands
 from aether_worker.threat_visit import visit_threat_page
 from aether_worker.threat_browser_entry import run_entry
 from aether_worker import threat_visit
@@ -324,6 +324,8 @@ def test_container_plan_is_digest_pinned_and_does_not_fall_back(monkeypatch: pyt
     browser_at = next(index for index, command in enumerate(recorded) if ENTRYPOINT in command)
     assert probes and recorded.index(probes[0]) < browser_at
     assert "9050" in probes[-1][-1]
+    assert "AETHER_TOR_SOCKS_ADDRESS" in probes[-1][-1]
+    assert "127.0.0.1" not in probes[-1][-1]
     monkeypatch.setenv(FIXTURE_ENV, "1")
     _deploy(monkeypatch, BROWSER)
     fixture_request = _request(runtime="container", browser_image=BUILT_BROWSER, tor_image=BUILT_TOR, fixture=True)
@@ -336,6 +338,38 @@ def test_container_plan_is_digest_pinned_and_does_not_fall_back(monkeypatch: pyt
     fixture_probe = next(command for command in recorded if command[:1] == ["exec"])
     assert "8080" in fixture_probe[-1]
     assert "9050" not in fixture_probe[-1]
+    assert "AETHER_TOR_SOCKS_ADDRESS" in fixture_probe[-1]
+
+
+def test_socks_binds_only_on_the_internal_address() -> None:
+    subnet, gateway, address = link_binding("aether-tb-abcdef01")
+    network = ipaddress.ip_network(subnet)
+    assert network.prefixlen == 28
+    assert network.subnet_of(ipaddress.ip_network("10.240.0.0/16"))
+    assert ipaddress.ip_address(address) in network
+    assert ipaddress.ip_address(gateway) in network
+    assert address != gateway
+    assert link_binding("aether-tb-abcdef01") == (subnet, gateway, address)
+    commands = setup_commands("aether-tb-abcdef01", tor_image=BUILT_TOR, tor_enabled=True)
+    created = commands[0]
+    assert created[:4] == ["network", "create", "--internal", "--subnet"]
+    assert subnet in created and gateway in created and created[-1].endswith("-link")
+    tor = next(command for command in commands if BUILT_TOR in command)
+    assert tor[tor.index("--ip") + 1] == address
+    assert f"AETHER_TOR_SOCKS_ADDRESS={address}" in tor
+    assert f"AETHER_TOR_SOCKS_POLICY={subnet}" in tor
+    assert "0.0.0.0" not in " ".join(" ".join(command) for command in commands)
+    root = Path(__file__).resolve().parents[2]
+    torrc = (root / "infra/tor/torrc").read_text(encoding="utf-8")
+    entry = (root / "infra/tor/entrypoint.sh").read_text(encoding="utf-8")
+    assert "SocksPort" not in torrc
+    assert "accept *" not in torrc
+    assert "0.0.0.0" not in torrc
+    assert "SocksPolicy reject *" in entry
+    assert "10.240.0.0/16" in entry
+    with pytest.raises(ThreatLaunchError) as rejected:
+        link_binding("../escape")
+    assert rejected.value.code == "container_name_rejected"
 
 
 def test_browser_waits_until_the_tor_proxy_accepts(monkeypatch: pytest.MonkeyPatch, no_browser: None) -> None:
@@ -514,7 +548,8 @@ def test_fixture_ca_is_loaded_as_pem_text(monkeypatch: pytest.MonkeyPatch) -> No
         )
         fixture = _load_fixture_server()
         fixture._HITS_PATH = root / "hits.json"
-        context, listener = fixture._listener(0, cert_path, key_path)
+        context, listener = fixture._listener("127.0.0.1", 0, cert_path, key_path)
+        assert listener.getsockname()[0] == "127.0.0.1"
         port = int(listener.getsockname()[1])
 
         def serve() -> None:

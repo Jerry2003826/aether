@@ -7,7 +7,8 @@
 - 采集与浏览器共用 `net_guard.assert_public_target`，有 IPv4 时用 IPv4
 - 子 frame 的 document 请求中止
 - 访问审计写入 `audit_events`
-- Tor 代理就绪后才启动浏览器；夹具模式等 8080
+- Tor 代理在内部链路地址上就绪后才启动浏览器；夹具模式等同一地址的 8080
+- SOCKS 只绑定该内部地址，出口网卡不提供代理
 - `playwright==1.64.0`
 
-结果：冻结检查通过。单元测试 324 passed。本机没有 Docker，容器测试在 `AETHER_REQUIRE_SERVICES=1` 下失败，不跳过。`74cbfd8` 的 CI run 38959600766：integration `392 passed, 4 warnings in 793.36s`，Sonar 质量门通过。`live_ready` 保持 pending。
+结果：冻结检查通过。SOCKS 收紧的定向单元测试 3 passed。本机没有 Docker。`74cbfd8` 和 `1e2abdd` 的 CI 已通过，但不包含这次收紧。`live_ready` 保持 pending。

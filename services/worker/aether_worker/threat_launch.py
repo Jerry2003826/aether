@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -21,6 +23,7 @@ _CLEARED = ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy", "NO_PROXY"
 _FIXTURE_PORT = 8080
 _READY_ATTEMPTS = 30
 _READY_PAUSE = 0.25
+_LINK_SUPERNET = ipaddress.ip_network("10.240.0.0/16")
 
 
 class ThreatLaunchError(Exception):
@@ -40,16 +43,35 @@ def container_name() -> str:
     return f"aether-tb-{uuid.uuid4().hex[:8]}"
 
 
+def link_binding(name: str) -> tuple[str, str, str]:
+    """Return the internal subnet, gateway, and address SOCKS may bind.
+
+    The visit name selects one /28 inside 10.240.0.0/16. The Tor container
+    receives that address on the internal network only.
+    """
+    if re.fullmatch(r"[a-z0-9][a-z0-9-]{0,48}", name) is None:
+        raise ThreatLaunchError("container_name_rejected")
+    block = int.from_bytes(hashlib.sha256(name.encode("ascii")).digest()[:2], "big") % 4096
+    third = block // 16
+    fourth = (block % 16) * 16
+    network = ipaddress.ip_network(f"10.240.{third}.{fourth}/28")
+    if not network.subnet_of(_LINK_SUPERNET):
+        raise ThreatLaunchError("container_name_rejected")
+    hosts = list(network.hosts())
+    return str(network), str(hosts[0]), str(hosts[1])
+
+
 def setup_commands(name: str, *, tor_image: str, fixture: bool = False, tor_enabled: bool = False) -> list[list[str]]:
     egress = f"{name}-egress"
     if not tor_enabled and not fixture:
         return [["network", "create", egress]]
     link = f"{name}-link"
     tor_name = f"{name}-tor"
+    subnet, gateway, address = link_binding(name)
     return [
-        ["network", "create", "--internal", link],
+        ["network", "create", "--internal", "--subnet", subnet, "--gateway", gateway, link],
         ["network", "create", egress],
-        _tor_command(tor_name, link, require_digest(tor_image), fixture=fixture),
+        _tor_command(tor_name, link, require_digest(tor_image), fixture=fixture, address=address, subnet=subnet),
         ["network", "connect", egress, tor_name],
     ]
 
@@ -207,7 +229,7 @@ def _reject_worker_docker() -> None:
         raise ThreatLaunchError("docker_forbidden")
 
 
-def _tor_command(tor_name: str, link: str, image: str, *, fixture: bool) -> list[str]:
+def _tor_command(tor_name: str, link: str, image: str, *, fixture: bool, address: str, subnet: str) -> list[str]:
     command = [
         "run",
         "-d",
@@ -216,6 +238,8 @@ def _tor_command(tor_name: str, link: str, image: str, *, fixture: bool) -> list
         tor_name,
         "--network",
         link,
+        "--ip",
+        address,
         "--network-alias",
         TOR_ALIAS,
         "--cap-drop",
@@ -230,6 +254,10 @@ def _tor_command(tor_name: str, link: str, image: str, *, fixture: bool) -> list
         _MEMORY_TOR,
         "--label",
         "aether.role=tor",
+        "-e",
+        f"AETHER_TOR_SOCKS_ADDRESS={address}",
+        "-e",
+        f"AETHER_TOR_SOCKS_POLICY={subnet}",
     ]
     if fixture:
         command.extend(["-e", "AETHER_TOR_DISABLE_NETWORK=1", "-e", "AETHER_TOR_FIXTURE=1"])
@@ -240,8 +268,9 @@ def _tor_command(tor_name: str, link: str, image: str, *, fixture: bool) -> list
 def _wait_for_proxy(name: str, runner: Runner, *, fixture: bool) -> None:
     """Probe the Tor container before the browser starts.
 
-    DisableNetwork refuses SOCKS, so the fixture probe is the local page port.
-    A real Tor visit waits until 127.0.0.1:9050 completes a SOCKS greeting.
+    DisableNetwork refuses SOCKS, so the fixture probe is the page port on the
+    internal address. A real Tor visit waits until that same address completes
+    a SOCKS greeting. Loopback is not used, because SOCKS is not bound there.
     """
     script = _ready_script(fixture)
     for _attempt in range(_READY_ATTEMPTS):
@@ -255,14 +284,17 @@ def _wait_for_proxy(name: str, runner: Runner, *, fixture: bool) -> None:
 
 
 def _ready_script(fixture: bool) -> str:
+    host = "host=os.environ['AETHER_TOR_SOCKS_ADDRESS']\n"
     if fixture:
         return (
-            "import socket\n"
-            f"socket.create_connection(('127.0.0.1',{_FIXTURE_PORT}),2).close()\n"
+            "import os,socket\n"
+            + host
+            + f"socket.create_connection((host,{_FIXTURE_PORT}),2).close()\n"
         )
     return (
-        "import socket,sys\n"
-        f"sock=socket.create_connection(('127.0.0.1',{TOR_SOCKS_PORT}),2)\n"
+        "import os,socket,sys\n"
+        + host
+        + f"sock=socket.create_connection((host,{TOR_SOCKS_PORT}),2)\n"
         "sock.sendall(b'\\x05\\x01\\x00')\n"
         "reply=sock.recv(2)\n"
         "sock.close()\n"

@@ -5,13 +5,14 @@ from __future__ import annotations
 import base64
 import json
 import shutil
+import struct
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
 
-from aether_worker.threat_launch import browser_command, cleanup_commands, container_name, setup_commands
+from aether_worker.threat_launch import browser_command, cleanup_commands, container_name, link_binding, setup_commands
 from aether_worker.threat_pins import CHROMIUM_BROWSER_VERSION, PLAYWRIGHT_VERSION, PROBE
 from aether_worker.threat_probe import blocked
 
@@ -41,7 +42,7 @@ def test_one_shot_containers_only_reach_tor_and_are_removed() -> None:
         for key in ("public", "private", "lan", "metadata", "egress"):
             assert blocked(str(report[key]))
         assert _text(["exec", f"{name}-tor", "id", "-u"]) != "0"
-        assert "DisableNetwork 1" in _text(["exec", f"{name}-tor", "cat", "/var/lib/tor/aether-torrc"])
+        _assert_socks_is_internal(name)
         page = _visit(name, browser, "/page", certificate)
         assert page["playwright_version"] == PLAYWRIGHT_VERSION
         assert page["browser_version"] == CHROMIUM_BROWSER_VERSION
@@ -129,6 +130,52 @@ def _probe(name: str, browser: str, egress: str) -> dict[str, object]:
     if completed.returncode != 0:
         return {"error": completed.stderr.decode(errors="replace")[-1000:]}
     return json.loads(completed.stdout.decode())
+
+
+def _assert_socks_is_internal(name: str) -> None:
+    _subnet, _gateway, address = link_binding(name)
+    torrc = _text(["exec", f"{name}-tor", "cat", "/var/lib/tor/aether-torrc"])
+    assert "DisableNetwork 1" in torrc
+    assert f"SocksPort {address}:9050" in torrc
+    assert "SocksPolicy reject *" in torrc
+    assert "SocksPolicy accept *" not in torrc
+    assert "0.0.0.0" not in torrc
+    link_ip = _text(["inspect", "-f", _network_ip(f"{name}-link"), f"{name}-tor"])
+    egress_ip = _text(["inspect", "-f", _network_ip(f"{name}-egress"), f"{name}-tor"])
+    assert link_ip == address
+    assert egress_ip != address
+    listeners = _text(["exec", f"{name}-tor", "cat", "/proc/net/tcp"]).lower()
+    assert "00000000:1f90" not in listeners
+    assert "00000000:235a" not in listeners
+    assert _listen_token(address, 8080) in listeners
+    decoy = f"{name}-decoy"
+    _closed_from(decoy, egress_ip, 8080)
+    _closed_from(decoy, egress_ip, 9050)
+
+
+def _network_ip(network: str) -> str:
+    return '{{(index .NetworkSettings.Networks "' + network + '").IPAddress}}'
+
+
+def _listen_token(address: str, port: int) -> str:
+    parts = [int(part) for part in address.split(".")]
+    host = struct.pack("<BBBB", parts[3], parts[2], parts[1], parts[0]).hex()
+    return f"{host}:{port:04x}"
+
+
+def _closed_from(container: str, host: str, port: int) -> None:
+    script = (
+        "import socket,sys\n"
+        "sock=socket.socket()\n"
+        "sock.settimeout(2)\n"
+        f"try:\n sock.connect(({host!r},{port}))\n"
+        "except OSError:\n sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
+    completed = _docker(["exec", container, "python3", "-c", script])
+    if completed.returncode != 0:
+        detail = (completed.stdout + completed.stderr).decode(errors="replace")[-1000:]
+        pytest.fail(f"{container} reached {host}:{port}: {detail}")
 
 
 def _certificate(name: str) -> str:

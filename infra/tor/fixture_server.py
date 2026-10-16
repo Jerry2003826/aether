@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import socket
 import ssl
 import threading
@@ -21,20 +22,23 @@ _PAGE = (
 
 
 def main() -> None:
+    host = os.environ.get("AETHER_TOR_SOCKS_ADDRESS", "")
+    if host == "":
+        raise SystemExit(1)
     _ROOT.mkdir(mode=0o700, exist_ok=True)
-    context, listener = _listener(8080, _ROOT / "cert.pem", _ROOT / "key.pem")
+    context, listener = _listener(host, 8080, _ROOT / "cert.pem", _ROOT / "key.pem")
     while True:
         connection, _address = listener.accept()
         threading.Thread(target=_respond, args=(context, connection), daemon=True).start()
 
 
-def _listener(port: int, certificate: Path, key: Path) -> tuple[ssl.SSLContext, socket.socket]:
+def _listener(host: str, port: int, certificate: Path, key: Path) -> tuple[ssl.SSLContext, socket.socket]:
     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     context.minimum_version = ssl.TLSVersion.TLSv1_2
     context.load_cert_chain(certificate, key)
     listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    listener.bind(("", port))
+    listener.bind((host, port))
     listener.listen()
     return context, listener
 

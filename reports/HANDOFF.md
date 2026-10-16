@@ -10,13 +10,15 @@ PR #30 已把采集解析记为 ADR-F41。未合并的 PR #31 已使用 ADR-F42�
 
 - 访问记录写入 `audit_events`，按项目 sequence 接哈希链。调用方清空内存列表后行还在。证明：`test_visit_audit_remains_after_the_caller_drops_the_list`。本机没有 PostgreSQL，这条没有在这里执行。
 - 子 frame 的 document 请求直接中止，不抓取。证明：`test_child_frame_documents_are_not_fetched`、`test_child_frame_document_is_not_fetched`。
-- Tor 打开后，浏览器容器启动前探测容器内 9050 的 SOCKS 握手；夹具模式探测 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
+- Tor 打开后，浏览器容器启动前在内部链路地址上探测 9050 的 SOCKS 握手；夹具模式探测同一地址的 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
 
-本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 在 0.03 秒失败，失败信息是 Docker is required，不是 skip。
+Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所有接口，策略接受任意来源，容器同时又接入出口网。现在 SOCKS 只绑定这次访问的内部 /28 地址，策略拒绝其他来源；夹具页也只听这个地址。证明：`test_socks_binds_only_on_the_internal_address`。容器测试还会核对生成的 torrc、`/proc/net/tcp` 里没有通配地址上的 8080/9050，并且出口网上的诱饵连不上 Tor 容器的出口地址。
 
-`74cbfd8` 的 CI 已通过。workflow https://github.com/Jerry2003826/aether/actions/runs/38959600766 ：`pack-and-unit` 成功，integration 日志是 `392 passed, 4 warnings in 793.36s (0:13:13)`。比变基前的 390 多 2，对应新增的子 frame 和审计测试；pytest 没有 skipped。容器测试的断言不会在 `-q` 成功日志里逐条打印，失败时才会把容器输出打出来。这次没有失败。Sonar 质量门 OK，`new_security_rating` 的 actualValue 是 1。Security Reviewer 检查成功，没有新的 HIGH 或 MEDIUM 评论。Approval Agent 仍不构成批准，没有合并。`live_ready` 仍是 pending。
+本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 失败，失败信息是 Docker is required，不是 skip。
 
-本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。`pytest tests/unit` 324 passed。全套 integration 没有在本机跑。
+`74cbfd8` 的 CI 已通过。workflow https://github.com/Jerry2003826/aether/actions/runs/38959600766 ：`pack-and-unit` 成功，integration 日志是 `392 passed, 4 warnings in 793.36s (0:13:13)`。文档提交 `1e2abdd` 的 workflow https://github.com/Jerry2003826/aether/actions/runs/38961979707 也通过，integration 是 `392 passed, 4 warnings in 822.05s (0:13:42)`。这两次都不包含这次 SOCKS 收紧，不能当作它的证据。这次提交的 CI 还没有记录。Approval Agent 仍不构成批准，没有合并。`live_ready` 仍是 pending。
+
+本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 

@@ -14,7 +14,7 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41 from 13bc096. The threat browser is ADR-F43 because ADR-F42 is already used by open PR #31. Commit 74cbfd8 CI run 38959600766 passed pack-and-unit and integration (392 passed, 4 warnings in 793.36s). Sonar quality gate is OK and new_security_rating is 1. Do not merge. Approval Agent did not approve.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41 from 13bc096. The threat browser is ADR-F43 because ADR-F42 is already used by open PR #31. SOCKS now binds only the internal /28 address and rejects every other source. CI for 74cbfd8 and the docs commit 1e2abdd passed, but neither includes this SOCKS change. Do not merge. Approval Agent did not approve.",
   "last_executed_commands": [
     "git reset --soft origin/main",
     "uv lock",
@@ -24,7 +24,7 @@
     "uv run --locked --no-build python scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py"
   ],
-  "last_test_result": "Local on 2026-10-16 after rebasing onto 13bc096: verify_freeze passed with api_operations 50 and parsed_structured_files 57. pytest tests/unit: 324 passed in 20.76s. AETHER_REQUIRE_SERVICES=1 and no Docker: test_one_shot_containers_only_reach_tor_and_are_removed failed in 0.03s with pytest.fail, not skip. Full integration was not run locally. CI run 38959600766 on 74cbfd8: pack-and-unit success, integration 392 passed, 4 warnings in 793.36s. No skipped tests in that summary. Sonar quality gate OK, new_security_rating 1. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after binding SOCKS to the internal address: verify_freeze passed with api_operations 50 and parsed_structured_files 57. Targeted unit tests for the bind, the container plan, and the proxy wait: 3 passed. Full integration was not run locally. Earlier CI on 74cbfd8 (38959600766, 392 passed in 793.36s) and 1e2abdd (38961979707, 392 passed in 822.05s) does not cover this change. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
