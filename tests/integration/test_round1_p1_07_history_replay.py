@@ -1,21 +1,27 @@
 """System audit round 1, P1-07: the current task workflow replays histories from every released version.
 
 INV-STAB-03: a workflow change must replay old histories (docs/04 §4). Task workflows never close, so
-workflows started by an older release are still running after an upgrade. Each released version below
-records a history with start / pause / resume / cancel, and the current workflow must replay all of them.
+workflows started by an older release are still running after an upgrade. Each released version has a
+history with start / pause / resume / cancel, and the current workflow must replay all of them.
+
+The first release is recorded live from ``tests/fixtures/durable_workflow_4ba3b2f.py``. Later releases are
+histories in ``tests/fixtures/workflow_histories/``, recorded once by running that release's
+``git show <rev>:services/worker/aether_worker/durable_workflow.py`` against the real activities with the same
+signals: start, wait for execute_task, then pause, resume, cancel and close.
 """
 
 from __future__ import annotations
 
 import asyncio
 import importlib.util
+import json
 import os
 import sys
 import uuid
 from pathlib import Path
 
 import pytest
-from temporalio.client import Client, WorkflowHandle
+from temporalio.client import Client, WorkflowHandle, WorkflowHistory
 from temporalio.worker import Replayer, Worker
 
 from aether_storage.artifacts import ArtifactStore
@@ -26,10 +32,15 @@ from aether_worker.outbox import enqueue_task, insert_followup_command
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures"
+HISTORIES = FIXTURES / "workflow_histories"
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾\n"
-# The workflow module shipped by each merge to main: 4ba3b2f (PR #6), e1cc9e5 (PR #7) = 75ec05b,
-# 967b55f (PR #11) = 0359da5, d6ed382 (PR #12) = 48281f3.
-RELEASED = ("4ba3b2f", "75ec05b", "0359da5", "48281f3")
+# The workflow module shipped by each later merge to main, with the patch marker its history must carry:
+# e1cc9e5 (PR #7) = 75ec05b, 967b55f (PR #11) = 0359da5, d6ed382 (PR #12) = 48281f3.
+LATER_RELEASES = {
+    "75ec05b": {"intake-pause-interruptible"},
+    "0359da5": {"execute-interruptible"},
+    "48281f3": {"execute-interruptible"},
+}
 
 
 def _address() -> str:
@@ -138,24 +149,18 @@ def test_current_workflow_replays_an_old_history_that_saw_a_pause(client, role_u
     assert error is None, f"旧历史（start + pause）用当前工作流回放失败：{error}"
 
 
-@pytest.mark.parametrize("revision", RELEASED)
-def test_current_workflow_replays_start_pause_resume_cancel_from_each_release(client, role_urls, tmp_path, revision: str) -> None:
-    """The first two releases carry no marker that tells them apart, so 75ec05b records with an intake pause.
-
-    ADR-SR1-P1-07 lists the marker-free histories that stay ambiguous.
-    """
+def test_current_workflow_replays_start_pause_resume_cancel_from_the_first_release(client, role_urls, tmp_path) -> None:
     address = _address()
     project = _Project(client, role_urls)
     created = project.task()
     controls = [project.control(created, kind) for kind in ("pause", "resume", "cancel")]
-    old_workflow = _released_workflow(tmp_path, revision)
-    queue = f"round1-replay-{revision}-{uuid.uuid4()}"
-    intake_pause = 0.2 if revision == "75ec05b" else 0
+    old_workflow = _released_workflow(tmp_path, "4ba3b2f")
+    queue = f"round1-replay-{uuid.uuid4()}"
 
     async def record():
         temporal = await Client.connect(address)
-        async with Worker(temporal, task_queue=queue, workflows=[old_workflow], activities=[prepare_task, execute_task, apply_task_control]):
-            handle = await temporal.start_workflow(old_workflow.run, {"task_id": created["task_id"], "intake_pause_seconds": intake_pause}, id=created["workflow_id"], task_queue=queue)
+        async with Worker(temporal, task_queue=queue, workflows=[old_workflow], activities=[prepare_task, execute_task]):
+            handle = await temporal.start_workflow(old_workflow.run, {"task_id": created["task_id"], "intake_pause_seconds": 0}, id=created["workflow_id"], task_queue=queue)
             await handle.signal(old_workflow.command, {"command_id": created["command_key"], "project_id": project.project_id, "kind": "start"})
             await _until_executed(handle)
             for control in controls:
@@ -165,8 +170,34 @@ def test_current_workflow_replays_start_pause_resume_cancel_from_each_release(cl
             return await handle.fetch_history()
 
     history = asyncio.run(record())
-    if revision != "4ba3b2f":
-        assert _scheduled(history, "apply_task_control") == 3
+    assert _scheduled(history, "prepare_task") == 4
+    error = None
+    try:
+        asyncio.run(Replayer(workflows=[DurableTaskWorkflow]).replay_workflow(history))
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {str(exc)[:240]}"
+    assert error is None, f"4ba3b2f 的历史（start / pause / resume / cancel）用当前工作流回放失败：{error}"
+
+
+def _patches(history: WorkflowHistory) -> set[str]:
+    found = set()
+    for event in history.events:
+        if event.HasField("marker_recorded_event_attributes"):
+            for payload in event.marker_recorded_event_attributes.details["patch-data"].payloads:
+                found.add(json.loads(payload.data)["id"])
+    return found
+
+
+@pytest.mark.parametrize("revision", sorted(LATER_RELEASES))
+def test_current_workflow_replays_recorded_histories_from_later_releases(revision: str) -> None:
+    """75ec05b leaves no marker unless the intake pause is positive, so its history was recorded with 0.2 s.
+
+    ADR-SR1-P1-07 lists the marker-free histories that stay ambiguous.
+    """
+    recorded = json.loads((HISTORIES / f"durable_workflow_{revision}.json").read_text(encoding="utf-8"))
+    history = WorkflowHistory.from_json(f"recorded-{revision}", recorded)
+    assert _scheduled(history, "apply_task_control") == 3
+    assert _patches(history) == LATER_RELEASES[revision]
     error = None
     try:
         asyncio.run(Replayer(workflows=[DurableTaskWorkflow]).replay_workflow(history))
