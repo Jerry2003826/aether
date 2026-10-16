@@ -64,6 +64,8 @@ OPENHANDS_JOB = ROOT / "environments" / "openhands" / "f26_job.py"
 MAX_CALLS = 8
 MAX_TOTAL_TOKENS = 20000
 MAX_OUTPUT_TOKENS = 512
+# A cited comparison needs both full sha256s. 512 cut a live report off. ADR-F28.
+RESEARCH_OUTPUT_TOKENS = 2048
 RESULT_NAME = "f26_acceptance_result.json"
 QUERY = "比较中英实验笔记：标准大气压下水的沸点、容器。Compare water boiling point and beaker."
 GOLD = ("src-zh", "src-en")
@@ -83,6 +85,7 @@ def _caps() -> dict[str, int]:
         "max_calls": MAX_CALLS,
         "max_total_tokens": MAX_TOTAL_TOKENS,
         "max_output_tokens": MAX_OUTPUT_TOKENS,
+        "research_output_tokens": RESEARCH_OUTPUT_TOKENS,
         "spend_cap_usd": 1,
     }
 
@@ -293,32 +296,109 @@ def _research_prompt(sources: list[dict[str, Any]], ranked: list[str]) -> str:
         )
     return (
         "只根据下列检索结果，用中文比较 src-zh 和 src-en：两点相同之处和不同之处。"
-        "两条都要写出 source_id、version、完整 sha256 和 offset。与沸点无关的条目不要写成证据。"
+        "两条都要写出 source_id、完整 sha256 和 offset。"
+        "每条来源的版本单独写成 version=N，N 必须是该来源自己的版本号。"
+        "与沸点无关的条目不要写成证据。"
         "笔记没写的不要补。\n" + "\n".join(lines)
     )
 
 
-_VERSION_FIELD = re.compile(r"(?<![A-Za-z])version\s*[=:：]?\s*(\d+)", re.IGNORECASE)
+_VERSION_FIELD = re.compile(
+    r"(?:(?<![A-Za-z])version\s*[=:：]?\s*(\d+)"
+    r"|(?<![A-Za-z])version\s+is\s+(\d+)"
+    r"|(?<![A-Za-z])version\s*为\s*(\d+)"
+    r"|版本号\s*(?:[=:：]|是|为)?\s*(\d+)"
+    r"|版本\s*(?:[=:：]|是|为)?\s*(\d+))",
+    re.IGNORECASE,
+)
 _OFFSET_FIELD = re.compile(r"(?<![A-Za-z])offset\s*[=:：]?\s*(\d+)\s*[-–—]\s*(\d+)", re.IGNORECASE)
+_SOURCE_ID = re.compile(r"(?<![A-Za-z0-9])src-(?:zh|en|piano)(?![A-Za-z0-9])")
+_CLAUSES = re.compile(r"[^\n。；;]+")
+
+
+def _version_number(match: re.Match[str]) -> int:
+    for group in match.groups():
+        if group is not None:
+            return int(group)
+    raise RuntimeError("version_field_without_number")
+
+
+def _bound_versions(report: str) -> dict[str, set[int]]:
+    """Version numbers attached to each source id in the same clause.
+
+    One number in a clause applies to every source named there. Several numbers
+    bind to the nearest source. A version mentioned on its own does not count.
+    """
+    bound: dict[str, set[int]] = {}
+    for clause in _CLAUSES.findall(report):
+        ids = [(item.group(0), item.start()) for item in _SOURCE_ID.finditer(clause)]
+        versions = [(_version_number(item), item.start()) for item in _VERSION_FIELD.finditer(clause)]
+        if not ids or not versions:
+            continue
+        distinct = {number for number, _position in versions}
+        if len(distinct) == 1:
+            only = distinct.pop()
+            for source_id, _position in ids:
+                bound.setdefault(source_id, set()).add(only)
+            continue
+        for number, position in versions:
+            source_id = min(ids, key=lambda item: abs(item[1] - position))[0]
+            bound.setdefault(source_id, set()).add(number)
+    return bound
 
 
 def _report_cites(report: str, sources: list[dict[str, Any]]) -> bool:
     """Both lab notes must show their id, version, full sha256, and offset.
 
-    `version=1` and `offset=0-92` are the same fields as `version 1` and
-    `offset 0-92`. A different number still fails.
+    `version=1`, `version 1`, `version is 1`, `version 为 1`, `版本 1` and
+    `版本号：1` are the same field. The number has to sit with that source.
+    A different number, or a version that is not tied to the source, still fails.
     """
     boiling = [item for item in sources if item["source_id"] in GOLD]
     if len(boiling) != 2 or "100" not in report:
         return False
-    versions = {int(match.group(1)) for match in _VERSION_FIELD.finditer(report)}
+    bound = _bound_versions(report)
     offsets = {(int(match.group(1)), int(match.group(2))) for match in _OFFSET_FIELD.finditer(report)}
     for item in boiling:
         if item["content_sha256"] not in report or item["source_id"] not in report:
             return False
-        if item["version"] not in versions or (item["start_offset"], item["end_offset"]) not in offsets:
+        if bound.get(item["source_id"]) != {item["version"]}:
+            return False
+        if (item["start_offset"], item["end_offset"]) not in offsets:
             return False
     return True
+
+
+def _research_verdict(citations: bool, finish_reason: str | None) -> tuple[str, str | None]:
+    """A length finish is an incomplete report even when the citations already match."""
+    if finish_reason == "length":
+        return "fail", "output_truncated"
+    if citations:
+        return "pass", None
+    return "fail", "citation_mismatch"
+
+
+def _research_finish(rows: list[dict[str, Any]]) -> str | None:
+    reasons = [row.get("finish_reason") for row in rows]
+    if "length" in reasons:
+        return "length"
+    for reason in reversed(reasons):
+        if isinstance(reason, str) and reason:
+            return reason
+    return None
+
+
+def _payload_finish_reason(payload: dict[str, Any] | None) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+    choices = payload.get("choices")
+    if not isinstance(choices, list) or not choices or not isinstance(choices[0], dict):
+        return None
+    reason = choices[0].get("finish_reason")
+    if not isinstance(reason, str):
+        return None
+    text = reason.strip().lower()
+    return text or None
 
 
 def _grade_protocol(payload: dict[str, Any]) -> dict[str, Any]:
@@ -350,7 +430,12 @@ def _forward_body(raw: bytes, alias: str) -> tuple[bytes, list[str]]:
         raise RuntimeError("messages_rejected")
     dropped = sorted(set(payload) - _FORWARD_KEYS - {"max_completion_tokens"})
     requested = payload.get("max_tokens", payload.get("max_completion_tokens", MAX_OUTPUT_TOKENS))
-    max_tokens = requested if isinstance(requested, int) and 1 <= requested <= MAX_OUTPUT_TOKENS else MAX_OUTPUT_TOKENS
+    if isinstance(requested, int) and not isinstance(requested, bool) and 1 <= requested <= RESEARCH_OUTPUT_TOKENS:
+        max_tokens = requested
+    elif isinstance(requested, int) and not isinstance(requested, bool) and requested > RESEARCH_OUTPUT_TOKENS:
+        max_tokens = RESEARCH_OUTPUT_TOKENS
+    else:
+        max_tokens = MAX_OUTPUT_TOKENS
     forwarded: dict[str, Any] = {"model": alias, "messages": messages, "max_tokens": max_tokens}
     for key in ("temperature", "tools", "tool_choice"):
         if key in payload:
@@ -480,6 +565,7 @@ def _call_row(
         "cost_status": usage["cost_status"],
         "dropped_fields": dropped,
         "reason": reason,
+        "finish_reason": _payload_finish_reason(payload),
         "source": "gateway",
     }
 
@@ -501,7 +587,7 @@ def _blocked(missing: list[str]) -> dict[str, Any]:
     }
 
 
-def _job_env(gateway: str, token: str, secret: str) -> dict[str, str]:
+def _job_env(gateway: str, token: str, secret: str, *, output_tokens: int = MAX_OUTPUT_TOKENS) -> dict[str, str]:
     env = os.environ.copy()
     env.pop(LIVE_KEY, None)
     if secret:
@@ -511,7 +597,7 @@ def _job_env(gateway: str, token: str, secret: str) -> dict[str, str]:
     env["AETHER_JOB_TOKEN"] = token
     env["AETHER_GATEWAY_URL"] = gateway
     env["AETHER_GATEWAY_TOKEN"] = token
-    env["AETHER_MAX_OUTPUT_TOKENS"] = str(MAX_OUTPUT_TOKENS)
+    env["AETHER_MAX_OUTPUT_TOKENS"] = str(output_tokens)
     env["OPENHANDS_SUPPRESS_BANNER"] = "1"
     env.pop("AETHER_ATTEMPT_DIR", None)
     return env
@@ -818,23 +904,26 @@ def run_f26_acceptance(
         if hybrid["status"] == "pass":
             try:
                 prompt = _research_prompt(sources, list(hybrid["rrf"]))
-                env = _job_env(gateway_url, token, secret)
+                env = _job_env(gateway_url, token, secret, output_tokens=RESEARCH_OUTPUT_TOKENS)
+                fresh: list[dict[str, Any]]
                 if launch is not None:
                     report_text = launch(prompt, env)
-                    calls.append(_injected_call("research", prompt))
+                    fresh = [_injected_call("research", prompt)]
+                    calls.extend(fresh)
                 else:
                     if gateway is None:
                         raise RuntimeError("gateway_missing")
                     before = len(gateway.calls)
                     report_text, meta = _default_launch(prompt, env, secret)
                     observed.update(meta)
-                    calls.extend(_mark_new(gateway, before, "research", prompt))
+                    fresh = _mark_new(gateway, before, "research", prompt)
+                    calls.extend(fresh)
                 stored = report_text[:4000]
+                citations = _report_cites(stored, sources)
                 research["report"] = stored
                 research["report_sha256"] = hashlib.sha256(report_text.encode()).hexdigest()
-                research["citations_cover_sources"] = _report_cites(stored, sources)
-                research["status"] = "pass" if research["citations_cover_sources"] else "fail"
-                research["reason"] = None if research["status"] == "pass" else "citation_mismatch"
+                research["citations_cover_sources"] = citations
+                research["status"], research["reason"] = _research_verdict(citations, _research_finish(fresh))
             except Exception as exc:
                 research["status"] = NOT_RUN if str(exc) == "openhands_venv_missing" else "fail"
                 research["reason"] = "openhands_venv_missing" if str(exc) == "openhands_venv_missing" else redact_secret(f"{type(exc).__name__}:{exc}", secret)

@@ -49,6 +49,30 @@ def _redact(value: str, secret: str) -> str:
     return value.replace(secret, "[REDACTED]")
 
 
+def _completion_text(response: Any) -> tuple[str | None, str | None]:
+    """Visible answer text and finish_reason.
+
+    `finish_reason=length` means the provider cut the answer at max_tokens.
+    That text is not a complete answer, so the visible text is omitted.
+    """
+    choice = response.choices[0]
+    reason = getattr(choice, "finish_reason", None)
+    finish = str(reason).strip().lower() if reason is not None and str(reason).strip() else None
+    content = getattr(choice.message, "content", None) or ""
+    if not isinstance(content, str):
+        content = str(content)
+    if finish == "length":
+        return None, "length"
+    return content, finish
+
+
+def _choice_content(response: Any) -> str:
+    content = getattr(response.choices[0].message, "content", None) or ""
+    if not isinstance(content, str):
+        return str(content)
+    return content
+
+
 class GatewayDenied(Exception):
     """sent is true once the request may have reached the provider."""
 
@@ -134,6 +158,7 @@ class ModelGateway:
                     "requested_alias": alias,
                     "upstream_model": None,
                     "output": None,
+                    "finish_reason": None,
                     "usage_status": "unknown",
                     "input_tokens": None,
                     "output_tokens": None,
@@ -141,7 +166,9 @@ class ModelGateway:
                     "cost_status": "unknown",
                 }
             raise GatewayDenied("upstream_error", sent=True) from exc
-        output = _redact(response.choices[0].message.content or "", self.provider_key)
+        visible, finish_reason = _completion_text(response)
+        partial = _redact(_choice_content(response), self.provider_key)
+        output = None if finish_reason == "length" else _redact(visible or "", self.provider_key)
         upstream_model = _redact(str(getattr(response, "model", "") or ""), self.provider_key)
         cost = _cost_micro_usd(response)
         usage = getattr(response, "usage", None)
@@ -152,6 +179,7 @@ class ModelGateway:
                 "requested_alias": alias,
                 "upstream_model": upstream_model or None,
                 "output": output,
+                "finish_reason": finish_reason,
                 "usage_status": "unknown",
                 "input_tokens": None,
                 "output_tokens": None,
@@ -165,6 +193,7 @@ class ModelGateway:
                 "requested_alias": alias,
                 "upstream_model": upstream_model or None,
                 "output": output,
+                "finish_reason": finish_reason,
                 "usage_status": "known",
                 "input_tokens": usage.prompt_tokens,
                 "output_tokens": usage.completion_tokens,
@@ -175,7 +204,7 @@ class ModelGateway:
             }
         self.audit.append(f"model project={project_id} alias={alias} outcome={result['usage_status']}")
         encoded = json.dumps(result)
-        if self.provider_key in encoded or any(self.provider_key in line for line in self.audit):
+        if self.provider_key in encoded or self.provider_key in partial or any(self.provider_key in line for line in self.audit):
             raise GatewayDenied("secret_leak", sent=True)
         return result
 

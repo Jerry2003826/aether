@@ -34,13 +34,13 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 
 `--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。
 
-硬上限是 8 次 chat completion、累计 20000 token、单次输出最多 512 token。20000 token 即使按每百万 token 10 美元计也是 0.20 美元，低于 1 美元。供应商没有返回费用时 `cost_status` 是 `unknown`，不估一个账单。到顶就停，不能记成通过。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志，也不进 OpenHands 进程。job 只拿本机网关的 token。
+硬上限是 8 次 chat completion、累计 20000 token。编码和协议调用单次输出最多 512 token。研究报告单次输出最多 2048 token（ADR-F28）：512 会在写完两条 sha256 引用之前被截断。20000 token 即使按每百万 token 10 美元计也是 0.20 美元，低于 1 美元。8 次研究上限也是 16384 token，仍低于累计上限。供应商没有返回费用时 `cost_status` 是 `unknown`，不估一个账单。到顶就停，不能记成通过。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志，也不进 OpenHands 进程。job 只拿本机网关的 token。
 
 这一次做四件事：
 
 - 协议：一次 `tools` / `schema` / `usage` 探针，模型别名必须是 `deepseek-chat`。
 - 编码：`evals/f26_snapshot` 里的 `add` 本来就是 `return a - b`。可信检查在 `evals/f26_checker/check.py`，每次复制进一个新目录，不放在模型可以改的快照里。独立测试先观察到 `add(1, 2)=-1`。每次尝试都从快照重新复制，失败目录的哈希不能当成通过。OpenHands SDK 进程自己把补丁写进 `billing.py`，父进程不替它写。通过必须来自另一次只读容器：`python:3.12-alpine`，`--network none --read-only --cap-drop ALL --pids-limit 32`。没有 Docker 或镜像拉不下来，这项是 not_run。
-- 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`version=1` 和 `offset=0-92` 与空格写法是同一字段，数字不同仍然失败。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
+- 研究：`evals/f26_sources` 的中文笔记、英文笔记，加上一条无关的钢琴备忘。版本、内容哈希和 offset 记在结果里，不假装已经写入 Postgres。稠密向量必须来自现场编码器；查询和正文如果全在 fixture 里，这项是 not_run。排序是 BM25 加精确余弦再 RRF，两条实验笔记都要排在钢琴备忘前面。比较报告要带上两条的 source id、version、完整 sha256 和 offset。`version=1`、`version is 1`、`version 为 1`、`版本 1`、`版本号：1` 和 `offset=0-92` 与空格写法是同一字段。版本数字必须写在对应的 source id 旁边，数字不同、版本没有绑到来源、或缺少引用仍然失败。`finish_reason=length` 的研究报告不是通过。`semantic_support` 保持 `not_judged`，引用齐了也不等于已经人工判断语义成立。
 - Linux 隔离：同一组容器 flags。容器里看不到 key，公网连不上就记下 `network_errno`。没有 Docker 是 not_run，不假装通过。
 
 head `dac5c49` 的完整验收退出码是 1，原样留在 `reports/f26_acceptance_dac5c49.json`。协议、OpenHands 补丁和 Linux 隔离都通过。研究被记成 `citation_mismatch`。那次研究调用的 `completion_tokens` 是 512，报告最后停在 `src-en`。两条引用在截断之前已经写全。失败原因是检查器当时只认空格。检查器改完后，监督者在 head `cb22fbc` 重跑，退出码 0。那次比较报告 sha256 是 `2f811cf9a9ce878c87ba02ed5946637a2ebdebaa4c5859b9034ef7486df1057d`，488 token。四项都通过。
@@ -110,5 +110,11 @@ uv run --locked --no-build python scripts/run_f26_live.py --out reports/f26_live
 | 网关丢掉多余字段，并拒绝别的模型名 | `tests/unit/test_f26_acceptance.py::test_gateway_drops_extra_fields_and_rejects_other_models` |
 | 执行器错误里的 key 被换成 `[REDACTED]` | `tests/unit/test_f26_acceptance.py::test_secret_in_an_executor_error_is_redacted` |
 | dac5c49 的报告用等号写出两条引用；缺哈希、错 offset 或错 version 仍失败 | `tests/unit/test_f26_acceptance.py::test_dac5c49_report_cites_both_sources_with_equals_signs` |
+| `version 为 1`、`版本 1`、`版本号：1`、`version is 1` 绑在对应来源上可以通过 | `tests/unit/test_f26_acceptance.py::test_version_phrasing_is_accepted` |
+| 错误版本、版本只写在另一条来源上、缺少版本字段、或版本没有绑到来源，都失败 | `tests/unit/test_f26_acceptance.py::test_wrong_version_phrasing_is_rejected` |
+| 研究报告请求 2048 token，超过 2048 的请求被夹到 2048；编码上限仍是 512 | `tests/unit/test_f26_acceptance.py::test_research_report_cap_accepts_2048_tokens` |
+| `finish_reason=length` 被记下来，引用齐了也不算通过 | `tests/unit/test_f26_acceptance.py::test_length_truncated_gateway_response_is_recorded` |
+| 产品网关不把 `finish_reason=length` 的正文当成完整回答 | `tests/integration/test_gateway.py::test_length_truncated_completion_is_not_a_complete_answer` |
+| 截断的研究回答不是 SUCCEEDED，原因是 `output_truncated` | `tests/integration/test_live_research.py::test_length_truncated_research_answer_is_not_accepted` |
 | 缺 key 时完整验收是 blocked | `tests/unit/test_f26_acceptance.py::test_missing_key_is_blocked` |
 | 入口拒绝别的输出路径，并把 blocked 写进指定文件 | `tests/unit/test_f26_acceptance.py::test_script_writes_blocked_result_without_calling_out` |

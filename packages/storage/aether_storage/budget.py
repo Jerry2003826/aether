@@ -516,6 +516,7 @@ class BudgetLedger:
         requested_alias: str | None,
         cost_source: str,
         pricing_version: str | None,
+        finish_reason: str | None = None,
     ) -> str:
         """Store the provider response before any later artifact write.
 
@@ -569,6 +570,8 @@ class BudgetLedger:
                     "requested_alias": requested_alias,
                 }
             )
+            if finish_reason == "length":
+                detail["finish_reason"] = "length"
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = :usage_status, actual_micro_usd = :actual, "
