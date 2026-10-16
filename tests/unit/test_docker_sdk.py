@@ -9,7 +9,7 @@ import pytest
 import requests
 
 from aether_worker.coding_sandbox import container_arguments
-from aether_worker.container_runtime import execute_docker, set_docker_client
+from aether_worker.container_runtime import container_logs, execute_docker, set_docker_client
 from aether_worker.runner import JOB_IMAGE
 
 
@@ -25,6 +25,7 @@ class _Container:
     def __init__(self) -> None:
         self.id = "cid-1"
         self.killed = False
+        self.removed = False
 
     def wait(self, **_kwargs: object) -> dict[str, int]:
         raise requests.exceptions.ReadTimeout("slow")
@@ -36,7 +37,7 @@ class _Container:
         return b""
 
     def remove(self, **_kwargs: object) -> None:
-        return None
+        self.removed = True
 
 
 class _Containers:
@@ -94,3 +95,96 @@ def test_run_and_pull_use_the_sdk_and_not_subprocess(tmp_path: Path, monkeypatch
     assert "/opt/aether/openhands_sandbox_entry.py" in joined
     assert "importlib" not in joined
     assert JOB_IMAGE.startswith("python@sha256:")
+
+
+class _StreamContainer:
+    def __init__(self) -> None:
+        self.command: list[str] | None = None
+        self.exec_kwargs: dict[str, object] = {}
+        self.signal: str | None = None
+        self.killed = False
+        self.removed = False
+
+    def exec_run(self, command: list[str], **kwargs: object) -> tuple[int, tuple[bytes, bytes]]:
+        self.command = command
+        self.exec_kwargs = kwargs
+        return 0, (b'{"forbidden":[]}\n', b"")
+
+    def kill(self, signal: str | None = None) -> None:
+        self.killed = True
+        self.signal = signal
+
+    def remove(self, **_kwargs: object) -> None:
+        self.removed = True
+
+    def wait(self, **_kwargs: object) -> dict[str, int]:
+        raise requests.exceptions.ReadTimeout("slow")
+
+    def logs(self, **kwargs: object) -> object:
+        assert kwargs.get("stream") is True
+        if kwargs.get("stdout") is True and kwargs.get("stderr") is False:
+            return iter([b"HEAD", b"Z" * 70000])
+        if kwargs.get("stderr") is True and kwargs.get("stdout") is False:
+            return iter([b"ERRHEAD", b"E" * 70000])
+        raise AssertionError(kwargs)
+
+
+class _StreamContainers:
+    def __init__(self) -> None:
+        self.container = _StreamContainer()
+        self.kwargs: dict[str, object] = {}
+
+    def get(self, name: str) -> _StreamContainer:
+        assert name == "cid"
+        return self.container
+
+    def run(self, image: str, command: list[str] | None, **kwargs: object) -> _StreamContainer:
+        self.kwargs = {"image": image, "command": command, **kwargs}
+        return self.container
+
+
+class _StreamClient:
+    def __init__(self) -> None:
+        self.containers = _StreamContainers()
+
+
+def test_exec_kill_and_log_tail_use_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("subprocess docker")
+
+    monkeypatch.setattr(subprocess, "run", forbidden)
+    monkeypatch.setattr(subprocess, "Popen", forbidden)
+    client = _StreamClient()
+    set_docker_client(client)
+    try:
+        ran = execute_docker(
+            [
+                "exec",
+                "-e",
+                "AETHER_PROBE_INTERNET=1.1.1.1",
+                "-e",
+                "AETHER_PROBE_INTERNET_PORT=443",
+                "cid",
+                "python",
+                "-c",
+                "print(1)",
+            ]
+        )
+        killed = execute_docker(["kill", "cid"])
+        stdout, stderr = container_logs("cid", limit=65536)
+        with pytest.raises(subprocess.TimeoutExpired):
+            execute_docker(["run", "--rm", "python:3.12-alpine", "sleep", "5"], timeout=1)
+    finally:
+        set_docker_client(None)
+    assert ran.returncode == 0
+    assert ran.stdout.strip() == '{"forbidden":[]}'
+    assert client.containers.container.command == ["python", "-c", "print(1)"]
+    environment = client.containers.container.exec_kwargs["environment"]
+    assert environment == {"AETHER_PROBE_INTERNET": "1.1.1.1", "AETHER_PROBE_INTERNET_PORT": "443"}
+    assert killed.returncode == 0
+    assert client.containers.container.killed is True
+    assert client.containers.container.signal is None
+    assert stdout == b"Z" * 65536
+    assert stderr == b"E" * 65536
+    assert b"HEAD" not in stdout
+    assert client.containers.container.removed is True

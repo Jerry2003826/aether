@@ -21,6 +21,8 @@ gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
 
 进度：七项替换都接到库调用。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 改为 true。
 
-结果：这一笔变基提交还没有重跑测试。上一笔在 `a2b9313` 上的结果是冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 290 passed、1 warning（21.43s）。`live_ready` 保持 pending。
+结果：这一笔变基还没有重跑测试。变基前的本地结果是冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 293 passed、1 warning（22.15s）。Gitleaks 8.30.1 无泄漏。`live_ready` 保持 pending。
+
+修正：OpenHands 安装改为 `uv sync --locked --no-build`。`func-timeout==4.3.5` 使用仓库内 wheel。`exec`、`kill`、日志尾部和 runner 构建镜像已接上。CI 结果还没有记入。
 
 阻塞：编码镜像要在 CI 的 Docker 上构建后，集成测试才能看到 OpenHands 容器终态。

@@ -12,6 +12,7 @@ from pathlib import Path
 from aether_worker.coding_sandbox import container_arguments
 from aether_worker.openhands_image import OPENHANDS_VERSION, launch_image
 from aether_worker.runner import JOB_IMAGE
+from aether_worker.runner_process import _ensure_coding_image
 
 _ENTRY = Path("services/worker/aether_worker/openhands_sandbox_entry.py")
 _PYTHON = Path("environments/openhands/.venv/bin/python")
@@ -37,6 +38,8 @@ def test_entry_source_calls_local_workspace_and_launch_keeps_other_images(monkey
     ]
     assert "openhands.sdk.workspace.local" in imported
     assert "execute_command" in calls
+    assert "mkdtemp" in calls
+    assert "/tmp" not in _ENTRY.read_text(encoding="utf-8")
     assert not any(name == "importlib" or name.startswith("importlib.") for name in imported)
     assert launch_image("python:3.12-alpine", JOB_IMAGE) == "python:3.12-alpine"
     monkeypatch.setattr("aether_worker.openhands_image.coding_runtime_image", lambda: None)
@@ -101,3 +104,30 @@ def test_local_workspace_strips_its_secret_before_the_protocol(tmp_path: Path) -
     assert isinstance(body["network_errno"], int)
     assert OPENHANDS_VERSION == "1.54.0"
     assert sys.version_info >= (3, 13)
+
+
+def test_runner_builds_the_openhands_image_when_docker_is_enabled(monkeypatch) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr("aether_worker.runner_process.coding_runtime_image", lambda: None)
+
+    def build() -> str:
+        calls.append("build")
+        return "sha256:built"
+
+    monkeypatch.setattr("aether_worker.runner_process.build_openhands_sandbox", build)
+    _ensure_coding_image({"runtime": "enabled"})
+    assert calls == ["build"]
+    calls.clear()
+    monkeypatch.setattr("aether_worker.runner_process.coding_runtime_image", lambda: "sha256:present")
+    _ensure_coding_image({"runtime": "enabled"})
+    _ensure_coding_image({"runtime": "unsupported", "reason": "cli_missing"})
+    assert calls == []
+
+
+def test_runner_stays_up_when_the_openhands_image_build_fails(monkeypatch) -> None:
+    def boom() -> str:
+        raise OSError("disk")
+
+    monkeypatch.setattr("aether_worker.runner_process.coding_runtime_image", lambda: None)
+    monkeypatch.setattr("aether_worker.runner_process.build_openhands_sandbox", boom)
+    _ensure_coding_image({"runtime": "enabled"})

@@ -6,6 +6,7 @@ import json
 import os
 import socket
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -14,7 +15,6 @@ os.environ["OPENHANDS_SUPPRESS_BANNER"] = "1"
 from openhands.sdk.workspace.local import LocalWorkspace
 
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
-JOB = Path(os.environ.get("AETHER_SANDBOX_JOB", "/tmp/job"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
 EXECUTOR = "openhands.sdk.LocalWorkspace"
 
@@ -82,15 +82,25 @@ def _protocol_payload(stdout: str) -> dict[str, object]:
     raise json.JSONDecodeError("protocol", stdout, 0)
 
 
+def job_directory() -> Path:
+    """Use the caller path, or a private directory from tempfile. A fixed public path is not created."""
+    configured = os.environ.get("AETHER_SANDBOX_JOB")
+    if configured:
+        path = Path(configured)
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+    return Path(tempfile.mkdtemp(prefix="aether-job-"))
+
+
 def main() -> None:
     started = time.monotonic()
     try:
-        JOB.mkdir(parents=True, exist_ok=True)
-        copy_tree(WORK, JOB)
-        workspace = LocalWorkspace(working_dir=str(JOB))
+        job = job_directory()
+        copy_tree(WORK, job)
+        workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
             f"{sys.executable} -I {PROTOCOL}",
-            cwd=str(JOB),
+            cwd=str(job),
             timeout=40,
         )
         payload = _protocol_payload(result.stdout or "")

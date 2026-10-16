@@ -130,6 +130,14 @@ Worker 是同一个 Python 源码里的另一个进程，不是第二套调度�
 
 停掉进程再启动时，已经完成的活动不会再执行一次；Temporal 按 `command_id` 去重。验证缓存只命中同一次观察：候选、权威合同、验收版本和来源快照都要一致，旧的 PASS 不会盖住后来的损坏或删除。编码作业仍走 `coding.create`，由同一个进程调用已有的授权作业写入，不另起调度器。
 
+编码作业要先有带标签 `aether.openhands_sandbox=1.54.0` 的本地镜像。Docker 可用时，runner 发现这个标签还不存在就会构建。启动前也可以自己执行：
+
+```sh
+uv run --locked --no-build python scripts/build_openhands_sandbox.py
+```
+
+基座是 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f`。`JOB_IMAGE` 常量仍是 Alpine digest。
+
 把 `ensure_database` 返回的三个角色 URL 设进环境。产物目录必须和 API 的 `AETHER_ARTIFACT_ROOT` 是同一个路径。
 
 ```sh
@@ -190,7 +198,7 @@ Makefile 里已有的目标：`check-pack`、`test-reference`、`doctor`、`test
 完整 live 验收需要本机 Docker、uv，以及两个独立环境。OpenHands 四个包钉在 1.54.0。ML 环境提供 `FlagEmbedding`，第一次会下载 `BAAI/bge-m3`（revision `5617a9f61b028005a4858fdac845db406aefb181`）。独立测试和网络隔离使用摘要固定的 `python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4`（索引摘要，容器内 CPython 3.12.15）。评分依赖用 `pip install --require-hashes --only-binary=:all:` 安装 `pytest==8.3.5`，不使用可变标签。
 
 ```sh
-cd environments/openhands && uv sync --frozen
+cd environments/openhands && uv sync --locked --no-build
 cd ../ml && uv sync --frozen
 docker pull python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
 cd ../..

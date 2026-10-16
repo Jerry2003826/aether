@@ -130,7 +130,7 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
             raise CodingSandboxError("sandbox_unavailable") from exc
     if shutil.which("docker") is None:
         return {"stdout": "", "stderr": ""}
-    stdout, stderr = container_logs(target)
+    stdout, stderr = container_logs(target, limit=limit)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
         "stderr": read_bounded_tail(io.BytesIO(stderr), limit),

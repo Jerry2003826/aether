@@ -13,6 +13,7 @@ from docker.errors import BuildError, DockerException, ImageNotFound, NotFound
 from docker.utils import parse_repository_tag
 
 _CLIENT: object | None = None
+_LOG_STREAM_LIMIT = 65536
 
 
 def set_docker_client(client: object | None) -> None:
@@ -52,6 +53,10 @@ def execute_docker(args: list[str], *, timeout: float | None = None) -> subproce
             return _pull(rest)
         if command == "run":
             return _run(rest, timeout=timeout)
+        if command == "exec":
+            return _exec(rest)
+        if command == "kill":
+            return _kill(rest)
         if command == "logs":
             stdout, stderr = container_logs(rest[-1])
             return _ok(stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace"))
@@ -62,15 +67,16 @@ def execute_docker(args: list[str], *, timeout: float | None = None) -> subproce
     return _failed(f"unsupported:{command}")
 
 
-def container_logs(name: str) -> tuple[bytes, bytes]:
+def container_logs(name: str, *, limit: int = _LOG_STREAM_LIMIT) -> tuple[bytes, bytes]:
+    """Stream logs and keep only the last `limit` bytes of each stream."""
     client = docker_client()
     try:
         container = client.containers.get(name)
     except (NotFound, DockerException):
         return b"", b""
-    stdout = container.logs(stdout=True, stderr=False) or b""
-    stderr = container.logs(stdout=False, stderr=True) or b""
-    return _as_bytes(stdout), _as_bytes(stderr)
+    stdout = _tail_stream(container.logs(stdout=True, stderr=False, stream=True), limit)
+    stderr = _tail_stream(container.logs(stdout=False, stderr=True, stream=True), limit)
+    return stdout, stderr
 
 
 def image_id_with_label(label: str) -> str | None:
@@ -200,27 +206,100 @@ def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProce
     if parsed["detach"]:
         return _ok(str(container.id) + "\n", "")
     try:
-        if timeout is None:
-            status = container.wait()
-        else:
-            status = container.wait(timeout=timeout)
-    except (DockerException, requests.exceptions.RequestException) as exc:
-        if timeout is not None:
-            try:
-                container.kill()
-            except (DockerException, requests.exceptions.RequestException):
-                pass
-            raise subprocess.TimeoutExpired(["docker", "run", parsed["image"]], timeout) from exc
-        return _failed(str(exc))
-    stdout = _as_bytes(container.logs(stdout=True, stderr=False) or b"").decode("utf-8", "replace")
-    stderr = _as_bytes(container.logs(stdout=False, stderr=True) or b"").decode("utf-8", "replace")
-    if parsed["remove"]:
         try:
-            container.remove(force=True)
-        except DockerException:
+            if timeout is None:
+                status = container.wait()
+            else:
+                status = container.wait(timeout=timeout)
+        except (DockerException, requests.exceptions.RequestException) as exc:
+            if timeout is not None:
+                try:
+                    container.kill()
+                except (DockerException, requests.exceptions.RequestException):
+                    pass
+                raise subprocess.TimeoutExpired(["docker", "run", parsed["image"]], timeout) from exc
+            return _failed(str(exc))
+        stdout = _as_bytes(container.logs(stdout=True, stderr=False) or b"").decode("utf-8", "replace")
+        stderr = _as_bytes(container.logs(stdout=False, stderr=True) or b"").decode("utf-8", "replace")
+        code = int((status or {}).get("StatusCode", 1))
+        return subprocess.CompletedProcess(["docker", "run"], code, stdout, stderr)
+    finally:
+        if parsed["remove"]:
+            try:
+                container.remove(force=True)
+            except DockerException:
+                pass
+
+
+def _exec(args: list[str]) -> subprocess.CompletedProcess[str]:
+    environment: dict[str, str] = {}
+    user = None
+    workdir = None
+    index = 0
+    name = ""
+    command: list[str] = []
+    while index < len(args):
+        token = args[index]
+        if token == "-e":
+            index += 1
+            if index >= len(args):
+                return _failed("missing_env")
+            key, separator, value = args[index].partition("=")
+            if separator != "=" or not key:
+                return _failed("missing_env")
+            environment[key] = value
+        elif token in {"-u", "-w"}:
+            index += 1
+            if index >= len(args):
+                return _failed("missing_option")
+            if token == "-u":
+                user = args[index]
+            else:
+                workdir = args[index]
+        elif token in {"-i", "-t", "-d"}:
             pass
-    code = int((status or {}).get("StatusCode", 1))
-    return subprocess.CompletedProcess(["docker", "run"], code, stdout, stderr)
+        elif token.startswith("-"):
+            raise DockerException(f"unsupported flag {token}")
+        else:
+            name = token
+            command = args[index + 1 :]
+            break
+        index += 1
+    if not name or not command:
+        return _failed("missing")
+    try:
+        container = docker_client().containers.get(name)
+    except NotFound:
+        return _failed("missing")
+    kwargs: dict[str, Any] = {"demux": True, "stdout": True, "stderr": True}
+    if environment:
+        kwargs["environment"] = environment
+    if user is not None:
+        kwargs["user"] = user
+    if workdir is not None:
+        kwargs["workdir"] = workdir
+    exit_code, output = container.exec_run(command, **kwargs)
+    stdout_raw, stderr_raw = output if isinstance(output, tuple) else (output, b"")
+    stdout = _as_bytes(stdout_raw or b"").decode("utf-8", "replace")
+    stderr = _as_bytes(stderr_raw or b"").decode("utf-8", "replace")
+    return subprocess.CompletedProcess(["docker", "exec"], int(exit_code), stdout, stderr)
+
+
+def _kill(args: list[str]) -> subprocess.CompletedProcess[str]:
+    signal = _option(args, "-s")
+    skip = {"-s"}
+    if signal is not None:
+        skip.add(signal)
+    name = _positional(args, skip=skip)
+    try:
+        container = docker_client().containers.get(name)
+        if signal is None:
+            container.kill()
+        else:
+            container.kill(signal=signal)
+    except NotFound:
+        return _failed("missing")
+    return _ok("", "")
 
 
 def _parse_run(args: list[str]) -> dict[str, Any]:
@@ -370,6 +449,22 @@ def _positional(args: list[str], *, skip: set[str]) -> str:
             continue
         return token
     return args[-1]
+
+
+def _tail_stream(chunks: Any, limit: int) -> bytes:
+    if limit < 1:
+        return b""
+    if isinstance(chunks, (bytes, str)):
+        return _as_bytes(chunks)[-limit:]
+    kept = bytearray()
+    for chunk in chunks:
+        piece = _as_bytes(chunk)
+        if not piece:
+            continue
+        kept.extend(piece)
+        if len(kept) > limit:
+            del kept[:-limit]
+    return bytes(kept)
 
 
 def _as_bytes(value: bytes | str) -> bytes:

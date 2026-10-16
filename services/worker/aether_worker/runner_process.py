@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
+
+from docker.errors import DockerException
 
 from aether_worker.coding_sandbox import LOG_CAPTURE_LIMIT, _bounded_logs, container_arguments, container_name
 from aether_worker.net_guard import fixtures_enabled
-from aether_worker.openhands_image import launch_image
+from aether_worker.openhands_image import build_openhands_sandbox, coding_runtime_image, launch_image
 from aether_worker.role_http import serve_role
 from aether_worker.runner import JOB_IMAGE, _docker, probe_docker_daemon
 from aether_worker.threat_launch import ThreatLaunchError, docker_cleanup, docker_runner, execute_container
@@ -26,6 +29,7 @@ def main() -> None:
         raise SystemExit("runner 缺少 AETHER_LOOPBACK_TOKEN")
     os.environ["AETHER_PROCESS_ROLE"] = "runner"
     started = probe_docker_daemon()
+    _ensure_coding_image(started)
 
     def health() -> dict[str, str]:
         return {"role": "runner", **started}
@@ -98,6 +102,18 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
     if op == "inspect_exit":
         return _docker(["inspect", "-f", "{{.State.ExitCode}}", accepted_name(body.get("name"))])
     return None
+
+
+def _ensure_coding_image(started: dict[str, str]) -> None:
+    """Build the labeled image when this runner can see Docker and the image is absent."""
+    if started.get("runtime") != "enabled":
+        return
+    try:
+        if coding_runtime_image() is not None:
+            return
+        build_openhands_sandbox()
+    except (DockerException, OSError):
+        sys.stderr.write("openhands sandbox image build failed\n")
 
 
 def _run(workspace: object, job_id: object) -> subprocess.CompletedProcess[str]:

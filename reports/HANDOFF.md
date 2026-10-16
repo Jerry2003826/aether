@@ -14,9 +14,11 @@
 
 密钥：detect-secrets 1.5.0，CI 增加 Gitleaks 8.30.1。证明：`test_trace_replaces_the_whole_secret_token`、`test_trace_tokens_and_builtin_aws_key_come_from_detect_secrets`。
 
-容器和进程：docker 7.2.0 与 psutil 7.2.2。worker 仍是 `docker_forbidden`。证明：`test_run_and_pull_use_the_sdk_and_not_subprocess`、`test_recorded_role_reads_psutil_cmdline`。
+容器和进程：docker 7.2.0 与 psutil 7.2.2。worker 仍是 `docker_forbidden`。`exec` 和 `kill` 走 Docker SDK。日志按流只保留尾部。`--rm` 的前台容器在超时后仍会删除。证明：`test_run_and_pull_use_the_sdk_and_not_subprocess`、`test_exec_kill_and_log_tail_use_the_sdk`、`test_recorded_role_reads_psutil_cmdline`。
 
-2026-10-16 本地：冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 290 passed、1 warning（21.43s），Gitleaks 8.30.1 无泄漏。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次提交的 CI 还没有记入。
+安装：`environments/openhands` 使用 `uv sync --locked --no-build`。`func-timeout==4.3.5` 没有 wheel，锁文件指向仓库内由官方 sdist 构建、uv 记下哈希的 wheel。runner 在 Docker 可用且标签镜像不存在时构建；命令也写在 README。证明：`test_ci_workflow`、`test_runner_builds_the_openhands_image_when_docker_is_enabled`、`test_runner_stays_up_when_the_openhands_image_build_fails`。沙箱作业目录不再使用固定的公开路径，改由 `tempfile.mkdtemp` 创建。
+
+2026-10-16 本地：冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 293 passed、1 warning（22.15s），Gitleaks 8.30.1 无泄漏（含工作区扫描）。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次提交的 CI 还没有记入。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 
