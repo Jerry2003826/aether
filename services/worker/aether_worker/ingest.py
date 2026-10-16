@@ -178,22 +178,35 @@ def fetch_url(
     redirects_left: int = 2,
     max_bytes: int = MAX_HTTP_BYTES,
     verify: ssl.SSLContext | str | bool = True,
+    extra_headers: dict[str, str] | None = None,
 ) -> bytes:
     if redirects_left < 0:
         raise IngestError("redirect_rejected")
     pinned = assert_public_target(url, resolve=resolve, allow_hosts=allow_hosts)
     parsed = urlsplit(url)
     host = parsed.hostname or ""
+    headers = dict(extra_headers or {})
+    headers["Host"] = host
     if opener is not None:
-        response = opener(url, headers={"Host": host})
+        response = opener(url, headers=headers)
         if response.status_code in _REDIRECTS:
-            return _follow(response, url, resolve=resolve, allow_hosts=allow_hosts, opener=opener, redirects_left=redirects_left, max_bytes=max_bytes, verify=verify)
+            return _follow(
+                response,
+                url,
+                resolve=resolve,
+                allow_hosts=allow_hosts,
+                opener=opener,
+                redirects_left=redirects_left,
+                max_bytes=max_bytes,
+                verify=verify,
+                extra_headers=extra_headers,
+            )
         if len(response.content) > max_bytes:
             raise IngestError("size_rejected")
         return response.content
     transport = _PinnedTransport(pinned, verify=verify)
     with httpx.Client(transport=transport, verify=verify, follow_redirects=False, trust_env=False, timeout=5.0) as client:
-        with client.stream("GET", url, headers={"Host": host}) as response:
+        with client.stream("GET", url, headers=headers) as response:
             if response.status_code in _REDIRECTS:
                 location = _location(response, url)
                 return fetch_url(
@@ -203,6 +216,7 @@ def fetch_url(
                     redirects_left=redirects_left - 1,
                     max_bytes=max_bytes,
                     verify=verify,
+                    extra_headers=extra_headers,
                 )
             return _read_limited(response, max_bytes)
 
@@ -227,6 +241,7 @@ def _follow(
     redirects_left: int,
     max_bytes: int,
     verify: ssl.SSLContext | str | bool,
+    extra_headers: dict[str, str] | None,
 ) -> bytes:
     return fetch_url(
         _location(response, url),
@@ -236,6 +251,7 @@ def _follow(
         redirects_left=redirects_left - 1,
         max_bytes=max_bytes,
         verify=verify,
+        extra_headers=extra_headers,
     )
 
 
@@ -243,13 +259,16 @@ def parse_rss_items(xml_bytes: bytes) -> list[str]:
     return _parse_rss_subprocess(xml_bytes, spin=False)
 
 
-def _parse_rss_subprocess(xml_bytes: bytes, *, spin: bool) -> list[str]:
+def _parse_rss_subprocess(xml_bytes: bytes, *, spin: bool, mode: str = "rss") -> list[str]:
     env = os.environ.copy()
     worker_root = str(Path(__file__).resolve().parents[1])
     env["PYTHONPATH"] = worker_root + os.pathsep + env.get("PYTHONPATH", "")
     env.pop("AETHER_PARSER_SPIN", None)
+    env.pop("AETHER_FEED_MODE", None)
     if spin:
         env["AETHER_PARSER_SPIN"] = "1"
+    if mode == "arxiv":
+        env["AETHER_FEED_MODE"] = "arxiv"
     try:
         completed = subprocess.run(
             [sys.executable, "-m", "aether_worker.rss_isolate"],

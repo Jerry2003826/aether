@@ -23,6 +23,7 @@ from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
 from aether_worker.memory import apply_memory_commands
 from aether_worker.pending_jobs import execute_queued_ingestions
+from aether_worker.tool_gateway import dispatch_approved_tools
 from aether_worker.project_registry import load_projects, save_projects
 from aether_worker.watch_tick import run_watch_tick
 from aether_worker.watches import ensure_watch_schedules
@@ -118,6 +119,10 @@ def _execute_remembered(remembered: dict[str, str], worker: Database, store: Art
             execute_queued_ingestions(worker, store, owner_id=owner_id, project_id=project_id, index_root=root)
         except Exception as exc:
             print(f"aether-progress-failed project={project_id} error={type(exc).__name__}", flush=True)
+        try:
+            dispatch_approved_tools(worker, owner_id=owner_id, project_id=project_id)
+        except Exception as exc:
+            print(f"aether-tool-failed project={project_id} error={type(exc).__name__}", flush=True)
 
 
 def _defer_progress() -> bool:

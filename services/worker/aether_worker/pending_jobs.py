@@ -13,10 +13,11 @@ from sqlalchemy.exc import SQLAlchemyError
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.ingest import IngestError, attach_text_version, fetch_url, parse_rss_items
+from aether_worker.remote_sources import arxiv_text, fetch_arxiv, fetch_github, github_text
 from aether_worker.retrieval import RetrievalError, activate_generation, build_generation
 from aether_worker.watches import trigger_watch
 
-_SUPPORTED_KINDS = {"local_document", "url", "rss"}
+_SUPPORTED_KINDS = {"local_document", "url", "rss", "github_api", "arxiv_api"}
 
 
 def execute_queued_ingestions(
@@ -129,16 +130,25 @@ def _read_body(source: dict[str, Any]) -> tuple[bytes, str]:
     if kind not in _SUPPORTED_KINDS:
         raise IngestError("unsupported")
     if kind == "local_document":
-        raw = locator.encode()
-    elif kind == "url":
-        raw = fetch_url(locator)
-    else:
-        raw = "\n".join(parse_rss_items(fetch_url(locator))).encode()
+        return _decoded(locator.encode())
+    if kind == "url":
+        return _decoded(fetch_url(locator))
+    if kind == "rss":
+        return _decoded("\n".join(parse_rss_items(fetch_url(locator))).encode())
+    if kind == "github_api":
+        raw = fetch_github(locator)
+        return raw, github_text(raw)
+    if kind == "arxiv_api":
+        raw = fetch_arxiv(locator)
+        return raw, arxiv_text(raw)
+    raise IngestError("unsupported")
+
+
+def _decoded(raw: bytes) -> tuple[bytes, str]:
     try:
-        text_value = raw.decode("utf-8")
+        return raw, raw.decode("utf-8")
     except UnicodeError as exc:
         raise IngestError("parse_rejected") from exc
-    return raw, text_value
 
 
 def _remember_version(database: Database, *, owner_id: str, project_id: str, job_id: str, version_id: str) -> None:

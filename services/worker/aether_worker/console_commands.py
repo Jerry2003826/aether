@@ -13,6 +13,7 @@ from sqlalchemy.exc import OperationalError
 from aether_domain.security import sha256_text
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
+from aether_worker.retention import advance_visibility_epoch
 from aether_worker.skill_eval import REPORT_CLASSIFICATION, SkillEvalError, rollback_active
 
 _KINDS = (
@@ -215,13 +216,24 @@ def _source_delete(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
         ),
         {"project_id": project_id, "id": payload["source_id"], "version": payload["expected_version"]},
     ).rowcount
-    if updated != 1 and not _exists(
-        conn,
-        "SELECT 1 FROM sources WHERE project_id = :project_id AND id = :id AND deleted_at IS NOT NULL",
-        project_id,
-        str(payload["source_id"]),
-    ):
-        raise ConsoleCommandError("version_conflict")
+    if updated != 1:
+        if not _exists(
+            conn,
+            "SELECT 1 FROM sources WHERE project_id = :project_id AND id = :id AND deleted_at IS NOT NULL",
+            project_id,
+            str(payload["source_id"]),
+        ):
+            raise ConsoleCommandError("version_conflict")
+        return
+    conn.execute(
+        text(
+            "UPDATE chunks SET deleted_at = now() "
+            "WHERE project_id = :project_id AND deleted_at IS NULL AND source_version_id IN ("
+            "SELECT id FROM source_versions WHERE project_id = :project_id AND source_id = :source_id)"
+        ),
+        {"project_id": project_id, "source_id": payload["source_id"]},
+    )
+    advance_visibility_epoch(conn, project_id)
 
 
 def _ingestion_create(conn: Any, project_id: str, outbox_id: str, payload: dict[str, Any]) -> None:

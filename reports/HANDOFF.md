@@ -1,5 +1,44 @@
 # 交接
 
+## P2-09 公开采集、工具账本、检索可见性与只读推荐（分支 `cursor/r7-ingest-tools-search-4ea5`）
+
+基线 `cc471e3`（PR #20/#21/#22/#23 已合入，ADR 用到 F33）。本路只做四项。没有改 `contracts/`、`reference/`、`STATUS.json`。没有把 `live_ready` 改成 passed。没有新增 OpenAPI 操作。编码作业、技能评测、目标工作流和安全隔离没有改。决定见 ADR-F34。
+
+- `github_api` 与 `arxiv_api` 由 worker 经钉住地址的 HTTP 客户端抓取。GitHub 只连 `api.github.com`（夹具主机要同时打开 `AETHER_INGEST_ALLOW_FIXTURES=1` 和 `AETHER_INGEST_FIXTURE_HOSTS`）。仓库根改写为 `/readme`，只解码内联 base64，不跟随 `download_url` 或重定向。arXiv 编号展开到 `export.arxiv.org/api/query`，Atom 在原有隔离进程里取 title、summary、author。正文走既有切块、嵌入和索引，`POST /search` 能检索。
+- `route_pending` 在采集之后调用 `dispatch_approved_tools`。只使用已审核 manifest 的 `argv` 与 `bindings`。风险和幂等以注册表为准。授权必须事先存在。MCP 未知结果记 UNKNOWN；幂等工具用新进程对账一次，`non_idempotent` 不重试。`_mark_task` 不改写 SUCCEEDED、FAILED、CANCELLED。
+- 成功的 `source.delete`（恰好更新一行）给该来源的 chunk 打 tombstone，并只递增 `visibility_epoch`、丢掉该项目的检索缓存。不调用 `invalidate_derived`。重放删除不再递增。
+- `GET /recommendations` 只读预览，不插入画像或曝光。没有画像时 `profile_version` 为 0，`impression_id` 为 null。这与 OpenAPI 里 impression_id 必填 UUID 不一致，合同未改，偏差记在 ADR-F34。`rank_candidates` 仍是显式写入。
+
+有意改动的既有断言：`tests/integration/test_console_api.py` 的 `test_recommendations_feedback_and_costs_read_the_ledger`。GET 不再要求写出曝光行，反馈请求不再带 `impression_id`。标题、exploration 为 false、policy_version、反馈条数和检索 503 仍在。去掉的是对曝光行 `collaborative_filtering` 的读取。
+
+先失败再修：实现前 `tests/unit/test_remote_sources.py` 因缺少 `aether_worker.remote_sources` 无法收集。
+
+本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 29.1.3，Hermes v0.22.1）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit
+# 231 passed
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+  uv run --locked --no-build pytest -q tests/integration
+# Hermes 不在该进程 PATH：347 passed，1 failed
+# tests/integration/test_hermes_probe.py::test_pinned_hermes_cli_prints_its_real_version
+# reason=hermes_cli_missing
+PATH="$HOME/.local/bin:.hermes/.venv/bin:$PATH" 下重跑该探针和本路 5 条集成用例
+# 6 passed
+uv run --locked --no-build python scripts/doctor.py --require-services
+# exit 0
+```
+
+`reports/doctor.json` 的本机探测差异没有提交。本机 Node 是 `/exec-daemon/node`，web 未改，未重跑 typecheck；CI 使用 Node 24。
+
+剩余边界：BM25 文件里可能还留着已删除文本的字节，返回前按 tombstone 滤掉。持有 worker 数据库口令的人仍可以写账本。本路径不发放 capability。probe 仍返回 unavailable，不打开传输。编码作业和技能评测仍是 unsupported。不改变 `live_ready`。
+
+下一步：PR 标为 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）绿。
+
 ## SYS-08 验收报告与 SYS-03 快照边界（分支 `cursor/r6-report-sys08-sys03-e789`）
 
 基线已变基到 `76fd71c`（PR #22，ADR-F31 归 SYS-06/04）。本分支只关闭 SYS-08 与 SYS-03，决定编号是 ADR-F32。没有改 `contracts/`、`reference/`，没有改 F26 的 `100` 判定，没有改 `reports/f26_acceptance_result.json` 的字节。协议断言仍留在父进程，记忆降级与验收条款冻结没有回退，`runner.cancel` 的撤销确认没有动。本机没有 live key。
