@@ -13,6 +13,7 @@ import litellm
 from sqlalchemy import text
 
 from aether_domain.security import sha256_text
+from aether_gateway.model import ModelGateway
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
@@ -78,8 +79,18 @@ def rows(database: Database, owner_id: str, project_id: str, sql: str, **params:
         return [dict(row) for row in conn.execute(text(sql), params).mappings().all()]
 
 
-def sending_reservation(database: Database, *, owner_id: str, project_id: str, prompt: str, alias: str, output_cap: int = 16) -> tuple[str, str]:
-    """A running task whose single model request is reserved and already flipped to sending.
+def booked_token(
+    issuer: ModelGateway,
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    prompt: str,
+    alias: str,
+    output_cap: int = 16,
+    egress: list[str] | None = None,
+) -> tuple[str, str]:
+    """A running task whose single model request is reserved and already flipped to sending, plus its token.
 
     This is the only state in which the gateway may forward a call to the provider.
     """
@@ -107,6 +118,8 @@ def sending_reservation(database: Database, *, owner_id: str, project_id: str, p
         attempt_id=attempt,
     )
     assert prepared["action"] == "send", prepared
-    assert ledger.acquire_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, attempt_id=attempt)
-    assert ledger.consume_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, attempt_id=attempt)
-    return task_id, request_key
+    held = {"owner_id": owner_id, "project_id": project_id, "task_id": task_id, "request_key": request_key, "attempt_id": attempt}
+    token = issuer.issue_token(**held, capabilities=["knowledge:read"], aliases=[alias], egress=egress)
+    assert ledger.acquire_dispatch_permit(**held)
+    assert ledger.consume_dispatch_permit(**held)
+    return task_id, token

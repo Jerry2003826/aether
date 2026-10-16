@@ -1056,6 +1056,9 @@ def _ensure_live_answer(
         token = gateway.issue_token(
             owner_id=owner_id,
             project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+            attempt_id=attempt_id,
             capabilities=["knowledge:read"],
             aliases=[endpoints.live_model_alias],
         )
@@ -1419,6 +1422,14 @@ def _update_status(
     ).scalar()
     if updated is None:
         return None
+    if str(updated) in STOP_STATUSES:
+        conn.execute(
+            text(
+                "UPDATE capability_grants SET revoked_at = now() "
+                "WHERE project_id = :project_id AND task_id = :task_id AND capability_type = 'model' AND revoked_at IS NULL"
+            ),
+            {"project_id": project_id, "task_id": task_id},
+        )
     _insert_task_event(
         conn,
         project_id=project_id,
