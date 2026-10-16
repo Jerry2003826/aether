@@ -1,0 +1,13 @@
+........................................................................ [ 20%]
+........................................................................ [ 41%]
+........................................................................ [ 62%]
+........................................................................ [ 82%]
+...........................................................              [100%]
+=============================== warnings summary ===============================
+tests/integration/test_gateway.py::test_body_cannot_override_token_project_or_task
+  /workspace/.venv/lib/python3.13/site-packages/pydantic/_internal/_generate_schema.py:1507: UserWarning: Item 'summary' on TypedDict class 'ChatCompletionReasoningItem' is using the `ReadOnly` qualifier. Pydantic will not protect items from any mutation on dictionary instances.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+347 passed, 1 warning in 294.63s (0:04:54)
+FULL_EXIT=0

@@ -1,0 +1,571 @@
+run_started_utc=2026-10-16T02:46:37Z
+head=d6ed382b539c8e03994b593e1cdc33a6dbdb207a
+command=AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:***@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -p no:cacheprovider -rA --tb=short reports/audits/system_round1/repro --junitxml=reports/audits/system_round1/repro/output/repro_results.xml
+============================= test session starts ==============================
+platform linux -- Python 3.13.16, pytest-9.1.1, pluggy-1.6.0
+rootdir: /workspace
+configfile: pyproject.toml
+plugins: anyio-4.15.1
+collected 47 items
+
+reports/audits/system_round1/repro/test_c00_controls.py ...              [  6%]
+reports/audits/system_round1/repro/test_p0_01_memory_as_source.py FFF    [ 12%]
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py FFFFF   [ 23%]
+reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py FFF [ 29%]
+F                                                                        [ 31%]
+reports/audits/system_round1/repro/test_p1_02_unbounded_retry.py F       [ 34%]
+reports/audits/system_round1/repro/test_p1_03_command_order.py FF        [ 38%]
+reports/audits/system_round1/repro/test_p1_04_unsent_reservation.py FF   [ 42%]
+reports/audits/system_round1/repro/test_p1_05_verifier_evidence.py FF    [ 46%]
+reports/audits/system_round1/repro/test_p1_06_grader_forgery.py F.       [ 51%]
+reports/audits/system_round1/repro/test_p1_07_history_replay.py F        [ 53%]
+reports/audits/system_round1/repro/test_p1_08_migration_drift.py F       [ 55%]
+reports/audits/system_round1/repro/test_p1_09_backup_restore.py FFF      [ 61%]
+reports/audits/system_round1/repro/test_p2_01_evidence_labels.py FFF     [ 68%]
+reports/audits/system_round1/repro/test_p2_02_projection.py FF           [ 72%]
+reports/audits/system_round1/repro/test_p2_03_event_sequence.py F        [ 74%]
+reports/audits/system_round1/repro/test_p2_04_skill_lifecycle.py FF      [ 78%]
+reports/audits/system_round1/repro/test_p2_05_gateway_token.py F         [ 80%]
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py FFFFFF [ 93%]
+F                                                                        [ 95%]
+reports/audits/system_round1/repro/test_p2_07_runner_cancel.py F         [ 97%]
+reports/audits/system_round1/repro/test_zz_p2_08_password_rotation.py F  [100%]
+
+=================================== FAILURES ===================================
+______ test_deleted_memory_claim_never_reaches_the_model_or_the_verifier _______
+reports/audits/system_round1/repro/test_p0_01_memory_as_source.py:58: in test_deleted_memory_claim_never_reaches_the_model_or_the_verifier
+    assert not leaked, detail
+E   AssertionError: status=SUCCEEDED calls=1 prompt_has_deleted_claim=True verifications=[{'verdict': 'PASS', 'reason': '工作流检查、字节完整性和目标摘录都通过'}]
+E   assert not ['只根据下列资料回答目标。回答必须包含你所依据的资料原句，不要使用资料之外的事实。\n目标：根据资料，乙服务的请求超时时间是多少秒？\n\n[资料1]\n乙服务的请求超时时间是30秒。']
+_____________ test_corrected_memory_old_claim_is_not_ground_truth ______________
+reports/audits/system_round1/repro/test_p0_01_memory_as_source.py:82: in test_corrected_memory_old_claim_is_not_ground_truth
+    assert not leaked, detail
+E   AssertionError: status=FAILED prompt_has_superseded_claim=True
+E   assert not ['只根据下列资料回答目标。回答必须包含你所依据的资料原句，不要使用资料之外的事实。\n目标：根据资料，丙接口每分钟最多接受多少次请求？\n\n[资料1]\n丙接口每分钟最多接受90次请求。\n\n[资料2]\n丙接口每分钟最多接受60次请求。']
+_________ test_high_sensitivity_memory_is_not_sent_to_the_cloud_model __________
+reports/audits/system_round1/repro/test_p0_01_memory_as_source.py:110: in test_high_sensitivity_memory_is_not_sent_to_the_cloud_model
+    assert not leaked, f"高敏记忆进入了发往云端模型的提示词：calls={state['calls']}"
+E   AssertionError: 高敏记忆进入了发往云端模型的提示词：calls=1
+E   assert not ['只根据下列资料回答目标。回答必须包含你所依据的资料原句，不要使用资料之外的事实。\n目标：根据资料，丁服务什么时候备份？\n\n[资料1]\n丁服务每天凌晨两点备份一次。\n\n[资料2]\n丁服务的值班电话是13800000000。']
+_ test_one_bad_console_command_does_not_wedge_the_batch[duplicate_source_locator] _
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py:94: in test_one_bad_console_command_does_not_wedge_the_batch
+    assert error is None, detail
+E   AssertionError: variant=duplicate_source_locator error=IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "sources_project_id_canonical_locator_hash_key"
+E     [SQL: INSERT INTO sources (id, p first=PENDING poison=PENDING later=PENDING other_project=PENDING
+E   assert IntegrityError('(psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "sources_project_id_canonical_locator_hash_key"') is None
+_ test_one_bad_console_command_does_not_wedge_the_batch[feedback_for_unknown_source] _
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py:94: in test_one_bad_console_command_does_not_wedge_the_batch
+    assert error is None, detail
+E   AssertionError: variant=feedback_for_unknown_source error=IntegrityError: (psycopg.errors.ForeignKeyViolation) insert or update on table "feedback_events" violates foreign key constraint "feedback_events_project_id_source_id_fkey"
+E     DET first=PENDING poison=PENDING later=PENDING other_project=PENDING
+E   assert IntegrityError('(psycopg.errors.ForeignKeyViolation) insert or update on table "feedback_events" violates foreign key constraint "feedback_events_project_id_source_id_fkey"\nDETAIL:  Key is not present in table "sources".') is None
+_ test_one_bad_console_command_does_not_wedge_the_batch[duplicate_connector_key] _
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py:94: in test_one_bad_console_command_does_not_wedge_the_batch
+    assert error is None, detail
+E   AssertionError: variant=duplicate_connector_key error=IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "connector_configs_project_id_connector_key_key"
+E     [SQL: INSERT INTO connector_con first=PENDING poison=PENDING later=PENDING other_project=PENDING
+E   assert IntegrityError('(psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "connector_configs_project_id_connector_key_key"') is None
+__ test_documented_worker_survives_a_duplicate_source_and_keeps_running_tasks __
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py:159: in test_documented_worker_survives_a_duplicate_source_and_keeps_running_tasks
+    assert exited is None, f"worker 进程退出 returncode={exited}，另一项目的任务状态={status}\n{tail}"
+E   AssertionError: worker 进程退出 returncode=1，另一项目的任务状态=RUNNING
+E             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+E         )
+E         ^
+E       File "/workspace/.venv/lib/python3.13/site-packages/sqlalchemy/engine/default.py", line 1192, in do_execute
+E         cursor.execute(statement, parameters)
+E         ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^
+E       File "/workspace/.venv/lib/python3.13/site-packages/psycopg/cursor.py", line 117, in execute
+E         raise ex.with_traceback(None)
+E     sqlalchemy.exc.IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "sources_project_id_canonical_locator_hash_key"
+E     [SQL: INSERT INTO sources (id, project_id, kind, locator, canonical_locator_hash, approved_config, status) VALUES (%(id)s, %(project_id)s, %(kind)s, %(locator)s, %(digest)s, CAST(%(config)s AS jsonb), 'ACTIVE')]
+E     [parameters: {'id': '1bb83636-7754-4dc3-a21d-f62e49b177e5', 'project_id': '56c17950-8812-4784-af69-1bb121b8e9df', 'kind': 'url', 'locator': 'https://example.test/same-page', 'digest': 'd51743482ab8fde5de1c22bf40f3481245bdfe85573b5ad808ba59358f87157e', 'config': '{"allowed_domains": ["example.test"], "fetch_interval_seconds": 3600}'}]
+E     (Background on this error at: https://sqlalche.me/e/21/gkpj)
+E     
+E   assert 1 is None
+___ test_memory_claim_matching_deleted_bytes_does_not_wedge_memory_commands ____
+reports/audits/system_round1/repro/test_p0_02_poison_commands.py:188: in test_memory_claim_matching_deleted_bytes_does_not_wedge_memory_commands
+    assert error is None, detail
+E   AssertionError: error=ArtifactError: 已删除的产物仍占用内容地址 first=PENDING later=PENDING
+E   assert ArtifactError('已删除的产物仍占用内容地址') is None
+________ test_uploading_a_previous_answer_gives_a_usable_project_source ________
+reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py:34: in test_uploading_a_previous_answer_gives_a_usable_project_source
+    assert body["classification"] == "project_private", detail
+E   AssertionError: 上传返回 id=32ff3c4f-4442-443d-9b75-aa5b7d368db5 classification=task_answer（原答案 id=32ff3c4f-4442-443d-9b75-aa5b7d368db5）；用它当来源的任务={'status': 'NEEDS_REVIEW', 'task_id': '72e1b296-4e41-448a-b18e-223079d30930', 'stop_reason': 'allowed_sources_invalid'}
+E   assert 'task_answer' == 'project_private'
+E     
+E     - project_private
+E     + task_answer
+_________ test_deleting_an_upload_does_not_delete_another_tasks_answer _________
+reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py:54: in test_deleting_an_upload_does_not_delete_another_tasks_answer
+    assert error is None, f"删除用户自己的上传后，另一个任务的答案 {answer} 读不到了：{error}"
+E   AssertionError: 删除用户自己的上传后，另一个任务的答案 47d9187d-0c6e-42ae-b93f-b52bd5b1a11e 读不到了：not_found
+E   assert 'not_found' is None
+________ test_a_deleted_answer_does_not_break_a_later_identical_answer _________
+reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py:68: in test_a_deleted_answer_does_not_break_a_later_identical_answer
+    assert error is None, f"第二个任务写同样的答案字节时抛出 {type(error).__name__}: {error}"
+E   AssertionError: 第二个任务写同样的答案字节时抛出 ArtifactError: 已删除的产物仍占用内容地址
+E   assert ArtifactError('已删除的产物仍占用内容地址') is None
+____________ test_reuploading_deleted_bytes_is_a_new_explicit_write ____________
+reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py:80: in test_reuploading_deleted_bytes_is_a_new_explicit_write
+    assert again.status_code == 201, f"重新上传被拒绝：{again.status_code} {again.text}"
+E   AssertionError: 重新上传被拒绝：422 {"code":"tombstone_retained","message":"已删除的产物仍占用内容地址","request_id":"631104c5005c4efca94a71668a458f35","retryable":false,"details":{}}
+E   assert 422 == 201
+E    +  where 422 = <Response [422 Unprocessable Content]>.status_code
+____________ test_poisoned_execute_activity_is_not_retried_forever _____________
+reports/audits/system_round1/repro/test_p1_02_unbounded_retry.py:62: in test_poisoned_execute_activity_is_not_retried_forever
+    assert status in {"FAILED", "NEEDS_REVIEW"}, detail
+E   AssertionError: 16 秒内 execute_task 已重试到第 5 次，任务状态 RUNNING
+E   assert 'RUNNING' in {'FAILED', 'NEEDS_REVIEW'}
+------------------------------ Captured log call -------------------------------
+WARNING  temporalio.activity:_activity.py:452 Completing activity as failed ({'activity_id': '2', 'activity_type': 'execute_task', 'attempt': 1, 'namespace': 'default', 'task_queue': 'audit-poison-activity-e03e0585-1885-4437-8fa8-a2be168acdbc', 'workflow_id': 'task-dd94358a-8670-4e83-8f7e-974aafccf737', 'workflow_run_id': '01a1429a-f5ff-703a-a101-0150a2acd07c', 'workflow_type': 'DurableTaskWorkflow'})
+Traceback (most recent call last):
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 351, in _handle_start_activity_task
+    result = await self._execute_activity(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        start, running_activity, task_token, data_converter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 681, in _execute_activity
+    return await impl.execute_activity(input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 889, in execute_activity
+    return await input.fn(*input.args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 146, in execute_task
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 122, in _run_blocking
+    return await _await_off_loop(work, "running")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 107, in _await_off_loop
+    return work.result()
+           ~~~~~~~~~~~^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 221, in execute_task_effect
+    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 1178, in _ensure_answer
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 117, in put
+    artifact_id, stored_media, stored_class = self._insert_on(
+                                              ~~~~~~~~~~~~~~~^
+        owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 732, in _insert_on
+    raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+aether_storage.artifacts.ArtifactError: 已删除的产物仍占用内容地址
+WARNING  temporalio.activity:_activity.py:452 Completing activity as failed ({'activity_id': '2', 'activity_type': 'execute_task', 'attempt': 2, 'namespace': 'default', 'task_queue': 'audit-poison-activity-e03e0585-1885-4437-8fa8-a2be168acdbc', 'workflow_id': 'task-dd94358a-8670-4e83-8f7e-974aafccf737', 'workflow_run_id': '01a1429a-f5ff-703a-a101-0150a2acd07c', 'workflow_type': 'DurableTaskWorkflow'})
+Traceback (most recent call last):
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 351, in _handle_start_activity_task
+    result = await self._execute_activity(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        start, running_activity, task_token, data_converter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 681, in _execute_activity
+    return await impl.execute_activity(input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 889, in execute_activity
+    return await input.fn(*input.args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 146, in execute_task
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 122, in _run_blocking
+    return await _await_off_loop(work, "running")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 107, in _await_off_loop
+    return work.result()
+           ~~~~~~~~~~~^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 221, in execute_task_effect
+    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 1178, in _ensure_answer
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 117, in put
+    artifact_id, stored_media, stored_class = self._insert_on(
+                                              ~~~~~~~~~~~~~~~^
+        owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 732, in _insert_on
+    raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+aether_storage.artifacts.ArtifactError: 已删除的产物仍占用内容地址
+WARNING  temporalio.activity:_activity.py:452 Completing activity as failed ({'activity_id': '2', 'activity_type': 'execute_task', 'attempt': 3, 'namespace': 'default', 'task_queue': 'audit-poison-activity-e03e0585-1885-4437-8fa8-a2be168acdbc', 'workflow_id': 'task-dd94358a-8670-4e83-8f7e-974aafccf737', 'workflow_run_id': '01a1429a-f5ff-703a-a101-0150a2acd07c', 'workflow_type': 'DurableTaskWorkflow'})
+Traceback (most recent call last):
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 351, in _handle_start_activity_task
+    result = await self._execute_activity(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        start, running_activity, task_token, data_converter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 681, in _execute_activity
+    return await impl.execute_activity(input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 889, in execute_activity
+    return await input.fn(*input.args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 146, in execute_task
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 122, in _run_blocking
+    return await _await_off_loop(work, "running")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 107, in _await_off_loop
+    return work.result()
+           ~~~~~~~~~~~^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 221, in execute_task_effect
+    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 1178, in _ensure_answer
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 117, in put
+    artifact_id, stored_media, stored_class = self._insert_on(
+                                              ~~~~~~~~~~~~~~~^
+        owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 732, in _insert_on
+    raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+aether_storage.artifacts.ArtifactError: 已删除的产物仍占用内容地址
+WARNING  temporalio.activity:_activity.py:452 Completing activity as failed ({'activity_id': '2', 'activity_type': 'execute_task', 'attempt': 4, 'namespace': 'default', 'task_queue': 'audit-poison-activity-e03e0585-1885-4437-8fa8-a2be168acdbc', 'workflow_id': 'task-dd94358a-8670-4e83-8f7e-974aafccf737', 'workflow_run_id': '01a1429a-f5ff-703a-a101-0150a2acd07c', 'workflow_type': 'DurableTaskWorkflow'})
+Traceback (most recent call last):
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 351, in _handle_start_activity_task
+    result = await self._execute_activity(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        start, running_activity, task_token, data_converter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 681, in _execute_activity
+    return await impl.execute_activity(input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 889, in execute_activity
+    return await input.fn(*input.args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 146, in execute_task
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 122, in _run_blocking
+    return await _await_off_loop(work, "running")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 107, in _await_off_loop
+    return work.result()
+           ~~~~~~~~~~~^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 221, in execute_task_effect
+    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 1178, in _ensure_answer
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 117, in put
+    artifact_id, stored_media, stored_class = self._insert_on(
+                                              ~~~~~~~~~~~~~~~^
+        owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 732, in _insert_on
+    raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+aether_storage.artifacts.ArtifactError: 已删除的产物仍占用内容地址
+WARNING  temporalio.activity:_activity.py:452 Completing activity as failed ({'activity_id': '2', 'activity_type': 'execute_task', 'attempt': 5, 'namespace': 'default', 'task_queue': 'audit-poison-activity-e03e0585-1885-4437-8fa8-a2be168acdbc', 'workflow_id': 'task-dd94358a-8670-4e83-8f7e-974aafccf737', 'workflow_run_id': '01a1429a-f5ff-703a-a101-0150a2acd07c', 'workflow_type': 'DurableTaskWorkflow'})
+Traceback (most recent call last):
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 351, in _handle_start_activity_task
+    result = await self._execute_activity(
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        start, running_activity, task_token, data_converter
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 681, in _execute_activity
+    return await impl.execute_activity(input)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/.venv/lib/python3.13/site-packages/temporalio/worker/_activity.py", line 889, in execute_activity
+    return await input.fn(*input.args)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 146, in execute_task
+    return await _run_blocking(execute_task_effect, ENDPOINTS, payload)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 122, in _run_blocking
+    return await _await_off_loop(work, "running")
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 107, in _await_off_loop
+    return work.result()
+           ~~~~~~~~~~~^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/asyncio/threads.py", line 26, in to_thread
+    return await loop.run_in_executor(None, func_call)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/ubuntu/.local/share/uv/python/cpython-3.13.16-linux-x86_64-gnu/lib/python3.13/concurrent/futures/thread.py", line 59, in run
+    result = self.fn(*self.args, **self.kwargs)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 221, in execute_task_effect
+    answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources)
+  File "/workspace/services/worker/aether_worker/goal_effect.py", line 1178, in _ensure_answer
+    stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 117, in put
+    artifact_id, stored_media, stored_class = self._insert_on(
+                                              ~~~~~~~~~~~~~~~^
+        owned, project_id, attempt_id, digest, len(data), media_type, storage_key, classification
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    )
+    ^
+  File "/workspace/packages/storage/aether_storage/artifacts.py", line 732, in _insert_on
+    raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
+aether_storage.artifacts.ArtifactError: 已删除的产物仍占用内容地址
+__________ test_dispatcher_keeps_per_task_order_when_one_signal_fails __________
+reports/audits/system_round1/repro/test_p1_03_command_order.py:77: in test_dispatcher_keeps_per_task_order_when_one_signal_fails
+    assert recorder.order == ["start", "pause", "resume"], f"实际送达顺序 {recorder.order}，用户发出的顺序是 start, pause, resume"
+E   AssertionError: 实际送达顺序 ['start', 'resume', 'pause']，用户发出的顺序是 start, pause, resume
+E   assert ['start', 'resume', 'pause'] == ['start', 'pause', 'resume']
+E     
+E     At index 1 diff: 'resume' != 'pause'
+E     Use -v to get more diff
+____ test_cancel_then_resume_never_runs_the_model_when_a_signal_is_retried _____
+reports/audits/system_round1/repro/test_p1_03_command_order.py:160: in test_cancel_then_resume_never_runs_the_model_when_a_signal_is_retried
+    assert state["calls"] == 0, detail
+E   AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=CANCELLED 取消之后的模型调用次数=1
+E   assert 1 == 0
+_________ test_unsent_reservation_is_reused_after_a_retry[issue_token] _________
+reports/audits/system_round1/repro/test_p1_04_unsent_reservation.py:43: in test_unsent_reservation_is_reused_after_a_retry
+    assert after[0]["usage_status"] != "unknown", detail
+E   AssertionError: where=issue_token 重试前=[{'usage_status': 'reserved', 'dispatch': 'dispatched'}] 重试后=[{'usage_status': 'unknown', 'dispatch': 'dispatched'}] 结果={'status': 'NEEDS_REVIEW', 'task_id': '33a5ba29-3966-4418-81c3-c20cea3cf79b', 'stop_reason': 'live_call_unreconciled'} held=114700 spent=0 provider_calls=0
+E   assert 'unknown' != 'unknown'
+___ test_unsent_reservation_is_reused_after_a_retry[consume_dispatch_permit] ___
+reports/audits/system_round1/repro/test_p1_04_unsent_reservation.py:43: in test_unsent_reservation_is_reused_after_a_retry
+    assert after[0]["usage_status"] != "unknown", detail
+E   AssertionError: where=consume_dispatch_permit 重试前=[{'usage_status': 'reserved', 'dispatch': 'permitted'}] 重试后=[{'usage_status': 'unknown', 'dispatch': 'permitted'}] 结果={'status': 'NEEDS_REVIEW', 'task_id': '3d982324-9d07-4496-9ca5-4b429dd1ed0d', 'stop_reason': 'live_call_unreconciled'} held=114700 spent=0 provider_calls=0
+E   assert 'unknown' != 'unknown'
+______________ test_verification_uses_the_snapshot_the_model_saw _______________
+reports/audits/system_round1/repro/test_p1_05_verifier_evidence.py:55: in test_verification_uses_the_snapshot_the_model_saw
+    assert checked["s"] == sent, detail
+E   AssertionError: 模型只看到一份资料并正确作答（调用 1 次）；验收用的快照 6f8f5015e268 ≠ 发送时 02bd89459d14；判定 FAIL（missing_fact），任务 FAILED
+E   assert '6f8f5015e268...5dff77480b7e7' == '02bd89459d14...57c05d78d04dc'
+E     
+E     - 02bd89459d14a6fcf0ee67d6cb80185d701e42c3a0e69c1937757c05d78d04dc
+E     + 6f8f5015e268064948fce6b11cb62541f21ca026571089816035dff77480b7e7
+____________ test_contradictory_sources_are_not_verified_as_success ____________
+reports/audits/system_round1/repro/test_p1_05_verifier_evidence.py:79: in test_contradictory_sources_are_not_verified_as_success
+    assert result["status"] != "SUCCEEDED", detail
+E   AssertionError: 两份资料一个说 60 一个说 90，答案两个都写：任务 SUCCEEDED，验收 [{'verdict': 'PASS', 'reason': '工作流检查、字节完整性和目标摘录都通过'}]
+E   assert 'SUCCEEDED' != 'SUCCEEDED'
+_____________ test_candidate_cannot_forge_a_pass_by_patching_json ______________
+reports/audits/system_round1/repro/test_p1_06_grader_forgery.py:49: in test_candidate_cannot_forge_a_pass_by_patching_json
+    assert graded["verdict"] == "FAIL", f"VALUE=0 的候选让绑定套件 assert app.VALUE == 1 失败，评分器却给出 {graded['verdict']}：{graded['reason']}"
+E   AssertionError: VALUE=0 的候选让绑定套件 assert app.VALUE == 1 失败，评分器却给出 PASS：绑定套件通过且哈希一致
+E   assert 'PASS' == 'FAIL'
+E     
+E     - FAIL
+E     + PASS
+________ test_current_workflow_replays_an_old_history_that_saw_a_pause _________
+reports/audits/system_round1/repro/test_p1_07_history_replay.py:76: in test_current_workflow_replays_an_old_history_that_saw_a_pause
+    assert error is None, f"旧历史（start + pause）用当前工作流回放失败：{error}"
+E   AssertionError: 旧历史（start + pause）用当前工作流回放失败：NondeterminismError: Workflow activation completion failed: Failure { failure: Some(Failure { message: "[TMPRL1100] Nondeterminism error: Activity type of scheduled event 'execute_task' does not match activity type of activity command 'apply_task_control'", sou
+E   assert 'NondeterminismError: Workflow activation completion failed: Failure { failure: Some(Failure { message: "[TMPRL1100] N...type of scheduled event \'execute_task\' does not match activity type of activity command \'apply_task_control\'", sou' is None
+----------------------------- Captured stdout call -----------------------------
+2026-10-16T02:47:17.750653Z  WARN temporalio_sdk_core::worker::workflow: Failing workflow task run_id=01a1429b-4fd9-7284-a836-fcd8ee187e50 failure=Failure { failure: Some(Failure { message: "[TMPRL1100] Nondeterminism error: Activity type of scheduled event 'execute_task' does not match activity type of activity command 'apply_task_control'", source: "", stack_trace: "", encoded_attributes: None, cause: None, failure_info: Some(ApplicationFailureInfo(ApplicationFailureInfo { r#type: "", non_retryable: false, details: None, next_retry_delay: None, category: Unspecified })) }), force_cause: NonDeterministicError }
+___________ test_alembic_head_builds_the_same_database_as_bootstrap ____________
+reports/audits/system_round1/repro/test_p1_08_migration_drift.py:62: in test_alembic_head_builds_the_same_database_as_bootstrap
+    assert not any(missing.values()) and not any(extra.values()), detail
+E   AssertionError: alembic head 缺少：{'columns': [('budget_accounts', 'tokens_held'), ('resource_heads', 'project_id'), ('resource_heads', 'resource_id'), ('resource_heads', 'version')], 'policies': [('resource_heads', 'resource_heads_project_scope')], 'grants': [('aether_api', 'resource_heads', 'SELECT'), ('aether_worker', 'resource_heads', 'INSERT'), ('aether_worker', 'resource_heads', 'SELECT'), ('aether_worker', 'resource_heads', 'UPDATE')]}
+E     alembic head 多出：{'columns': [], 'policies': [], 'grants': []}
+E   assert (not True)
+E    +  where True = any(dict_values([[('budget_accounts', 'tokens_held'), ('resource_heads', 'project_id'), ('resource_heads', 'resource_id'),...urce_heads', 'INSERT'), ('aether_worker', 'resource_heads', 'SELECT'), ('aether_worker', 'resource_heads', 'UPDATE')]]))
+E    +    where dict_values([[('budget_accounts', 'tokens_held'), ('resource_heads', 'project_id'), ('resource_heads', 'resource_id'),...urce_heads', 'INSERT'), ('aether_worker', 'resource_heads', 'SELECT'), ('aether_worker', 'resource_heads', 'UPDATE')]]) = <built-in method values of dict object at 0x7f9a871a67c0>()
+E    +      where <built-in method values of dict object at 0x7f9a871a67c0> = {'columns': [('budget_accounts', 'tokens_held'), ('resource_heads', 'project_id'), ('resource_heads', 'resource_id'), ...ource_heads', 'INSERT'), ('aether_worker', 'resource_heads', 'SELECT'), ('aether_worker', 'resource_heads', 'UPDATE')]}.values
+______________ test_restore_keeps_bytes_written_after_the_backup _______________
+reports/audits/system_round1/repro/test_p1_09_backup_restore.py:43: in test_restore_keeps_bytes_written_after_the_backup
+    assert error is None and status == 200, f"恢复后，账本里还在的产物 {later} 读取结果 status={status} error={error}"
+E   AssertionError: 恢复后，账本里还在的产物 3826cf6c-2eed-4dd4-a181-43b7b51d6cd4 读取结果 status=None error=FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-ubuntu/pytest-19/test_restore_keeps_bytes_writt0/artifacts/e3db74f3-5dc1-429d-96a3-f22325b89d9b/37/37b0b837719e3b0a40b33aba209a5c57737ebc0ad335bc5a2aebcc97e2be536d'
+E   assert ("FileNotFoundError: [Errno 2] No such file or directory: '/tmp/pytest-of-ubuntu/pytest-19/test_restore_keeps_bytes_writt0/artifacts/e3db74f3-5dc1-429d-96a3-f22325b89d9b/37/37b0b837719e3b0a40b33aba209a5c57737ebc0ad335bc5a2aebcc97e2be536d'" is None)
+______ test_restore_does_not_abort_when_a_task_finished_after_the_backup _______
+reports/audits/system_round1/repro/test_p1_09_backup_restore.py:60: in test_restore_does_not_abort_when_a_task_finished_after_the_backup
+    assert error is None, f"任务在备份后完成，恢复整体中止：{error}"
+E   AssertionError: 任务在备份后完成，恢复整体中止：RaiseException: terminal task cannot return to schedulable status QUEUED
+E     CONTEXT:  PL/pgSQL function aether_reject_api_task_projection() line 6 at RAISE
+E   assert 'RaiseException: terminal task cannot return to schedulable status QUEUED\nCONTEXT:  PL/pgSQL function aether_reject_api_task_projection() line 6 at RAISE' is None
+____________________ test_backup_rebuilds_a_fresh_database _____________________
+reports/audits/system_round1/repro/test_p1_09_backup_restore.py:90: in test_backup_rebuilds_a_fresh_database
+    assert error is None, detail
+E   AssertionError: 备份只含 ['projects', 'artifacts', 'tasks', 'command_outbox']，缺 ['budget_accounts', 'goal_contracts', 'memories', 'model_requests', 'owners', 'task_artifacts', 'task_events', 'verification_results']；在新库恢复：ForeignKeyViolation: insert or update on table "projects" violates foreign key constraint "projects_owner_id_fkey"
+E     DETAIL:  Key (owner_id)=(d0912fd8-d248-4396-a4d1-3070163e9f7d) is not present in table "owners".
+E   assert 'ForeignKeyViolation: insert or update on table "projects" violates foreign key constraint "projects_owner_id_fkey"\nDETAIL:  Key (owner_id)=(d0912fd8-d248-4396-a4d1-3070163e9f7d) is not present in table "owners".' is None
+_____________ test_live_run_report_does_not_claim_scripted_offline _____________
+reports/audits/system_round1/repro/test_p2_01_evidence_labels.py:34: in test_live_run_report_does_not_claim_scripted_offline
+    assert report["model_mode"] != "scripted", detail
+E   AssertionError: 真实调用了 1 次 live 传输，报告写的是 model_mode=scripted offline=True
+E   assert 'scripted' != 'scripted'
+_________________ test_missing_usage_is_unknown_not_an_overrun _________________
+reports/audits/system_round1/repro/test_p2_01_evidence_labels.py:45: in test_missing_usage_is_unknown_not_an_overrun
+    assert row["usage_status"] == "unknown", detail
+E   AssertionError: 供应商没有回报用量：usage_status=observed book_result=overrun 结果={'status': 'NEEDS_REVIEW', 'task_id': '3cd7e5ed-055d-4f66-804e-52d755ab1ba6', 'stop_reason': 'budget_unreconciled'}
+E   assert 'observed' == 'unknown'
+E     
+E     - unknown
+E     + observed
+_________ test_local_price_table_is_not_labelled_as_a_provider_receipt _________
+reports/audits/system_round1/repro/test_p2_01_evidence_labels.py:95: in test_local_price_table_is_not_labelled_as_a_provider_receipt
+    assert row["source"] != "provider_response", detail
+E   AssertionError: 上游响应里没有任何费用字段；账本记 usage_status=known actual=225 cost_source=provider_response
+E   assert 'provider_response' != 'provider_response'
+_________ test_public_contract_hash_matches_the_authoritative_contract _________
+reports/audits/system_round1/repro/test_p2_02_projection.py:57: in test_public_contract_hash_matches_the_authoritative_contract
+    assert revised.status_code in {409, 422}, detail
+E   AssertionError: 任务 SUCCEEDED；PUT /contract → 200；公开视图 contract_sha256=ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff；权威合同=ccc67fad3111f660463a3729c4e94354d27b53fdce2d29da7145093d3143a5ab；验收绑定={'ccc67fad3111f660463a3729c4e94354d27b53fdce2d29da7145093d3143a5ab'}
+E   assert 200 in {409, 422}
+E    +  where 200 = <Response [200 OK]>.status_code
+_____________ test_terminal_status_is_visible_in_the_event_stream ______________
+reports/audits/system_round1/repro/test_p2_02_projection.py:79: in test_terminal_status_is_visible_in_the_event_stream
+    assert "SUCCEEDED" in statuses or any("succeeded" in kind for kind in kinds), detail
+E   AssertionError: 任务已 SUCCEEDED，事件流里只有 ['task.accepted', 'task.running', 'research.call']，payload.status=['QUEUED', 'RUNNING', None]
+E   assert ('SUCCEEDED' in ['QUEUED', 'RUNNING', None] or False)
+E    +  where False = any(<generator object test_terminal_status_is_visible_in_the_event_stream.<locals>.<genexpr> at 0x7f9a7df57d30>)
+____________ test_api_command_event_and_worker_event_do_not_collide ____________
+reports/audits/system_round1/repro/test_p2_03_event_sequence.py:52: in test_api_command_event_and_worker_event_do_not_collide
+    assert not errors, f"worker 事件提交后，同时进行的 API 命令事件失败：{errors}"
+E   AssertionError: worker 事件提交后，同时进行的 API 命令事件失败：['IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "task_events_project_id_task_id_sequence_key"\n[SQL: INSERT INTO task_events (pro']
+E   assert not ['IntegrityError: (psycopg.errors.UniqueViolation) duplicate key value violates unique constraint "task_events_project_id_task_id_sequence_key"\n[SQL: INSERT INTO task_events (pro']
+______________ test_owner_can_roll_a_canary_back_through_the_api _______________
+reports/audits/system_round1/repro/test_p2_04_skill_lifecycle.py:90: in test_owner_can_roll_a_canary_back_through_the_api
+    assert _status(worker, owner, project_id, rollback.json()["command_id"]) == "DELIVERED", detail
+E   AssertionError: 回滚命令状态=FAILED，canary 仍指向 [{'v': '7a26f132-1243-464f-9f6e-a4e1ce100573'}]（v1=71c21c2f-c066-4a3d-a870-c192ba14b738 v2=7a26f132-1243-464f-9f6e-a4e1ce100573）
+E   assert 'FAILED' == 'DELIVERED'
+E     
+E     - DELIVERED
+E     + FAILED
+_____ test_promotion_requires_an_approval_and_evaluation_for_this_version ______
+reports/audits/system_round1/repro/test_p2_04_skill_lifecycle.py:114: in test_promotion_requires_an_approval_and_evaluation_for_this_version
+    assert status == "FAILED", detail
+E   AssertionError: 用一个发邮件的审批、一个评测别的版本且证据不足的评测去晋升 v2：命令=DELIVERED canary=[{'v': '5c057cc1-e908-47ea-949b-b64ba612f8e6'}]
+E   assert 'DELIVERED' == 'FAILED'
+E     
+E     - FAILED
+E     + DELIVERED
+_______ test_model_token_dies_with_its_task_and_cannot_bypass_the_ledger _______
+reports/audits/system_round1/repro/test_p2_05_gateway_token.py:38: in test_model_token_dies_with_its_task_and_cannot_bypass_the_ledger
+    assert replayed == 0, detail
+E   AssertionError: 任务已 SUCCEEDED，旧令牌又成功调用了 3 次供应商（传输共 4 次），账本 requests_admitted 仍是 1
+E   assert 3 == 0
+___________ test_fetch_rejects_non_public_addresses[100.100.100.200] ___________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:26: in test_fetch_rejects_non_public_addresses
+    with pytest.raises(IngestError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE IngestError
+_____________ test_fetch_rejects_non_public_addresses[100.64.0.1] ______________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:26: in test_fetch_rejects_non_public_addresses
+    with pytest.raises(IngestError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE IngestError
+_______________ test_fetch_rejects_non_public_addresses[fec0::1] _______________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:26: in test_fetch_rejects_non_public_addresses
+    with pytest.raises(IngestError):
+         ^^^^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE IngestError
+________ test_database_refuses_to_rewrite_a_cancelled_task_as_succeeded ________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:44: in test_database_refuses_to_rewrite_a_cancelled_task_as_succeeded
+    assert error is not None, f"aether_worker 角色把 CANCELLED 改成了 {final}，数据库没有拦"
+E   AssertionError: aether_worker 角色把 CANCELLED 改成了 SUCCEEDED，数据库没有拦
+E   assert None is not None
+____________ test_mcp_stdio_argv_rejects_shell_interpreters[argv0] _____________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:56: in test_mcp_stdio_argv_rejects_shell_interpreters
+    with pytest.raises(McpError):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE McpError
+____________ test_mcp_stdio_argv_rejects_shell_interpreters[argv1] _____________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:56: in test_mcp_stdio_argv_rejects_shell_interpreters
+    with pytest.raises(McpError):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE McpError
+____________ test_mcp_stdio_argv_rejects_shell_interpreters[argv2] _____________
+reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py:56: in test_mcp_stdio_argv_rejects_shell_interpreters
+    with pytest.raises(McpError):
+         ^^^^^^^^^^^^^^^^^^^^^^^
+E   Failed: DID NOT RAISE McpError
+_____________________ test_cancel_stops_the_job_container ______________________
+reports/audits/system_round1/repro/test_p2_07_runner_cancel.py:43: in test_cancel_stops_the_job_container
+    assert running != "true", detail
+E   AssertionError: cancel 返回 CANCELLED，作业容器 e4dfce755aa4 运行状态=true
+E   assert 'true' != 'true'
+_________ test_rerunning_bootstrap_does_not_lock_out_running_services __________
+reports/audits/system_round1/repro/test_zz_p2_08_password_rotation.py:36: in test_rerunning_bootstrap_does_not_lock_out_running_services
+    assert error is None, f"再次执行 ensure_database 之后，已在运行的 API 角色连接失败：{error}"
+E   AssertionError: 再次执行 ensure_database 之后，已在运行的 API 角色连接失败：OperationalError: (psycopg.OperationalError) connection failed: connection to server at "127.0.0.1", port 5432 failed: FATAL:  password authentication failed for user "aether_api
+E   assert 'OperationalError: (psycopg.OperationalError) connection failed: connection to server at "127.0.0.1", port 5432 failed: FATAL:  password authentication failed for user "aether_api' is None
+=============================== warnings summary ===============================
+reports/audits/system_round1/repro/test_p2_01_evidence_labels.py::test_local_price_table_is_not_labelled_as_a_provider_receipt
+  /workspace/.venv/lib/python3.13/site-packages/pydantic/_internal/_generate_schema.py:1507: UserWarning: Item 'summary' on TypedDict class 'ChatCompletionReasoningItem' is using the `ReadOnly` qualifier. Pydantic will not protect items from any mutation on dictionary instances.
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+==================================== PASSES ====================================
+- generated xml file: /workspace/reports/audits/system_round1/repro/output/repro_results.xml -
+=========================== short test summary info ============================
+PASSED reports/audits/system_round1/repro/test_c00_controls.py::test_control_cross_project_source_is_rejected_before_any_call
+PASSED reports/audits/system_round1/repro/test_c00_controls.py::test_control_api_role_cannot_write_verifier_evidence
+PASSED reports/audits/system_round1/repro/test_c00_controls.py::test_control_rls_hides_rows_without_the_project_setting
+PASSED reports/audits/system_round1/repro/test_p1_06_grader_forgery.py::test_control_without_the_patch_still_fails
+FAILED reports/audits/system_round1/repro/test_p0_01_memory_as_source.py::test_deleted_memory_claim_never_reaches_the_model_or_the_verifier
+FAILED reports/audits/system_round1/repro/test_p0_01_memory_as_source.py::test_corrected_memory_old_claim_is_not_ground_truth
+FAILED reports/audits/system_round1/repro/test_p0_01_memory_as_source.py::test_high_sensitivity_memory_is_not_sent_to_the_cloud_model
+FAILED reports/audits/system_round1/repro/test_p0_02_poison_commands.py::test_one_bad_console_command_does_not_wedge_the_batch[duplicate_source_locator]
+FAILED reports/audits/system_round1/repro/test_p0_02_poison_commands.py::test_one_bad_console_command_does_not_wedge_the_batch[feedback_for_unknown_source]
+FAILED reports/audits/system_round1/repro/test_p0_02_poison_commands.py::test_one_bad_console_command_does_not_wedge_the_batch[duplicate_connector_key]
+FAILED reports/audits/system_round1/repro/test_p0_02_poison_commands.py::test_documented_worker_survives_a_duplicate_source_and_keeps_running_tasks
+FAILED reports/audits/system_round1/repro/test_p0_02_poison_commands.py::test_memory_claim_matching_deleted_bytes_does_not_wedge_memory_commands
+FAILED reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py::test_uploading_a_previous_answer_gives_a_usable_project_source
+FAILED reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py::test_deleting_an_upload_does_not_delete_another_tasks_answer
+FAILED reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py::test_a_deleted_answer_does_not_break_a_later_identical_answer
+FAILED reports/audits/system_round1/repro/test_p1_01_dedup_and_tombstone.py::test_reuploading_deleted_bytes_is_a_new_explicit_write
+FAILED reports/audits/system_round1/repro/test_p1_02_unbounded_retry.py::test_poisoned_execute_activity_is_not_retried_forever
+FAILED reports/audits/system_round1/repro/test_p1_03_command_order.py::test_dispatcher_keeps_per_task_order_when_one_signal_fails
+FAILED reports/audits/system_round1/repro/test_p1_03_command_order.py::test_cancel_then_resume_never_runs_the_model_when_a_signal_is_retried
+FAILED reports/audits/system_round1/repro/test_p1_04_unsent_reservation.py::test_unsent_reservation_is_reused_after_a_retry[issue_token]
+FAILED reports/audits/system_round1/repro/test_p1_04_unsent_reservation.py::test_unsent_reservation_is_reused_after_a_retry[consume_dispatch_permit]
+FAILED reports/audits/system_round1/repro/test_p1_05_verifier_evidence.py::test_verification_uses_the_snapshot_the_model_saw
+FAILED reports/audits/system_round1/repro/test_p1_05_verifier_evidence.py::test_contradictory_sources_are_not_verified_as_success
+FAILED reports/audits/system_round1/repro/test_p1_06_grader_forgery.py::test_candidate_cannot_forge_a_pass_by_patching_json
+FAILED reports/audits/system_round1/repro/test_p1_07_history_replay.py::test_current_workflow_replays_an_old_history_that_saw_a_pause
+FAILED reports/audits/system_round1/repro/test_p1_08_migration_drift.py::test_alembic_head_builds_the_same_database_as_bootstrap
+FAILED reports/audits/system_round1/repro/test_p1_09_backup_restore.py::test_restore_keeps_bytes_written_after_the_backup
+FAILED reports/audits/system_round1/repro/test_p1_09_backup_restore.py::test_restore_does_not_abort_when_a_task_finished_after_the_backup
+FAILED reports/audits/system_round1/repro/test_p1_09_backup_restore.py::test_backup_rebuilds_a_fresh_database
+FAILED reports/audits/system_round1/repro/test_p2_01_evidence_labels.py::test_live_run_report_does_not_claim_scripted_offline
+FAILED reports/audits/system_round1/repro/test_p2_01_evidence_labels.py::test_missing_usage_is_unknown_not_an_overrun
+FAILED reports/audits/system_round1/repro/test_p2_01_evidence_labels.py::test_local_price_table_is_not_labelled_as_a_provider_receipt
+FAILED reports/audits/system_round1/repro/test_p2_02_projection.py::test_public_contract_hash_matches_the_authoritative_contract
+FAILED reports/audits/system_round1/repro/test_p2_02_projection.py::test_terminal_status_is_visible_in_the_event_stream
+FAILED reports/audits/system_round1/repro/test_p2_03_event_sequence.py::test_api_command_event_and_worker_event_do_not_collide
+FAILED reports/audits/system_round1/repro/test_p2_04_skill_lifecycle.py::test_owner_can_roll_a_canary_back_through_the_api
+FAILED reports/audits/system_round1/repro/test_p2_04_skill_lifecycle.py::test_promotion_requires_an_approval_and_evaluation_for_this_version
+FAILED reports/audits/system_round1/repro/test_p2_05_gateway_token.py::test_model_token_dies_with_its_task_and_cannot_bypass_the_ledger
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_fetch_rejects_non_public_addresses[100.100.100.200]
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_fetch_rejects_non_public_addresses[100.64.0.1]
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_fetch_rejects_non_public_addresses[fec0::1]
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_database_refuses_to_rewrite_a_cancelled_task_as_succeeded
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_mcp_stdio_argv_rejects_shell_interpreters[argv0]
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_mcp_stdio_argv_rejects_shell_interpreters[argv1]
+FAILED reports/audits/system_round1/repro/test_p2_06_defense_in_depth.py::test_mcp_stdio_argv_rejects_shell_interpreters[argv2]
+FAILED reports/audits/system_round1/repro/test_p2_07_runner_cancel.py::test_cancel_stops_the_job_container
+FAILED reports/audits/system_round1/repro/test_zz_p2_08_password_rotation.py::test_rerunning_bootstrap_does_not_lock_out_running_services
+=================== 43 failed, 4 passed, 1 warning in 50.47s ===================
+EXIT=1

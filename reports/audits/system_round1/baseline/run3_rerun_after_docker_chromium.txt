@@ -1,0 +1,35 @@
+.................................FF                                      [100%]
+=================================== FAILURES ===================================
+________________ test_pinned_hermes_cli_prints_its_real_version ________________
+
+tmp_path = PosixPath('/tmp/pytest-of-ubuntu/pytest-2/test_pinned_hermes_cli_prints_0')
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f4407130b50>
+
+    def test_pinned_hermes_cli_prints_its_real_version(tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path / "home"))
+        lock = json.loads(Path("config/hermes.lock.json").read_text(encoding="utf-8"))
+        probed = probe_cli()
+>       assert probed["status"] == "probed", probed
+E       AssertionError: {'status': 'not_run', 'reason': 'hermes_cli_missing', 'version': None, 'path': None}
+E       assert 'not_run' == 'probed'
+E         
+E         - probed
+E         + not_run
+
+tests/integration/test_hermes_probe.py:12: AssertionError
+________________ test_pinned_hermes_identity_and_local_protocol ________________
+
+monkeypatch = <_pytest.monkeypatch.MonkeyPatch object at 0x7f4407133550>
+
+    def test_pinned_hermes_identity_and_local_protocol(monkeypatch) -> None:
+>       assert HERMES_BIN.is_file()
+E       AssertionError: assert False
+E        +  where False = is_file()
+E        +    where is_file = PosixPath('/workspace/.hermes/.venv/bin/hermes').is_file
+
+tests/integration/test_hermes_compare_protocol.py:56: AssertionError
+=========================== short test summary info ============================
+FAILED tests/integration/test_hermes_probe.py::test_pinned_hermes_cli_prints_its_real_version
+FAILED tests/integration/test_hermes_compare_protocol.py::test_pinned_hermes_identity_and_local_protocol
+2 failed, 33 passed in 40.84s
+RERUN_EXIT=1

@@ -1,0 +1,6 @@
+# test_p1_03::test_cancel_then_resume_never_runs_the_model_when_a_signal_is_retried 重复 5 次（真实 PostgreSQL + Temporal），每行是该次的断言信息
+run1: AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=CANCELLED 取消之后的模型调用次数=1
+run2: AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=CANCELLED 取消之后的模型调用次数=1
+run3: AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=CANCELLED 取消之后的模型调用次数=1
+run4: AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=CANCELLED 取消之后的模型调用次数=1
+run5: AssertionError: 送达顺序=['resume', 'cancel'] 最终状态=SUCCEEDED 取消之后的模型调用次数=1
