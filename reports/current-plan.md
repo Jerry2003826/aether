@@ -1,6 +1,40 @@
+# SYS-06 记忆来源与 SYS-04 验收条款
+
+任务：外部审计基线 `8b90363`，变基到 `85d27d3`。只修 SYS-06 与 SYS-04。不改 SYS-01、SYS-02、SYS-03、SYS-07、SYS-08 的文件，不改 `contracts/`、`reference/`、`STATUS.json`。
+
+相关合同：记忆认识状态、产物哈希、`verification_results`、`goal_contracts`。不改合同文件。
+
+拟改路径：
+
+- `services/worker/aether_worker/memory.py`
+- `services/worker/aether_worker/goal_effect.py`
+- `services/api/aether_api/memory_routes.py`
+- `tests/integration/test_memory.py`
+- `tests/integration/test_r6_memory_contract.py`
+- `tests/unit/test_r6_acceptance.py`
+- `docs/DECISIONS.md`（ADR-F31；ADR-F30 已由 SYS-02/07 使用）
+
+测试命令：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --no-build pytest -q tests/unit
+AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build pytest -q tests/integration
+uv run --locked --no-build python scripts/doctor.py --require-services
+```
+
+进度：先写会失败的集成用例，再改确认继承、降级授权和测试运行账本，以及草案条款冻结。变基时 ADR-F30 冲突，本决定改为 ADR-F31，并保留 SYS-02/07 的决定与交接。
+
+结果：确认不降敏、测试运行要验证者账本、草案条款被冻结。正向 `observed_test` 由 `test_test_run_requires_verifier_ledger_bound_to_the_bytes` 覆盖。全量结果见 `reports/HANDOFF.md`。
+
+阻塞：无。
+
+决策：ADR-F31。
+
 # SYS-02 协议评分与 SYS-07 指标校验
 
-任务：关闭复审 `8b90363` 的 SYS-02 与 SYS-07。不改 SYS-01/03/04/06/08 所属文件。
+任务：关闭复审 `8b90363` 的 SYS-02 与 SYS-07。不改 SYS-01/03/04/06/08 所属文件。该工作已由 PR #21 合入 `85d27d3`。
 
 相关合同：不改 `contracts/`、`reference/`、验收标准或 `STATUS.json`。
 
@@ -46,6 +80,6 @@ uv run --locked --no-build python scripts/doctor.py --require-services          
 
 阻塞：无 live model key。不改 `live_ready`。`os.kill(-1, SIGKILL)` 只在评分容器里执行，宿主机测试不调用它。
 
-未覆盖、不能称为已修复：容器逃逸、ptrace 父进程、猜中期望值、不能归约的白盒断言。SYS-01/03/04/05/06/08/09 不由本分支关闭。
+未覆盖、不能称为已修复：容器逃逸、ptrace 父进程、猜中期望值、不能归约的白盒断言。SYS-01/03/04/05/06/08/09 不由该分支关闭。
 
 决策：ADR-F30。

@@ -40,6 +40,14 @@ from aether_worker.research import (
 
 CRITERION_ID = "goal_artifact"
 VERIFIER_VERSION = "goal-artifact-9"
+_CRITERION_TEMPLATES = frozenset({
+    "artifact_exists",
+    "json_schema",
+    "trusted_test_suite",
+    "citation_integrity",
+    "source_coverage",
+    "human_review",
+})
 OUTPUT_TOKEN_CAP = 256
 TRUNCATED_ANSWER = "模型输出因长度上限被截断，不能当作完整回答"
 # Local dispatch ceiling, not a provider price list. A model priced above this
@@ -423,7 +431,7 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
                 {"contract_id": existing["id"], "project_id": project_id, "task_id": task_id},
             )
         return existing["id"], existing["digest"]
-    content = {"criterion_id": CRITERION_ID, "goal": goal}
+    content = _frozen_contract(database, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal)
     raw = canonical_json(content)
     digest = sha256_text(raw)
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -444,7 +452,64 @@ def _ensure_contract(database: Database, *, owner_id: str, project_id: str, task
     return str(contract_id), digest
 
 
-def _load_authoritative_contract(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, str] | None:
+def _frozen_contract(database: Database, *, owner_id: str, project_id: str, task_id: str, goal: str) -> dict[str, Any]:
+    """Freeze the owner's draft criteria. Do not replace them with the automatic goal check."""
+    draft = _load_draft(database, owner_id, project_id, task_id)
+    if draft is None:
+        return {"criterion_id": CRITERION_ID, "goal": goal}
+    frozen: dict[str, Any] = {"goal": goal, "criteria": _freeze_criteria(draft, goal)}
+    required = draft.get("required_artifacts")
+    if isinstance(required, list) and required and all(isinstance(item, str) and item for item in required):
+        frozen["required_artifacts"] = list(required)
+    return frozen
+
+
+def _load_draft(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, Any] | None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text("SELECT draft_contract FROM tasks WHERE project_id = :project_id AND id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar()
+    if raw is None:
+        return None
+    if isinstance(raw, str):
+        raw = json.loads(raw)
+    if not isinstance(raw, dict):
+        raise RuntimeError("draft acceptance criteria are not an approved contract")
+    return raw
+
+
+def _freeze_criteria(draft: dict[str, Any], goal: str) -> list[dict[str, Any]]:
+    draft_goal = draft.get("goal")
+    if not isinstance(draft_goal, str) or draft_goal.strip() != goal.strip():
+        raise RuntimeError("draft goal does not match the approved task")
+    criteria = draft.get("criteria")
+    if not isinstance(criteria, list) or not criteria:
+        raise RuntimeError("approved draft has no acceptance criteria")
+    frozen: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in criteria:
+        if not _criterion_shape(item):
+            raise RuntimeError("approved draft acceptance criteria are incomplete")
+        criterion_id = str(item["criterion_id"])
+        if criterion_id in seen:
+            raise RuntimeError("approved draft repeats a criterion")
+        seen.add(criterion_id)
+        frozen.append(json.loads(json.dumps(item)))
+    if not any(item.get("mandatory", True) is not False for item in frozen):
+        raise RuntimeError("approved draft has no mandatory criterion")
+    return frozen
+
+
+def _criterion_shape(item: object) -> bool:
+    if not isinstance(item, dict):
+        return False
+    criterion_id = item.get("criterion_id")
+    description = item.get("description")
+    return isinstance(criterion_id, str) and bool(criterion_id) and item.get("template") in _CRITERION_TEMPLATES and isinstance(description, str) and bool(description)
+
+
+def _load_authoritative_contract(database: Database, owner_id: str, project_id: str, task_id: str) -> dict[str, Any] | None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         current = conn.execute(
             text("SELECT current_contract_id::text FROM tasks WHERE project_id = :project_id AND id = :task_id"),
@@ -470,7 +535,13 @@ def _load_authoritative_contract(database: Database, owner_id: str, project_id: 
     if row is None:
         return None
     digest = sha256_text(canonical_json(row["content"]))
-    return {"id": str(row["id"]), "digest": digest, "stored_digest": str(row["contract_sha256"])}
+    content = row["content"]
+    if isinstance(content, str):
+        parsed = json.loads(content)
+        content = parsed if isinstance(parsed, dict) else {}
+    elif not isinstance(content, dict):
+        content = {}
+    return {"id": str(row["id"]), "digest": digest, "stored_digest": str(row["contract_sha256"]), "content": content}
 
 
 def _ensure_artifact(
@@ -633,6 +704,13 @@ def _ensure_verification(
     else:
         outcome = "pass"
         detail = "工作流检查、字节完整性和目标摘录都通过"
+    acceptance_state = ""
+    contract_content = authoritative.get("content") if isinstance(authoritative, dict) else None
+    if outcome == "pass" and isinstance(contract_content, dict) and "criteria" in contract_content:
+        acceptance_state, acceptance_detail = _acceptance_outcome(contract_content, answer=readable, sources=sources, goal=goal)
+        if acceptance_state != "pass":
+            outcome = acceptance_state
+            detail = acceptance_detail
     if stored_artifact_sha != observed or deleted or not byte_ok:
         expected = "FAIL"
     elif outcome == "unverifiable":
@@ -672,6 +750,8 @@ def _ensure_verification(
         "citation": "pass" if cited else "fail",
         "contract_binding": "pass" if contract_ok else "fail",
     }
+    if acceptance_state:
+        report["acceptance_criteria"] = acceptance_state
     stored = store.put(
         owner_id=owner_id,
         project_id=project_id,
@@ -1409,6 +1489,77 @@ def _answer_text(data: bytes | None) -> str:
         return data.decode("utf-8").strip()
     except UnicodeError:
         return ""
+
+
+def _acceptance_outcome(content: dict[str, Any], *, answer: bytes | None, sources: list[str], goal: str) -> tuple[str, str]:
+    if "criteria" not in content:
+        return "pass", ""
+    criteria = content.get("criteria")
+    if not isinstance(criteria, list) or not criteria or any(not isinstance(item, dict) for item in criteria):
+        return "unverifiable", "冻结的验收条款不可读"
+    mandatory = [item for item in criteria if item.get("mandatory", True) is not False]
+    if not mandatory:
+        return "unverifiable", "冻结的验收条款没有强制项"
+    states = [_one_criterion(item, answer=answer, sources=sources, goal=goal) for item in mandatory]
+    if any(state == "fail" for state in states):
+        return "fail", "用户批准的验收条款未满足"
+    if any(state != "pass" for state in states):
+        return "unverifiable", "用户批准的验收条款不能用自动目标条款代替"
+    return "pass", ""
+
+
+def _one_criterion(item: dict[str, Any], *, answer: bytes | None, sources: list[str], goal: str) -> str:
+    template = item.get("template")
+    parameters = item.get("parameters") if isinstance(item.get("parameters"), dict) else {}
+    if template == "artifact_exists":
+        return _artifact_exists_criterion(parameters, answer)
+    if template == "citation_integrity":
+        return _citation_criterion(parameters, answer, sources, goal)
+    if template == "source_coverage":
+        return _source_coverage_criterion(parameters, sources)
+    return "unverifiable"
+
+
+def _artifact_exists_criterion(parameters: dict[str, Any], answer: bytes | None) -> str:
+    logical = parameters.get("logical_name")
+    minimum = parameters.get("minimum_bytes")
+    if not isinstance(logical, str) or not logical.strip():
+        return "fail"
+    if type(minimum) is not int or minimum < 1:
+        return "fail"
+    if answer is None or len(answer) < minimum:
+        return "fail"
+    return "pass"
+
+
+def _citation_criterion(parameters: dict[str, Any], answer: bytes | None, sources: list[str], goal: str) -> str:
+    minimum = parameters.get("min_citations")
+    if parameters.get("require_all_valid") is not True:
+        return "fail"
+    if type(minimum) is not int or minimum < 1 or answer is None:
+        return "fail"
+    try:
+        text_value = answer.decode("utf-8")
+    except UnicodeError:
+        return "fail"
+    facts = required_facts(source_text="\n".join(sources), goal=goal)
+    cited = [fact for fact in facts if cites_fact(text_value, fact)]
+    if len(cited) < minimum or len(cited) != len(facts):
+        return "fail"
+    return "pass"
+
+
+def _source_coverage_criterion(parameters: dict[str, Any], sources: list[str]) -> str:
+    minimum = parameters.get("minimum_distinct_sources")
+    required = parameters.get("required_source_ids")
+    if type(minimum) is not int or minimum < 1 or not isinstance(required, list):
+        return "fail"
+    if any(not isinstance(item, str) for item in required) or required:
+        return "unverifiable"
+    distinct = {item.strip() for item in sources if item.strip()}
+    if len(distinct) < minimum:
+        return "fail"
+    return "pass"
 
 
 def _goal_state(data: bytes | None, goal: str, sources: list[str]) -> str:

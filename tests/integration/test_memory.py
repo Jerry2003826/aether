@@ -174,7 +174,7 @@ def test_observed_test_requires_a_project_test_run_artifact(client, role_urls, t
         store,
         owner_id=owner_id,
         project_id=project_id,
-        claim="这次测试运行记录了结果",
+        claim="所有测试都通过",
         kind="semantic",
         category="fact",
         requested_status="observed_test",
@@ -185,4 +185,4 @@ def test_observed_test_requires_a_project_test_run_artifact(client, role_urls, t
     statuses = {item[0]: item[1] for item in rows}
     assert statuses[plain_id] == "proposed"
     assert statuses[foreign_id] == "proposed"
-    assert statuses[verified_id] == "observed_test"
+    assert statuses[verified_id] == "proposed"
