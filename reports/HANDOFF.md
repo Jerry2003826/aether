@@ -12,9 +12,11 @@ PR #30 已把采集解析记为 ADR-F41。未合并的 PR #31 已使用 ADR-F42�
 - 子 frame 的 document 请求直接中止，不抓取。证明：`test_child_frame_documents_are_not_fetched`、`test_child_frame_document_is_not_fetched`。
 - Tor 打开后，浏览器容器启动前探测容器内 9050 的 SOCKS 握手；夹具模式探测 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
 
-本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 在 0.03 秒失败，失败信息是 Docker is required，不是 skip。变基前的 `b57c71f` 曾在 CI run 38955390710 里得到 `390 passed, 1 warning in 765.22s`。那次结果不能当作这次提交的证据。这次提交的 CI 还没有记录。`live_ready` 仍是 pending。
+本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 在 0.03 秒失败，失败信息是 Docker is required，不是 skip。
 
-本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。`pytest tests/unit` 324 passed。
+`74cbfd8` 的 CI 已通过。workflow https://github.com/Jerry2003826/aether/actions/runs/38959600766 ：`pack-and-unit` 成功，integration 日志是 `392 passed, 4 warnings in 793.36s (0:13:13)`。比变基前的 390 多 2，对应新增的子 frame 和审计测试；pytest 没有 skipped。容器测试的断言不会在 `-q` 成功日志里逐条打印，失败时才会把容器输出打出来。这次没有失败。Sonar 质量门 OK，`new_security_rating` 的 actualValue 是 1。Security Reviewer 检查成功，没有新的 HIGH 或 MEDIUM 评论。Approval Agent 仍不构成批准，没有合并。`live_ready` 仍是 pending。
+
+本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。`pytest tests/unit` 324 passed。全套 integration 没有在本机跑。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 

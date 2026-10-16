@@ -10,4 +10,4 @@
 - Tor 代理就绪后才启动浏览器；夹具模式等 8080
 - `playwright==1.64.0`
 
-结果：冻结检查通过。单元测试 324 passed。本机没有 Docker、PostgreSQL 和 Temporal。容器测试在 `AETHER_REQUIRE_SERVICES=1` 下失败，不跳过。全套集成测试和这次提交的 CI 还没有跑。`live_ready` 保持 pending。
+结果：冻结检查通过。单元测试 324 passed。本机没有 Docker，容器测试在 `AETHER_REQUIRE_SERVICES=1` 下失败，不跳过。`74cbfd8` 的 CI run 38959600766：integration `392 passed, 4 warnings in 793.36s`，Sonar 质量门通过。`live_ready` 保持 pending。
