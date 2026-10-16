@@ -73,11 +73,17 @@ export AETHER_POSTGRES_PASSWORD='生成本机口令，不要写入仓库'
 docker compose -f infra/compose.yaml up
 ```
 
-库和角色由 `aether_storage.bootstrap.ensure_database` 创建。它生成四个角色的口令并返回连接串，口令不进 Git。下面这条会把带口令的 URL 打到终端，用完即从终端记录中去掉：
+库和角色由 `aether_storage.bootstrap.ensure_database` 创建。第一次运行时它为四个角色生成口令并返回连接串，口令不进 Git。下面这条会把带口令的 URL 打到终端，用完即从终端记录中去掉：
 
 ```sh
 export AETHER_ADMIN_DATABASE_URL='postgresql://postgres:口令@127.0.0.1:5432/postgres'
 uv run --locked --no-build python -c 'import json, os; from aether_storage.bootstrap import ensure_database; print(json.dumps(ensure_database(os.environ["AETHER_ADMIN_DATABASE_URL"]), indent=2))'
+```
+
+升级时可以重跑同一条命令补齐表、授权和迁移标记。已存在的角色保持原口令，返回的字典里不会有它们，正在运行的 API 和 worker 不受影响。确实要换口令时才显式轮换；轮换会让所有用旧口令连接的进程立即断库，要先停服务，换上新 URL 再启动：
+
+```sh
+uv run --locked --no-build python -c 'import json, os; from aether_storage.bootstrap import ensure_database; print(json.dumps(ensure_database(os.environ["AETHER_ADMIN_DATABASE_URL"], rotate_passwords=True), indent=2))'
 ```
 
 把返回的 `aether_api` URL 设为 `AETHER_DATABASE_URL`。产品配置名见 [`.env.example`](.env.example)，示例里的值是空的：

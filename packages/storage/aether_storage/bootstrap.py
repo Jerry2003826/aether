@@ -51,7 +51,8 @@ def _stamp_alembic_head(conn: psycopg.Connection) -> None:
         conn.execute("UPDATE alembic_version SET version_num = %s", (ALEMBIC_HEAD,))
 
 
-def ensure_database(admin_url: str, database: str = "aether", *, rotate_passwords: bool = True) -> dict[str, str]:
+def ensure_database(admin_url: str, database: str = "aether", *, rotate_passwords: bool = False) -> dict[str, str]:
+    """Return URLs only for roles whose password was set here; existing roles keep theirs unless rotation is requested."""
     with psycopg.connect(admin_url, autocommit=True) as conn:
         exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (database,)).fetchone()
         if exists is None:

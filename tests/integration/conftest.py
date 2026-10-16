@@ -29,7 +29,7 @@ def _admin_url() -> str:
 
 @pytest.fixture(scope="session")
 def role_urls() -> dict[str, str]:
-    return ensure_database(_admin_url())
+    return ensure_database(_admin_url(), rotate_passwords=True)
 
 
 @pytest.fixture
