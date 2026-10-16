@@ -1,0 +1,10 @@
+litellm 1.105.1; usage 固定为 prompt=1000 completion=500；响应里没有费用字段
+requested=audit-model    upstream_reported=audit-model    response_cost=None
+requested=audit-model    upstream_reported=deepseek-chat  response_cost=None
+requested=audit-model    upstream_reported=gpt-4o-mini    response_cost=0.00045
+requested=audit-model    upstream_reported=gpt-4o         response_cost=0.0075
+requested=deepseek-chat  upstream_reported=audit-model    response_cost=None
+requested=deepseek-chat  upstream_reported=deepseek-chat  response_cost=None
+requested=deepseek-chat  upstream_reported=gpt-4o-mini    response_cost=0.00045
+requested=deepseek-chat  upstream_reported=gpt-4o         response_cost=0.0075
+EXIT=0
