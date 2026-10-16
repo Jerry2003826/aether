@@ -88,9 +88,9 @@ uv run --locked --no-build python scripts/doctor.py --require-services          
 ```text
 uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
-uv run --locked --no-build pytest -q tests/unit                                   # 200 passed
+uv run --locked --no-build pytest -q tests/unit                                   # 227 passed
 AETHER_REQUIRE_SERVICES=1 PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration
-# 333 passed，1 warning（pydantic ReadOnly，既有）
+# 343 passed，1 warning（pydantic ReadOnly，既有）
 uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
 (cd apps/web && pnpm typecheck)                                                    # exit 0（本机 Node 22；CI 使用 Node 24）
 ```

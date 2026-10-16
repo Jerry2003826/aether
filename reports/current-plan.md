@@ -30,6 +30,6 @@ uv run --locked --no-build python scripts/doctor.py --require-services
 
 进度：三条新用例先失败。编码说明没有 unsupported；公开激活的 Watch 没有 Temporal schedule；延迟执行时采集直接 SUCCEEDED，没有停在 QUEUED。
 
-结果：变基到 `e2e4c6d` 之前，冻结检查通过，参考套件 76，单元 200，集成 333，doctor exit 0，web typecheck exit 0。变基后的数字在套件重跑后写入交接。
+结果：变基到 `e2e4c6d` 之后，冻结检查通过，参考套件 76，单元 227，集成 343，doctor exit 0，web typecheck exit 0（本机 Node 22）。
 
 阻塞：无。不改 `live_ready`。github/arxiv 仍是显式 unsupported。水位不变时不发通知。
