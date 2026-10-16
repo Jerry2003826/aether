@@ -169,11 +169,31 @@ def _read_limited(response: httpx.Response, max_bytes: int) -> bytes:
     return b"".join(chunks)
 
 
+def _hostname(url: str) -> str:
+    return (urlsplit(url).hostname or "").rstrip(".").lower()
+
+
+def _require_domain(url: str, allowed_domains: set[str]) -> None:
+    host = _hostname(url)
+    permitted = {item.strip().rstrip(".").lower() for item in allowed_domains if item.strip()}
+    if host == "" or host not in permitted:
+        raise IngestError("domain_rejected")
+
+
+def _connect_hosts(allow_hosts: set[str] | None, allowed_domains: set[str] | None) -> set[str] | None:
+    if allow_hosts is not None:
+        return allow_hosts
+    if allowed_domains is None or not fixtures_enabled():
+        return None
+    return {item.strip().rstrip(".").lower() for item in allowed_domains if item.strip()}
+
+
 def fetch_url(
     url: str,
     *,
     resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]] = resolve_host,
     allow_hosts: set[str] | None = None,
+    allowed_domains: set[str] | None = None,
     opener: Callable[..., httpx.Response] | None = None,
     redirects_left: int = 2,
     max_bytes: int = MAX_HTTP_BYTES,
@@ -182,7 +202,9 @@ def fetch_url(
 ) -> bytes:
     if redirects_left < 0:
         raise IngestError("redirect_rejected")
-    pinned = assert_public_target(url, resolve=resolve, allow_hosts=allow_hosts)
+    if allowed_domains is not None:
+        _require_domain(url, allowed_domains)
+    pinned = assert_public_target(url, resolve=resolve, allow_hosts=_connect_hosts(allow_hosts, allowed_domains))
     parsed = urlsplit(url)
     host = parsed.hostname or ""
     headers = dict(extra_headers or {})
@@ -195,6 +217,7 @@ def fetch_url(
                 url,
                 resolve=resolve,
                 allow_hosts=allow_hosts,
+                allowed_domains=allowed_domains,
                 opener=opener,
                 redirects_left=redirects_left,
                 max_bytes=max_bytes,
@@ -213,6 +236,7 @@ def fetch_url(
                     location,
                     resolve=resolve,
                     allow_hosts=allow_hosts,
+                    allowed_domains=allowed_domains,
                     redirects_left=redirects_left - 1,
                     max_bytes=max_bytes,
                     verify=verify,
@@ -237,6 +261,7 @@ def _follow(
     *,
     resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]],
     allow_hosts: set[str] | None,
+    allowed_domains: set[str] | None,
     opener: Callable[..., httpx.Response] | None,
     redirects_left: int,
     max_bytes: int,
@@ -247,6 +272,7 @@ def _follow(
         _location(response, url),
         resolve=resolve,
         allow_hosts=allow_hosts,
+        allowed_domains=allowed_domains,
         opener=opener,
         redirects_left=redirects_left - 1,
         max_bytes=max_bytes,

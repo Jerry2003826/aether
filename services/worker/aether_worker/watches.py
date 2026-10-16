@@ -138,6 +138,8 @@ async def ensure_watch_schedules(
     for project_id, owner_id in projects.items():
         for watch in _active_watches(database, owner_id=owner_id, project_id=project_id):
             await _ensure_watch_schedule(client, watch, project_id=project_id, owner_id=owner_id, task_queue=task_queue)
+        for schedule_id in _stopped_schedule_ids(database, owner_id=owner_id, project_id=project_id):
+            await _delete_schedule(client, schedule_id)
 
 
 def _active_watches(database: Database, *, owner_id: str, project_id: str) -> list[dict[str, Any]]:
@@ -162,6 +164,28 @@ def _active_watches(database: Database, *, owner_id: str, project_id: str) -> li
             }
         )
     return loaded
+
+
+def _stopped_schedule_ids(database: Database, *, owner_id: str, project_id: str) -> list[str]:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        rows = conn.execute(
+            text(
+                "SELECT schedule_id FROM watches "
+                "WHERE project_id = :project_id AND status IN ('PAUSED', 'DELETED') ORDER BY id"
+            ),
+            {"project_id": project_id},
+        ).scalars().all()
+    return [str(item) for item in rows]
+
+
+async def _delete_schedule(client: Client, schedule_id: str) -> None:
+    if await _schedule_missing(client, schedule_id):
+        return
+    try:
+        await client.get_schedule_handle(schedule_id).delete()
+    except RPCError as exc:
+        if exc.status != RPCStatusCode.NOT_FOUND:
+            raise
 
 
 def _every_seconds(spec: Any) -> int | None:
@@ -243,6 +267,8 @@ def trigger_watch(
         watch = _load(conn, project_id, watch_id)
         if watch["status"] != "ACTIVE":
             return {"dispatched": False, "summarized": False, "reason": "stopped", "notification_id": None, "external_sent": False}
+        if not watch["approved_by"]:
+            return {"dispatched": False, "summarized": False, "reason": "unapproved", "notification_id": None, "external_sent": False}
         previous = None if watch["last_watermark"] is None else str(watch["last_watermark"].get("value"))
         if previous == watermark:
             return {"dispatched": False, "summarized": False, "reason": "unchanged", "notification_id": None, "external_sent": False}

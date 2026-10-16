@@ -73,12 +73,20 @@ def test_github_and_arxiv_are_fetched_indexed_and_searchable(client, role_urls, 
         github = client.post(
             f"/v1/projects/{project_id}/sources",
             headers=_headers(csrf, "r7-github-source"),
-            json={"kind": "github_api", "locator": f"http://127.0.0.1:{port}/repos/octocat/Hello-World"},
+            json={
+                "kind": "github_api",
+                "locator": f"http://127.0.0.1:{port}/repos/octocat/Hello-World",
+                "allowed_domains": ["127.0.0.1"],
+            },
         )
         arxiv = client.post(
             f"/v1/projects/{project_id}/sources",
             headers=_headers(csrf, "r7-arxiv-source"),
-            json={"kind": "arxiv_api", "locator": f"http://127.0.0.1:{port}/api/query?id_list=1706.03762"},
+            json={
+                "kind": "arxiv_api",
+                "locator": f"http://127.0.0.1:{port}/api/query?id_list=1706.03762",
+                "allowed_domains": ["127.0.0.1"],
+            },
         )
         assert github.status_code == 202, github.text
         assert arxiv.status_code == 202, arxiv.text

@@ -1,39 +1,23 @@
-# R7-1 编码作业与技能评测
+# SYS-01 后续：变基到含 PR #26 的 main
 
-任务：实现编码作业和 `skill.evaluate`，去掉第六轮对这两条入口的 422 `unsupported`。变基到 `origin/main` `5fa78f7` 之后，ADR-F34 是公开采集，ADR-F35 是复核出口，本路决定改为 ADR-F36。ADR-F33 的 Watch 循环保留。
+任务：把 PR #25 变基到 `cfbc65d`。ADR-F34 是 GitHub/arXiv 采集、工具账本、来源删除缓存和只读推荐。ADR-F35 是任务流程复核（PR #28）。ADR-F36 至 ADR-F38 是编码作业和技能评测（PR #26）。本决定改记为 ADR-F39。
 
-相关合同：不改 `contracts/`、`reference/`、验收门槛。`coding_jobs.state` 的成功值保持冻结的 `FINISHED`。不把 `live_ready` 改成 passed。不改 ADR-F34 的采集、工具和检索行为。
+相关合同：不改 `contracts/`、`reference/`、验收标准或 `STATUS.json`。`evaluateSkill` 与 `createCodingJob` 仍按 ADR-F36 至 ADR-F38 受理并跑到可查询终态。不改变 `live_ready`。
 
-拟改路径：
+两边都留下的行为：
 
-- `services/api/aether_api/console_routes.py`
-- `services/worker/aether_worker/console_commands.py`
-- `services/worker/aether_worker/service.py`（采集和已批准工具之后跑编码作业与技能评测）
-- `services/worker/aether_worker/coding_jobs.py`
-- `services/worker/aether_worker/coding_sandbox.py`
-- `services/worker/aether_worker/coding_workspace.py`
-- `services/worker/aether_worker/bundle_files.py`
-- `services/worker/aether_worker/skill_execute.py`
-- `services/worker/aether_worker/skill_dataset.py`
-- `services/worker/aether_worker/skill_metrics.py`
-- `services/worker/aether_worker/skill_eval.py`（评测 id 与 manifest 状态）
-- `apps/web/app/code/page.tsx`、`apps/web/app/console/page.tsx`
-- `docs/08_api_ui.md`、`docs/DECISIONS.md` 与由此重建的 `MASTER_SPEC.md`
-- `tests/unit/test_coding_skill_pipeline.py`、`tests/unit/test_api_ui_doc.py`
-- `tests/integration/test_r7_coding_skill.py`、`test_console_api.py`、`test_console_records.py`、`test_console_browser.py`、`test_sys01_entry.py`
+- URL、RSS、`github_api`、`arxiv_api` 都按 `approved_config.allowed_domains` 做精确主机名比对。空名单拒绝这些远程抓取。URL 与 RSS 的重定向继续比对。
+- `github_api` 与 `arxiv_api` 仍只连接官方主机，或在夹具开关和 `AETHER_INGEST_FIXTURE_HOSTS` 同时满足时连接夹具主机。不跟随重定向，不跟随 `download_url`。非官方主机仍是 `source_host_rejected`。
+- `local_document` 仍读本项目产物。抓取失败仍进入 `fetch_failed`。已激活的跟踪仍可暂停，并在激活时写入 `approved_by`。
+- 工具仍经已审核 manifest、MCP 和操作账本执行。来源删除仍递增 `visibility_epoch` 并丢掉检索缓存。推荐 GET 仍不写画像和曝光。
+- 词法检索仍不调用编码进程。非空 `source_ids` 仍在截断之前过滤。
+- 编码作业和技能评测仍跑到可查询终态。取消仍要确认容器消失。TTL 仍不回收持有租约的作业。围栏、预算、基线和终态事件仍按 ADR-F38。
+- NEEDS_REVIEW 仍有所有者出口。worker 不以所有者名义自动批准。执行前必须有所有者的 `approve_goal`。
+- active elapsed 只累计 RUNNING 与 VERIFYING。排队、审批、暂停和复核不计入。
+- 终态结束本次 workflow run，并在历史达到 5000 或服务端建议时 continue-as-new。工作流 ID 复用是 `REJECT_DUPLICATE`。投递有租约。审批失败写入真实状态，不同载荷仍是 409。超额可对账。已成功任务的答案和验收报告删除返回 409 `evidence_retained`。
 
-测试命令：
+拟改路径：`docs/DECISIONS.md`（ADR-F39）、由此重建的 `MASTER_SPEC.md`、`reports/HANDOFF.md`、`reports/current-plan.md`。代码路径已在本提交：`pending_jobs.py`、`ingest.py`、`remote_sources.py`，以及覆盖白名单的采集测试。
 
-```text
-uv run --locked --no-build python scripts/verify_freeze.py
-uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
-uv run --locked --no-build pytest -q tests/unit
-AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration
-(cd apps/web && pnpm typecheck)
-```
+测试：不 skip、不 xfail、不删断言、不放宽断言。变基后重跑 `verify_freeze`、参考套件、单元测试，以及 `AETHER_REQUIRE_SERVICES=1` 的集成测试。
 
-进度：变基到 `5fa78f7` 后保留 ADR-F35 的复核出口，编码决定改记 ADR-F36。规格第 6 节的取消确认和 TTL 租约回收记为 ADR-F37。PR 审查意见记为 ADR-F38：围栏、同一作业键串行、日志尾部、async 测试失败、评测 `active_seconds`、基线绑定、不覆盖 CANARY/ACTIVE、安全失败优先，以及用现有任务事件查看终态。失败测试先写，再补实现。
-
-结果：变基到 `5fa78f7` 之后，冻结检查通过，`api_operations` 仍是 50。参考套件 76。单元 244 passed（104.54s）。集成 368 passed、1 warning（360.79s）。web typecheck exit 0（本机 Node 22，CI 用 Node 24）。这次没有重跑 doctor。`reports/doctor.json` 没有提交。
-
-阻塞：不启动 OpenHands，也不在沙箱里调用模型。没有新增编码作业 GET。`live_ready` 保持 pending。
+进度：冲突按两边行为合并。本机结果待重跑后写入交接。

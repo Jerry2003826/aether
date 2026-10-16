@@ -35,9 +35,15 @@ def github_request_url(locator: str) -> str:
     return _rebuild(parsed, path, parsed.query)
 
 
-def fetch_github(locator: str) -> bytes:
+def fetch_github(locator: str, *, allowed_domains: set[str] | None = None) -> bytes:
     url = github_request_url(locator)
-    return fetch_url(url, allow_hosts=_allow_for(url, GITHUB_API_HOST), redirects_left=0, extra_headers=_GITHUB_HEADERS)
+    return fetch_url(
+        url,
+        allow_hosts=_allow_for(url, GITHUB_API_HOST),
+        allowed_domains=allowed_domains,
+        redirects_left=0,
+        extra_headers=_GITHUB_HEADERS,
+    )
 
 
 def github_text(raw: bytes) -> str:
@@ -76,9 +82,15 @@ def arxiv_request_url(locator: str) -> str:
     return _rebuild(parsed, "/api/query", urlencode([("id_list", identifiers[0])]))
 
 
-def fetch_arxiv(locator: str) -> bytes:
+def fetch_arxiv(locator: str, *, allowed_domains: set[str] | None = None) -> bytes:
     url = arxiv_request_url(locator)
-    return fetch_url(url, allow_hosts=_allow_for(url, ARXIV_API_HOST), redirects_left=0, extra_headers=_ARXIV_HEADERS)
+    return fetch_url(
+        url,
+        allow_hosts=_allow_for(url, ARXIV_API_HOST),
+        allowed_domains=allowed_domains,
+        redirects_left=0,
+        extra_headers=_ARXIV_HEADERS,
+    )
 
 
 def arxiv_text(raw: bytes) -> str:

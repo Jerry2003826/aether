@@ -48,6 +48,27 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 
 下一步：同一 PR 保持 ready，不合并。等变基后的 CI（pack-and-unit、integration、SonarCloud）全绿。若失败或出现新的审查意见，修到全绿再收口。
 
+## SYS-01 后续：PR #23 的八条 Codex 意见（分支 `cursor/r6-entry-followup-168c`）
+
+基线改为 `cfbc65d`（PR #24、PR #28 与 PR #26 已合入 main）。ADR-F34 留给 GitHub/arXiv 采集、工具账本、来源删除缓存和只读推荐。ADR-F35 留给任务流程复核。ADR-F36、ADR-F37 与 ADR-F38 留给编码作业和技能评测。八条意见里仍属于本决定的部分改记为 ADR-F39。域名白名单同时覆盖 `url`、`rss`、`github_api` 和 `arxiv_api`。GitHub 与 arXiv 的官方主机、夹具主机和不跟随重定向都保留；非官方主机仍是 `source_host_rejected`。复核出口、所有者 `approve_goal`、活动时间、continue-as-new、投递租约、幂等冲突和 `evidence_retained` 都保留。编码作业和技能评测仍按 ADR-F36 至 ADR-F38 跑到可查询终态；本决定不改这两条入口的合同和路由。没有改 `contracts/`、`reference/`，没有删断言，也没有把仍成立的断言放宽。`live_ready` 没有改。没有改 `STATUS.json`。
+
+证明用例：
+
+- 域名与重定向：`test_url_allowlist_and_redirects`。其中包含官方主机和已放行夹具主机上的 `github_api` / `arxiv_api`，未批准时是 `domain_rejected`。
+- 已批准夹具域名上的真实抓取：`test_github_and_arxiv_are_fetched_indexed_and_searchable` 仍要求两条采集 SUCCEEDED，并在请求里写上 `127.0.0.1`。
+- 连接前拒绝：`test_approved_domain_is_required_before_github_or_arxiv_connects`。夹具服务收到的请求数是 0。
+- 本地产物：`test_local_document_indexes_the_uploaded_artifact`。locator 仍是本项目产物 id。
+- 抓取失败：`test_fetch_failures_reach_a_terminal_state`。
+- 缺失引用：随机任务、产物和技能版本是 404 `not_found`，不写编码作业或评测行。合同仍要求 202、Idempotency-Key 和 CSRF。文档是 `test_skill_evaluate_cannot_be_scored_by_the_actor`。
+- 暂停与批准人：`test_activated_watch_records_the_approver_and_can_pause`。
+- 无批准人的执行：`test_runner_refuses_an_active_watch_without_an_approver`。
+- 词法检索：`test_lexical_search_ignores_a_missing_embedding_process`。
+- 来源过滤：`test_source_filter_keeps_chunks_outside_the_global_window`。
+
+变基前的本机数字不再沿用。变基后的命令和结果在重跑后写入本节。
+
+下一步：PR 保持 ready，不合并。等 CI（含 SonarCloud）绿，并处理新 PR 上的 P0/P1。
+
 ## P2-09 复核出口、所有者批准、活动时间与工作流投递（分支 `cursor/r7-workflow-review-budget-f3e3`）
 
 基线已变基到 `6f223f7`（PR #24 已合入，ADR-F34 归公开采集）。本决定记为 ADR-F35。没有改 `contracts/`、`reference/`。没有把 `live_ready` 改成 passed。没有新增 OpenAPI 操作，公开命令仍是 approve_goal、pause、resume、cancel。编码作业、技能评测、采集/MCP/检索、安全隔离和备份产品代码没有改。没有低风险自动批准：仓库里没有预批准模板登记。

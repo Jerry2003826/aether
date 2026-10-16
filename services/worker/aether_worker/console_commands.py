@@ -143,7 +143,7 @@ def _apply(
     elif kind == "watch.create":
         _watch_create(conn, project_id, payload)
     elif kind == "watch.patch":
-        _watch_patch(conn, project_id, payload)
+        _watch_patch(conn, project_id, payload, owner_id)
     elif kind == "watch.delete":
         _watch_delete(conn, project_id, payload)
     elif kind == "connector.register":
@@ -601,7 +601,21 @@ def _watch_create(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
     )
 
 
-def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
+_ACTIVATE_WATCH = (
+    "UPDATE watches SET status = :status, schedule_spec = CAST(:schedule AS jsonb), approved_by = :owner_id, version = version + 1 "
+    "WHERE project_id = :project_id AND id = :id AND version = :version AND status <> 'ACTIVE'"
+)
+_PAUSE_WATCH = (
+    "UPDATE watches SET status = 'PAUSED', schedule_spec = CAST(:schedule AS jsonb), version = version + 1 "
+    "WHERE project_id = :project_id AND id = :id AND version = :version AND status = 'ACTIVE'"
+)
+_REWRITE_WATCH = (
+    "UPDATE watches SET status = :status, schedule_spec = CAST(:schedule AS jsonb), version = version + 1 "
+    "WHERE project_id = :project_id AND id = :id AND version = :version AND status <> 'ACTIVE'"
+)
+
+
+def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any], owner_id: str) -> None:
     current = conn.execute(
         text("SELECT version, status, schedule_spec, source_ids FROM watches WHERE project_id = :project_id AND id = :id"),
         {"project_id": project_id, "id": payload["watch_id"]},
@@ -609,26 +623,33 @@ def _watch_patch(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
     if current is None or str(current["version"]) != str(payload["expected_version"]):
         raise ConsoleCommandError("version_conflict")
     sources = current["source_ids"] if isinstance(current["source_ids"], list) else json.loads(current["source_ids"])
-    if payload.get("status") == "ACTIVE" and not _same_ids(payload.get("expected_source_ids"), sources):
-        raise ConsoleCommandError("schedule_requires_approval")
     schedule = current["schedule_spec"] if isinstance(current["schedule_spec"], dict) else json.loads(current["schedule_spec"])
     if "interval_seconds" in payload:
         schedule["interval_seconds"] = int(payload["interval_seconds"])
         schedule["every_seconds"] = int(payload["interval_seconds"])
-    status = payload.get("status") or current["status"]
-    updated = conn.execute(
-        text(
-            "UPDATE watches SET status = :status, schedule_spec = CAST(:schedule AS jsonb), version = version + 1 "
-            "WHERE project_id = :project_id AND id = :id AND version = :version AND status <> 'ACTIVE'"
-        ),
-        {
-            "status": status,
-            "schedule": json.dumps(schedule),
-            "project_id": project_id,
-            "id": payload["watch_id"],
-            "version": current["version"],
-        },
-    ).rowcount
+    current_status = str(current["status"])
+    status = str(payload.get("status") or current_status)
+    if current_status == "ACTIVE" and status != "PAUSED":
+        raise ConsoleCommandError("schedule_requires_approval")
+    activating = status == "ACTIVE" and current_status != "ACTIVE"
+    if activating and not _same_ids(payload.get("expected_source_ids"), sources):
+        raise ConsoleCommandError("schedule_requires_approval")
+    params = {
+        "schedule": json.dumps(schedule),
+        "project_id": project_id,
+        "id": payload["watch_id"],
+        "version": current["version"],
+    }
+    if current_status == "ACTIVE":
+        statement = _PAUSE_WATCH
+    elif activating:
+        statement = _ACTIVATE_WATCH
+        params["status"] = status
+        params["owner_id"] = owner_id
+    else:
+        statement = _REWRITE_WATCH
+        params["status"] = status
+    updated = conn.execute(text(statement), params).rowcount
     if updated != 1:
         raise ConsoleCommandError("schedule_requires_approval")
 
