@@ -43,11 +43,20 @@ def execute_pending_skill_evaluations(
     *,
     owner_id: str,
     project_id: str,
-) -> list[dict[str, str]]:
-    outcomes: list[dict[str, str]] = []
+    apply_verdicts: bool = True,
+) -> list[dict[str, Any]]:
+    outcomes: list[dict[str, Any]] = []
     for command in _pending(verifier, owner_id=owner_id, project_id=project_id):
         outcomes.append(
-            _run_one(verifier, worker, store, owner_id=owner_id, project_id=project_id, command=command)
+            _run_one(
+                verifier,
+                worker,
+                store,
+                owner_id=owner_id,
+                project_id=project_id,
+                command=command,
+                apply_verdicts=apply_verdicts,
+            )
         )
     return outcomes
 
@@ -80,13 +89,20 @@ def _run_one(
     owner_id: str,
     project_id: str,
     command: dict[str, Any],
-) -> dict[str, str]:
+    apply_verdicts: bool,
+) -> dict[str, Any]:
     payload = command["payload"]
     evaluation_id = str(payload["evaluation_id"])
+    version_id = str(payload.get("candidate_version_id") or "")
     if _already_recorded(verifier, owner_id=owner_id, project_id=project_id, evaluation_id=evaluation_id):
-        _apply_stored_verdict(verifier, worker, owner_id=owner_id, project_id=project_id, payload=payload)
+        verdict = _stored_verdict(verifier, owner_id=owner_id, project_id=project_id, payload=payload)
+        if apply_verdicts and verdict is not None and version_id:
+            apply_verdict(worker, owner_id=owner_id, project_id=project_id, version_id=version_id, verdict=verdict)
         _finish_command(verifier, owner_id=owner_id, project_id=project_id, command_id=command["id"], status="DELIVERED")
-        return {"evaluation_id": evaluation_id, "status": "recorded"}
+        recorded: dict[str, Any] = {"evaluation_id": evaluation_id, "status": "recorded", "version_id": version_id}
+        if verdict is not None:
+            recorded["verdict"] = verdict
+        return recorded
     try:
         outcome = _grade_payload(store, owner_id=owner_id, project_id=project_id, payload=payload)
         verdict = _record(
@@ -97,15 +113,16 @@ def _run_one(
             payload=payload,
             outcome=outcome,
         )
-        apply_verdict(
-            worker,
-            owner_id=owner_id,
-            project_id=project_id,
-            version_id=str(payload["candidate_version_id"]),
-            verdict=verdict,
-        )
+        if apply_verdicts:
+            apply_verdict(
+                worker,
+                owner_id=owner_id,
+                project_id=project_id,
+                version_id=version_id,
+                verdict=verdict,
+            )
         _finish_command(verifier, owner_id=owner_id, project_id=project_id, command_id=command["id"], status="DELIVERED")
-        return {"evaluation_id": evaluation_id, "status": str(verdict["decision"])}
+        return {"evaluation_id": evaluation_id, "status": str(verdict["decision"]), "version_id": version_id, "verdict": verdict}
     except (SkillEvalError, DatasetError, BundleError, ArtifactError, VerificationError, OSError, json.JSONDecodeError) as exc:
         code = exc.code if isinstance(exc, (SkillEvalError, DatasetError, BundleError, ArtifactError, VerificationError)) else "evaluation_failed"
         _record_blocked(
@@ -117,7 +134,7 @@ def _run_one(
             code=code,
         )
         _finish_command(verifier, owner_id=owner_id, project_id=project_id, command_id=command["id"], status="DELIVERED")
-        return {"evaluation_id": evaluation_id, "status": "REJECTED", "error_code": code}
+        return {"evaluation_id": evaluation_id, "status": "REJECTED", "error_code": code, "version_id": version_id}
 
 
 def _grade_payload(store: ArtifactStore, *, owner_id: str, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
@@ -323,35 +340,26 @@ def _sha(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _apply_stored_verdict(
+def _stored_verdict(
     verifier: Database,
-    worker: Database,
     *,
     owner_id: str,
     project_id: str,
     payload: dict[str, Any],
-) -> None:
+) -> dict[str, Any] | None:
     with verifier.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
             text("SELECT status, metrics FROM evaluation_runs WHERE project_id = :project_id AND id = :id"),
             {"project_id": project_id, "id": payload["evaluation_id"]},
         ).mappings().first()
     if row is None or payload.get("candidate_version_id") is None:
-        return
+        return None
     metrics = row["metrics"]
     if isinstance(metrics, str):
         metrics = json.loads(metrics)
     if not isinstance(metrics, dict):
-        verdict = {"decision": "REJECTED", "label": "not_synthetic", "promoted": False, "learned": False}
-    else:
-        verdict = judge(metrics, synthetic=bool(metrics.get("synthetic")))
-    apply_verdict(
-        worker,
-        owner_id=owner_id,
-        project_id=project_id,
-        version_id=str(payload["candidate_version_id"]),
-        verdict=verdict,
-    )
+        return {"decision": "REJECTED", "label": "not_synthetic", "promoted": False, "learned": False}
+    return judge(metrics, synthetic=bool(metrics.get("synthetic")))
 
 
 def _already_recorded(verifier: Database, *, owner_id: str, project_id: str, evaluation_id: str) -> bool:

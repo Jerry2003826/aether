@@ -51,6 +51,7 @@ from aether_worker.retrieval import (
     encode_texts,
     rrf,
 )
+from aether_worker.sandbox_image import SANDBOX_IMAGE
 from aether_worker.tokenize import TOKENIZER_VERSION
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -76,7 +77,7 @@ SOURCE_FILES = (
     (DISTRACTOR, "piano-zh.txt"),
 )
 VERIFY_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
-VERIFY_IMAGE = "python:3.12-alpine"
+VERIFY_IMAGE = SANDBOX_IMAGE
 _FORWARD_KEYS = {"model", "messages", "max_tokens", "temperature", "tools", "tool_choice"}
 
 

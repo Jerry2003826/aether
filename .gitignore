@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 *.egg-info/
 .pytest_cache/
+.aether-drill-work/
 node_modules/
 .next/
 *.tsbuildinfo

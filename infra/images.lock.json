@@ -1,6 +1,6 @@
 {
   "is_actual_lock": false,
-  "reason": "Registry digests were read from the manifest list. This host has no Docker daemon, so the images were not pulled or executed here. Local PostgreSQL is a separate apt probe.",
+  "reason": "Registry digests were read from the manifest list. On 2026-10-16 this workspace pulled and started pgvector/pgvector:0.8.7-pg17 and temporalio/temporal:1.9.1, and built a hash-locked pytest 8.3.5 image FROM python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4 (CPython 3.12.15). The older apt PostgreSQL probe below is historical and is not the CI image. This file is still not a release attestation for every platform.",
   "images": [
     {
       "repository": "pgvector/pgvector",
@@ -24,7 +24,27 @@
       "server_bundled_in_cli": "1.32.0",
       "ui_bundled_in_cli": "2.54.1",
       "dev_server_is_release_persistence": false,
-      "platforms_tested": ["linux/amd64 cli"]
+      "platforms_tested": ["linux/amd64 cli"],
+      "workspace_probe_2026_10_16": {
+        "pulled": true,
+        "started": true,
+        "note": "Shared dev server on 127.0.0.1:7233 is in-memory. Crash drills use a separate container with --db-filename."
+      }
+    },
+    {
+      "repository": "library/python",
+      "tag": "3.12-alpine",
+      "digest": "sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
+      "digest_source": "registry-1.docker.io manifest index docker-content-digest",
+      "runtime_reference": "python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4",
+      "mutable_tag_not_used_at_runtime": true,
+      "pytest": "8.3.5",
+      "pytest_install": "pip install --require-hashes --only-binary=:all:",
+      "workspace_probe_2026_10_16": {
+        "pulled": true,
+        "python": "3.12.15",
+        "hashed_pytest_build": "passed"
+      }
     }
   ]
 }

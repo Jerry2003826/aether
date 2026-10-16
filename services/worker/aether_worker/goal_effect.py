@@ -28,6 +28,7 @@ from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_storage.operations import OperationLedger
+from aether_worker.role_client import complete_via_gateway, verify_via_role
 from aether_worker.research import (
     cites_fact,
     estimate_provider_request_tokens,
@@ -88,6 +89,10 @@ class WorkerEndpoints:
     live_model_alias: str = ""
     live_model_key: str = ""
     live_timeout_seconds: float = 30
+    verifier_base: str = ""
+    gateway_base: str = ""
+    runner_base: str = ""
+    loopback_token: str = ""
 
 
 ENDPOINTS: WorkerEndpoints | None = None
@@ -903,6 +908,19 @@ def _ensure_verification(
     goal: str,
     allowed_ids: list[str] | None = None,
 ) -> str:
+    if not endpoints.verifier_url:
+        return verify_via_role(
+            verifier_base=endpoints.verifier_base,
+            token=endpoints.loopback_token,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            contract_id=contract_id,
+            contract_sha=contract_sha,
+            artifact_id=artifact_id,
+            goal=goal,
+            allowed_ids=allowed_ids,
+        )
     verifier = Database(endpoints.verifier_url)
     store = ArtifactStore(endpoints.artifact_root, verifier)
     ledger, deleted = _artifact_ledger(verifier, owner_id, project_id, artifact_id)
@@ -1248,7 +1266,7 @@ def _missing_live_settings(endpoints: WorkerEndpoints) -> list[str]:
         missing.append("AETHER_LIVE_MODEL_BASE")
     if not endpoints.live_model_alias:
         missing.append("AETHER_LIVE_MODEL_ALIAS")
-    if not endpoints.live_model_key:
+    if not endpoints.live_model_key and not endpoints.gateway_base:
         missing.append("AETHER_LIVE_MODEL_KEY")
     return missing
 
@@ -1587,7 +1605,7 @@ def _ensure_live_answer(
             ledger.release_unsent(**held)
             return {"status": _task_status(database, owner_id, project_id, task_id), "task_id": task_id}
         try:
-            result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
+            result = _complete_model(endpoints, gateway, token, alias=endpoints.live_model_alias, prompt=prompt, output_cap=output_cap)
         except GatewayDenied as denied:
             if not denied.sent:
                 ledger.release_refused_send(**held, code=denied.code)
@@ -1940,8 +1958,23 @@ def _control_state(database: Database, owner_id: str, project_id: str, task_id: 
     return str(row["status"]), str(row["resume_state"] or "")
 
 
+def _complete_model(endpoints: WorkerEndpoints, gateway: ModelGateway, token: str, *, alias: str, prompt: str, output_cap: int) -> dict[str, Any]:
+    body = {"alias": alias, "prompt": prompt, "max_tokens": output_cap}
+    if endpoints.live_model_key or not endpoints.gateway_base:
+        return gateway.complete(token, body)
+    return complete_via_gateway(
+        gateway_base=endpoints.gateway_base,
+        token=endpoints.loopback_token,
+        call_token=token,
+        alias=alias,
+        prompt=prompt,
+        max_tokens=output_cap,
+        timeout=gateway.timeout,
+    )
+
+
 def _verdict(endpoints: WorkerEndpoints, owner_id: str, project_id: str, verification_id: str) -> str:
-    verifier = Database(endpoints.verifier_url)
+    verifier = Database(endpoints.verifier_url or endpoints.worker_url)
     with verifier.transaction(owner_id=owner_id, project_id=project_id) as conn:
         return str(conn.execute(text("SELECT verdict FROM verification_results WHERE id = :id"), {"id": verification_id}).scalar_one())
 

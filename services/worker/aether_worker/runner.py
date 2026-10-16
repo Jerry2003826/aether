@@ -15,9 +15,19 @@ from typing import Any
 
 from reference.models import CodingJobRequest, CodingJobResult
 
+from aether_worker.loopback import LoopbackError, get_json
+from aether_worker.sandbox_image import SANDBOX_IMAGE
+
 PROBE = Path(__file__).with_name("namespace_probe.py")
 NETWORK_UNREACHABLE = 101
-JOB_IMAGE = "python:3.12-alpine"
+JOB_IMAGE = SANDBOX_IMAGE
+_PROCESS_ROLE = "AETHER_PROCESS_ROLE"
+_WORKER_ROLE = "worker"
+_RUNTIME = "runtime"
+_ENABLED = "enabled"
+_UNSUPPORTED = "unsupported"
+# An empty proxy map ignores HTTP_PROXY so a loopback bearer is not forwarded.
+_NO_PROXY = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 GATEWAY_PROGRAM = (
     "import fcntl,json,os,socket,struct\n"
     "from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer\n"
@@ -88,7 +98,7 @@ def call_gateway(env: dict[str, str], *, prompt: str) -> dict[str, Any]:
         headers={"authorization": f"Bearer {env['AETHER_JOB_TOKEN']}", "content-type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=5) as response:
+    with _NO_PROXY.open(request, timeout=5) as response:
         return json.loads(response.read().decode())
 
 
@@ -101,8 +111,8 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
     env["AETHER_HIDE_PATH"] = str(hide_path)
     env["PATH"] = f"{Path(sys.executable).resolve().parent}:{env['PATH']}"
     docker = "not_supported"
-    if shutil.which("docker"):
-        info = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
+    if os.environ.get(_PROCESS_ROLE) != _WORKER_ROLE and shutil.which("docker"):
+        info = _docker(["info"])
         docker = "present" if info.returncode == 0 else "not_supported"
     try:
         completed = subprocess.run(
@@ -142,13 +152,44 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
 
 
 def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
+        raise RunnerError("docker_forbidden")
     return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=timeout)
 
 
-def docker_available() -> bool:
+def probe_docker_daemon() -> dict[str, str]:
+    """Enable the runner only when the daemon reports a server version."""
+    if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
+        return _runtime(_UNSUPPORTED, "docker_forbidden")
     if shutil.which("docker") is None:
+        return _runtime(_UNSUPPORTED, "cli_missing")
+    completed = _docker(["info", "--format", "{{.ServerVersion}}"])
+    version = completed.stdout.strip()
+    if completed.returncode != 0 or not version:
+        return _runtime(_UNSUPPORTED, "daemon_unreachable")
+    return {_RUNTIME: _ENABLED, "server_version": version}
+
+
+def _runtime(state: str, reason: str) -> dict[str, str]:
+    return {_RUNTIME: state, "reason": reason}
+
+
+def docker_available() -> bool:
+    """The worker asks the runner. Every other role probes the daemon itself."""
+    if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
+        return _runner_enabled()
+    return probe_docker_daemon()[_RUNTIME] == _ENABLED
+
+
+def _runner_enabled() -> bool:
+    base = os.environ.get("AETHER_RUNNER_BASE", "").rstrip("/")
+    if not base:
         return False
-    return _docker(["info"]).returncode == 0
+    try:
+        body = get_json(f"{base}/health", timeout=10)
+    except LoopbackError:
+        return False
+    return body.get(_RUNTIME) == _ENABLED
 
 
 def _job_label(key: str) -> str:
@@ -297,32 +338,53 @@ class LinuxRunner:
     def start(self, request: CodingJobRequest, *, token: str, gateway_url: str, provider_key: str) -> CodingJobResult:
         key = self._key(request)
         existing = self._jobs.get(key)
+        enabled = probe_docker_daemon()[_RUNTIME] == _ENABLED
+        found = _container_id(key) if enabled else None
         if existing is not None and existing.get("status") == "CANCELLED":
-            if existing.get("cancel_state") != "confirmed":
-                self._stop(key, existing)
-            return _result(existing)
-        found = _container_id(key) if docker_available() else None
+            return self._finish_cancelled(key, existing)
         if existing is not None:
-            if found and not existing.get("container_id"):
-                existing["container_id"] = found
-                self._save()
-            if existing.get("container_id"):
-                _ensure_running(str(existing["container_id"]))
-            return _result(existing)
+            return self._reuse_existing(existing, found)
         if found is not None:
-            record = self._new_record(request, token=token, gateway_url=gateway_url, provider_key=provider_key)
-            record["container_id"] = found
-            self._jobs[key] = record
-            self._save()
-            _ensure_running(found)
-            return _result(record)
+            return self._adopt_found(key, request, found, token=token, gateway_url=gateway_url, provider_key=provider_key)
         if provider_key and provider_key in token:
             raise RunnerError("secret_in_token")
         record = self._new_record(request, token=token, gateway_url=gateway_url, provider_key=provider_key)
-        if docker_available():
+        record[_RUNTIME] = _ENABLED if enabled else _UNSUPPORTED
+        if enabled:
             record["container_id"] = _launch_container(key, token=token, provider_key=provider_key)
         self._jobs[key] = record
         self._save()
+        return _result(record)
+
+    def _finish_cancelled(self, key: str, existing: dict[str, Any]) -> CodingJobResult:
+        if existing.get("cancel_state") != "confirmed":
+            self._stop(key, existing)
+        return _result(existing)
+
+    def _reuse_existing(self, existing: dict[str, Any], found: str | None) -> CodingJobResult:
+        if found and not existing.get("container_id"):
+            existing["container_id"] = found
+            self._save()
+        if existing.get("container_id"):
+            _ensure_running(str(existing["container_id"]))
+        return _result(existing)
+
+    def _adopt_found(
+        self,
+        key: str,
+        request: CodingJobRequest,
+        found: str,
+        *,
+        token: str,
+        gateway_url: str,
+        provider_key: str,
+    ) -> CodingJobResult:
+        record = self._new_record(request, token=token, gateway_url=gateway_url, provider_key=provider_key)
+        record["container_id"] = found
+        record[_RUNTIME] = _ENABLED
+        self._jobs[key] = record
+        self._save()
+        _ensure_running(found)
         return _result(record)
 
     def _new_record(self, request: CodingJobRequest, *, token: str, gateway_url: str, provider_key: str) -> dict[str, Any]:

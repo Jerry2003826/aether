@@ -142,6 +142,8 @@ export AETHER_TASK_QUEUE=aether-tasks
 uv run --locked --no-build python -m aether_worker
 ```
 
+入口读到验收库地址和 `AETHER_LIVE_MODEL_KEY` 之后，会把它们交给独立进程，再从 worker 环境里删除并重新执行。重新执行后的 worker 不持有验收库口令、供应商 key，也不打开 Docker 套接字。直接构造 `WorkerEndpoints` 的进程内调用仍使用传入的地址和 key。已是 `AETHER_PROCESS_ROLE=worker` 却还带着这两项环境变量时，进程退出，错误信息只列出变量名。
+
 `AETHER_INTAKE_PAUSE_SECONDS` 默认是 `0`，正式启动不要设置。它是 `DurableTaskWorkflow` 的启动参数：大于 0 时，任务记成 `RUNNING` 之后、读取资料之前，按这个秒数做一次 durable sleep。数值写进 Workflow history，重启后仍用同一次启动时的秒数。进程测试把它设成 `4`，才能在 `RUNNING` 时停掉 worker。控制信号可以提前结束这次等待。`4ba3b2f` 之前的历史没有这条补丁标记，回放时仍走原来的 sleep。
 
 研究路径默认调用 live 模型。三个变量和短探针相同：`AETHER_LIVE_MODEL_BASE`、`AETHER_LIVE_MODEL_ALIAS`、`AETHER_LIVE_MODEL_KEY`。缺任何一个，任务进入 `NEEDS_REVIEW`，原因是没有配置供应商，不会改用脚本回答。离线测试要显式设置 `AETHER_RESEARCH_PROVIDER=scripted`。调用前按任务预算预留 token、次数、费用和墙钟；超限则任务失败，`resume_state` 为 `budget_exhausted`，并且不会发出这次请求。`allowed_source_ids` 省略时读取项目里未绑定的文本；空列表表示没有来源；列表里有不存在或不可读的 id 时整次任务进入 `NEEDS_REVIEW`，不会改读其他资料。
@@ -185,12 +187,12 @@ Makefile 里已有的目标：`check-pack`、`test-reference`、`doctor`、`test
 
 ### `scripts/run_f26_acceptance.py`
 
-完整 live 验收需要本机 Docker、uv，以及两个独立环境。OpenHands 四个包钉在 1.54.0。ML 环境提供 `FlagEmbedding`，第一次会下载 `BAAI/bge-m3`（revision `5617a9f61b028005a4858fdac845db406aefb181`）。独立测试和网络隔离使用 `python:3.12-alpine`。
+完整 live 验收需要本机 Docker、uv，以及两个独立环境。OpenHands 四个包钉在 1.54.0。ML 环境提供 `FlagEmbedding`，第一次会下载 `BAAI/bge-m3`（revision `5617a9f61b028005a4858fdac845db406aefb181`）。独立测试和网络隔离使用摘要固定的 `python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4`（索引摘要，容器内 CPython 3.12.15）。评分依赖用 `pip install --require-hashes --only-binary=:all:` 安装 `pytest==8.3.5`，不使用可变标签。
 
 ```sh
 cd environments/openhands && uv sync --frozen
 cd ../ml && uv sync --frozen
-docker pull python:3.12-alpine
+docker pull python@sha256:1b668429b3511ab407d8e00648891631b0b1a4d7e15e3ca70f38ab5b91ad4ab4
 cd ../..
 export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
 export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
