@@ -12,7 +12,7 @@ apply a pause or cancel while that activity is in flight, and the activity keeps
 the provider receipt.
 
 Runs started before ``task-command-versions`` were recorded by releases whose
-control handling carried no marker (ADR-SR1-P1-07). Until a marker proves a later
+control handling carried no marker (ADR-F27, P1-07). Until a marker proves a later
 release, each point where the first release behaved differently asks a numbered
 patch: replaying an old history keeps the first release's behavior there, and a
 command that arrives after the upgrade gets the current handling.

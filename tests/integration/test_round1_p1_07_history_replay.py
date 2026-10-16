@@ -193,7 +193,7 @@ def _patches(history: WorkflowHistory) -> set[str]:
 def test_current_workflow_replays_recorded_histories_from_later_releases(revision: str) -> None:
     """75ec05b leaves no marker unless the intake pause is positive, so its history was recorded with 0.2 s.
 
-    ADR-SR1-P1-07 lists the marker-free histories that stay ambiguous.
+    ADR-F27 (P1-07) lists the marker-free histories that stay ambiguous.
     """
     recorded = json.loads((HISTORIES / f"durable_workflow_{revision}.json").read_text(encoding="utf-8"))
     history = WorkflowHistory.from_json(f"recorded-{revision}", recorded)
