@@ -157,8 +157,25 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         ):
             raise CodingError("budget_exceeded")
         reserved = True
-        _mark(database, owner_id=owner_id, project_id=project_id, job_id=job_id, state="ACTIVE")
-        _operation(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]), state="DISPATCHED", error_code=None)
+        _mark(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            job_id=job_id,
+            state="ACTIVE",
+            fencing_token=fencing,
+            operation_id=str(row["operation_id"]),
+        )
+        _operation(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            operation_id=str(row["operation_id"]),
+            state="DISPATCHED",
+            error_code=None,
+            job_id=job_id,
+            fencing_token=fencing,
+        )
         with tempfile.TemporaryDirectory(prefix="aether-code-") as temporary:
             root = Path(temporary)
             _materialize(workspace, root)
@@ -168,7 +185,14 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     job_id=job_id,
                     stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
                     deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
-                    on_poll=lambda: _renew_lease(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]), job_id=job_id),
+                    on_poll=lambda: _renew_lease(
+                        database,
+                        owner_id=owner_id,
+                        project_id=project_id,
+                        operation_id=str(row["operation_id"]),
+                        job_id=job_id,
+                        fencing_token=fencing,
+                    ),
                 )
             except CodingSandboxError as exc:
                 stopped = _sandbox_stop(
@@ -198,7 +222,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 passed = False
                 error = "network_open"
             state = "FINISHED" if passed else "FAILED"
-            _publish(
+            published = _publish(
                 database,
                 store,
                 owner_id=owner_id,
@@ -210,46 +234,66 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 error_code=error,
                 manifest=_manifest(root, workspace),
             )
+        if not published:
+            return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
         return {"coding_job_id": job_id, "state": state}
     except (CodingError, CodingSandboxError, WorkspaceError, ArtifactError, BudgetError, OSError) as exc:
         code = exc.code if isinstance(exc, (CodingError, CodingSandboxError, WorkspaceError, ArtifactError)) else "coding_failed"
         if isinstance(exc, BudgetError):
             code = exc.code
         _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
-        _clear_lease(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]))
+        _clear_lease(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            operation_id=str(row["operation_id"]),
+            job_id=job_id,
+            fencing_token=fencing,
+        )
         _fail(database, store, owner_id=owner_id, project_id=project_id, row=row, error_code=code)
         return {"coding_job_id": job_id, "state": "FAILED", "error_code": code}
 
 
 def _claim(database: Database, *, owner_id: str, project_id: str, job_id: str) -> dict[str, Any] | None:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        row = conn.execute(
-            text(
-                "SELECT id::text AS id, task_id::text AS task_id, operation_id::text AS operation_id, "
-                "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state "
-                "FROM coding_jobs WHERE project_id = :project_id AND id = :id AND state = ANY(:states) FOR UPDATE"
-            ),
-            {"project_id": project_id, "id": job_id, "states": list(_OPEN)},
-        ).mappings().first()
-        if row is None:
-            return None
-        taken = conn.execute(
-            text(
-                "UPDATE operations SET lease_until = now() + make_interval(secs => :lease_seconds) "
-                "WHERE project_id = :project_id AND id = :operation_id AND (lease_until IS NULL OR lease_until <= now())"
-            ),
-            {"lease_seconds": LEASE_SECONDS, "project_id": project_id, "operation_id": row["operation_id"]},
-        ).rowcount
-        if taken != 1:
-            return None
-        conn.execute(
-            text(
-                "UPDATE coding_jobs SET state = 'STARTING', last_heartbeat_at = now(), container_reference = :name "
-                "WHERE project_id = :project_id AND id = :id"
-            ),
-            {"name": container_name(job_id), "project_id": project_id, "id": job_id},
-        )
-    return dict(row)
+    try:
+        with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT id::text AS id, task_id::text AS task_id, operation_id::text AS operation_id, "
+                    "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state "
+                    "FROM coding_jobs WHERE project_id = :project_id AND id = :id AND state = ANY(:states) FOR UPDATE"
+                ),
+                {"project_id": project_id, "id": job_id, "states": list(_OPEN)},
+            ).mappings().first()
+            if row is None:
+                return None
+            taken = conn.execute(
+                text(
+                    "UPDATE operations SET lease_until = now() + make_interval(secs => :lease_seconds) "
+                    "WHERE project_id = :project_id AND id = :operation_id AND (lease_until IS NULL OR lease_until <= now())"
+                ),
+                {"lease_seconds": LEASE_SECONDS, "project_id": project_id, "operation_id": row["operation_id"]},
+            ).rowcount
+            if taken != 1:
+                return None
+            updated = conn.execute(
+                text(
+                    "UPDATE coding_jobs SET state = 'STARTING', last_heartbeat_at = now(), container_reference = :name "
+                    "WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing AND operation_id = :operation_id"
+                ),
+                {
+                    "name": container_name(job_id),
+                    "project_id": project_id,
+                    "id": job_id,
+                    "fencing": row["fencing_token"],
+                    "operation_id": row["operation_id"],
+                },
+            ).rowcount
+            if updated != 1:
+                raise CodingError("fence_lost")
+        return dict(row)
+    except CodingError:
+        return None
 
 
 def _sandbox_stop(
@@ -267,7 +311,14 @@ def _sandbox_stop(
 ) -> dict[str, str] | None:
     if exc.code in _UNCONFIRMED:
         _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=str(row["task_id"]), request_key=request_key, reserved=reserved)
-        _clear_lease(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]))
+        _clear_lease(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            operation_id=str(row["operation_id"]),
+            job_id=str(row["id"]),
+            fencing_token=int(row["fencing_token"]),
+        )
         return {"coding_job_id": str(row["id"]), "state": "ACTIVE", "error_code": exc.code}
     if exc.code not in _CONFIRMED_STOP:
         return None
@@ -313,13 +364,20 @@ def _stop_confirmed(
     state = terminal_state_after_stop(confirmed=confirmed, cancel=cancel)
     if state is None:
         _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
-        _clear_lease(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]))
+        _clear_lease(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            operation_id=str(row["operation_id"]),
+            job_id=job_id,
+            fencing_token=int(row["fencing_token"]),
+        )
         pending = "cancel_unconfirmed" if cancel else "deadline_unconfirmed"
         return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": pending}
     workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
     _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
     chosen = error_code or ("cancelled" if state == "CANCELLED" else "deadline_exceeded")
-    _publish_stop(
+    stored = _publish_stop(
         database,
         store,
         owner_id=owner_id,
@@ -332,6 +390,8 @@ def _stop_confirmed(
         logs=logs or {},
         cancel=state == "CANCELLED",
     )
+    if not stored:
+        return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
     return {"coding_job_id": job_id, "state": state, "error_code": chosen}
 
 
@@ -371,29 +431,67 @@ def _take_expired_lease(database: Database, *, owner_id: str, project_id: str, j
     return taken == 1
 
 
-def _renew_lease(database: Database, *, owner_id: str, project_id: str, operation_id: str, job_id: str) -> None:
+def _renew_lease(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    operation_id: str,
+    job_id: str,
+    fencing_token: int,
+) -> None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text(
-                "UPDATE operations SET lease_until = now() + make_interval(secs => :lease_seconds) "
-                "WHERE project_id = :project_id AND id = :operation_id AND lease_until > now()"
+                "UPDATE operations AS o SET lease_until = now() + make_interval(secs => :lease_seconds) "
+                "FROM coding_jobs AS j "
+                "WHERE o.project_id = :project_id AND o.id = :operation_id "
+                "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
+                "AND j.fencing_token = :fencing AND o.lease_until > now()"
             ),
-            {"lease_seconds": LEASE_SECONDS, "project_id": project_id, "operation_id": operation_id},
+            {
+                "lease_seconds": LEASE_SECONDS,
+                "project_id": project_id,
+                "operation_id": operation_id,
+                "job_id": job_id,
+                "fencing": fencing_token,
+            },
         )
         conn.execute(
             text(
                 "UPDATE coding_jobs SET last_heartbeat_at = now() "
-                "WHERE project_id = :project_id AND id = :id AND state = ANY(:states)"
+                "WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing "
+                "AND operation_id = :operation_id AND state = ANY(:states)"
             ),
-            {"project_id": project_id, "id": job_id, "states": list(_OPEN)},
+            {
+                "project_id": project_id,
+                "id": job_id,
+                "fencing": fencing_token,
+                "operation_id": operation_id,
+                "states": list(_OPEN),
+            },
         )
 
 
-def _clear_lease(database: Database, *, owner_id: str, project_id: str, operation_id: str) -> None:
+def _clear_lease(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    operation_id: str,
+    job_id: str,
+    fencing_token: int,
+) -> None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
-            text("UPDATE operations SET lease_until = NULL WHERE project_id = :project_id AND id = :id"),
-            {"project_id": project_id, "id": operation_id},
+            text(
+                "UPDATE operations AS o SET lease_until = NULL "
+                "FROM coding_jobs AS j "
+                "WHERE o.project_id = :project_id AND o.id = :id "
+                "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
+                "AND j.fencing_token = :fencing"
+            ),
+            {"project_id": project_id, "id": operation_id, "job_id": job_id, "fencing": fencing_token},
         )
 
 
@@ -493,12 +591,20 @@ def _publish(
     state: str,
     error_code: str | None,
     manifest: list[str],
-) -> None:
-    _mark(database, owner_id=owner_id, project_id=project_id, job_id=str(row["id"]), state="EXPORTING")
+) -> bool:
+    _mark(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        job_id=str(row["id"]),
+        state="EXPORTING",
+        fencing_token=int(row["fencing_token"]),
+        operation_id=str(row["operation_id"]),
+    )
     patch = unified_patch(workspace["base_files"], workspace["files"]).encode()
     result = json.dumps({"kind": "aether.coding_test_result", **sandbox["result"]}, ensure_ascii=False, separators=(",", ":")).encode()
     events = _events(sandbox, error_code, manifest=manifest, patch=patch)
-    _store_terminal(
+    return _store_terminal(
         database,
         store,
         owner_id=owner_id,
@@ -526,8 +632,16 @@ def _publish_stop(
     manifest: list[str],
     logs: dict[str, Any],
     cancel: bool,
-) -> None:
-    _mark(database, owner_id=owner_id, project_id=project_id, job_id=str(row["id"]), state="EXPORTING")
+) -> bool:
+    _mark(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        job_id=str(row["id"]),
+        state="EXPORTING",
+        fencing_token=int(row["fencing_token"]),
+        operation_id=str(row["operation_id"]),
+    )
     patch = unified_patch(workspace["base_files"], workspace["files"]).encode()
     stdout, stderr = _tails(logs)
     result = json.dumps(
@@ -536,7 +650,7 @@ def _publish_stop(
         separators=(",", ":"),
     ).encode()
     events = _stop_events(error_code=error_code, manifest=manifest, patch=patch, stdout=stdout, stderr=stderr, cancel=cancel)
-    _store_terminal(
+    return _store_terminal(
         database,
         store,
         owner_id=owner_id,
@@ -585,8 +699,25 @@ def _fail(
             revoke=False,
         )
     except (ArtifactError, OSError):
-        _mark(database, owner_id=owner_id, project_id=project_id, job_id=str(row["id"]), state="FAILED")
-        _operation(database, owner_id=owner_id, project_id=project_id, operation_id=str(row["operation_id"]), state="FAILED", error_code=error_code)
+        _mark(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            job_id=str(row["id"]),
+            state="FAILED",
+            fencing_token=int(row["fencing_token"]),
+            operation_id=str(row["operation_id"]),
+        )
+        _operation(
+            database,
+            owner_id=owner_id,
+            project_id=project_id,
+            operation_id=str(row["operation_id"]),
+            state="FAILED",
+            error_code=error_code,
+            job_id=str(row["id"]),
+            fencing_token=int(row["fencing_token"]),
+        )
 
 
 def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[str], patch: bytes) -> bytes:
@@ -647,25 +778,22 @@ def _store_terminal(
     result: bytes,
     events: bytes,
     revoke: bool,
-) -> None:
+) -> bool:
     task_id = str(row["task_id"])
     job_id = str(row["id"])
+    fencing = int(row["fencing_token"])
+    operation_id = str(row["operation_id"])
     patch_id = str(store.put(owner_id=owner_id, project_id=project_id, data=patch, media_type="text/plain", classification="coding_patch")["artifact_id"])
     result_id = str(store.put(owner_id=owner_id, project_id=project_id, data=result, media_type="application/json", classification="coding_test_result")["artifact_id"])
     events_id = str(store.put(owner_id=owner_id, project_id=project_id, data=events, media_type="application/json", classification="coding_events")["artifact_id"])
     operation_state = "CONFIRMED" if state == "FINISHED" else "FAILED"
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        for artifact_id, classification in (
-            (patch_id, "coding_patch"),
-            (result_id, "coding_test_result"),
-            (events_id, "coding_events"),
-        ):
-            _link(conn, project_id=project_id, task_id=task_id, artifact_id=artifact_id, classification=classification)
         updated = conn.execute(
             text(
                 "UPDATE coding_jobs SET state = :state, patch_artifact_id = :patch, result_artifact_id = :result, "
                 "events_artifact_id = :events, last_heartbeat_at = now() "
-                "WHERE project_id = :project_id AND id = :id AND state = ANY(:open_states)"
+                "WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing "
+                "AND operation_id = :operation_id AND state = ANY(:open_states)"
             ),
             {
                 "state": state,
@@ -674,24 +802,39 @@ def _store_terminal(
                 "events": events_id,
                 "project_id": project_id,
                 "id": job_id,
+                "fencing": fencing,
+                "operation_id": operation_id,
                 "open_states": list(_OPEN),
             },
         ).rowcount
         if updated != 1:
-            return
-        conn.execute(
+            return False
+        for artifact_id, classification in (
+            (patch_id, "coding_patch"),
+            (result_id, "coding_test_result"),
+            (events_id, "coding_events"),
+        ):
+            _link(conn, project_id=project_id, task_id=task_id, artifact_id=artifact_id, classification=classification)
+        operated = conn.execute(
             text(
-                "UPDATE operations SET state = :state, error_code = :error, resolved_at = now(), result = CAST(:result AS jsonb) "
-                "WHERE project_id = :project_id AND id = :id AND state IN ('PREPARED', 'DISPATCHED')"
+                "UPDATE operations AS o SET state = :state, error_code = :error, resolved_at = now(), result = CAST(:result AS jsonb) "
+                "FROM coding_jobs AS j "
+                "WHERE o.project_id = :project_id AND o.id = :operation_id "
+                "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
+                "AND j.fencing_token = :fencing AND o.state IN ('PREPARED', 'DISPATCHED')"
             ),
             {
                 "state": operation_state,
                 "error": error_code,
                 "result": json.dumps({"patch_artifact_id": patch_id, "result_artifact_id": result_id, "events_artifact_id": events_id}),
                 "project_id": project_id,
-                "id": row["operation_id"],
+                "operation_id": operation_id,
+                "job_id": job_id,
+                "fencing": fencing,
             },
-        )
+        ).rowcount
+        if operated != 1:
+            raise CodingError("fence_lost")
         if revoke:
             conn.execute(
                 text(
@@ -700,8 +843,18 @@ def _store_terminal(
                     "WHERE o.project_id = :project_id AND o.id = :operation_id "
                     "AND g.project_id = o.project_id AND g.id = o.capability_id"
                 ),
-                {"project_id": project_id, "operation_id": row["operation_id"]},
+                {"project_id": project_id, "operation_id": operation_id},
             )
+        _append_coding_event(
+            conn,
+            project_id=project_id,
+            task_id=task_id,
+            job_id=job_id,
+            fencing=fencing,
+            state=state,
+            error_code=error_code,
+        )
+    return True
 
 
 def _link(conn: Any, *, project_id: str, task_id: str, artifact_id: str, classification: str) -> None:
@@ -723,14 +876,86 @@ def _link(conn: Any, *, project_id: str, task_id: str, artifact_id: str, classif
     )
 
 
-def _mark(database: Database, *, owner_id: str, project_id: str, job_id: str, state: str) -> None:
+def _append_coding_event(
+    conn: Any,
+    *,
+    project_id: str,
+    task_id: str,
+    job_id: str,
+    fencing: int,
+    state: str,
+    error_code: str | None,
+) -> None:
+    event_key = f"coding-job-{job_id}-{fencing}"
+    existing = conn.execute(
+        text("SELECT 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id AND event_key = :event_key"),
+        {"project_id": project_id, "task_id": task_id, "event_key": event_key},
+    ).first()
+    if existing is not None:
+        return
+    conn.execute(
+        text("SELECT id FROM tasks WHERE project_id = :project_id AND id = :task_id FOR UPDATE"),
+        {"project_id": project_id, "task_id": task_id},
+    )
+    payload = json.dumps({"coding_job_id": job_id, "state": state, "error_code": error_code})
+    for _attempt in range(5):
+        sequence = conn.execute(
+            text("SELECT coalesce(max(sequence), 0) + 1 FROM task_events WHERE project_id = :project_id AND task_id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar_one()
+        try:
+            with conn.begin_nested():
+                conn.execute(
+                    text(
+                        "INSERT INTO task_events (project_id, task_id, sequence, event_key, event_type, payload) "
+                        "VALUES (:project_id, :task_id, :sequence, :event_key, 'coding_job.terminal', CAST(:payload AS jsonb))"
+                    ),
+                    {
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "sequence": sequence,
+                        "event_key": event_key,
+                        "payload": payload,
+                    },
+                )
+                conn.execute(
+                    text(
+                        "UPDATE tasks SET projection_updated_at = now(), version = version + 1 "
+                        "WHERE project_id = :project_id AND id = :id"
+                    ),
+                    {"project_id": project_id, "id": task_id},
+                )
+            return
+        except IntegrityError:
+            continue
+    raise CodingError("event_conflict")
+
+
+def _mark(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    job_id: str,
+    state: str,
+    fencing_token: int,
+    operation_id: str,
+) -> None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text(
                 "UPDATE coding_jobs SET state = :state, last_heartbeat_at = now() "
-                "WHERE project_id = :project_id AND id = :id AND state = ANY(:open_states)"
+                "WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing "
+                "AND operation_id = :operation_id AND state = ANY(:open_states)"
             ),
-            {"state": state, "project_id": project_id, "id": job_id, "open_states": list(_OPEN)},
+            {
+                "state": state,
+                "project_id": project_id,
+                "id": job_id,
+                "fencing": fencing_token,
+                "operation_id": operation_id,
+                "open_states": list(_OPEN),
+            },
         )
 
 
@@ -742,16 +967,28 @@ def _operation(
     operation_id: str,
     state: str,
     error_code: str | None,
+    job_id: str,
+    fencing_token: int,
 ) -> None:
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text(
-                "UPDATE operations SET state = :state, error_code = :error, "
+                "UPDATE operations AS o SET state = :state, error_code = :error, "
                 "dispatched_at = CASE WHEN :state = 'DISPATCHED' THEN now() ELSE dispatched_at END, "
                 "resolved_at = CASE WHEN :state IN ('CONFIRMED', 'FAILED') THEN now() ELSE resolved_at END "
-                "WHERE project_id = :project_id AND id = :id AND state IN ('PREPARED', 'DISPATCHED')"
+                "FROM coding_jobs AS j "
+                "WHERE o.project_id = :project_id AND o.id = :operation_id "
+                "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
+                "AND j.fencing_token = :fencing AND o.state IN ('PREPARED', 'DISPATCHED')"
             ),
-            {"state": state, "error": error_code, "project_id": project_id, "id": operation_id},
+            {
+                "state": state,
+                "error": error_code,
+                "project_id": project_id,
+                "operation_id": operation_id,
+                "job_id": job_id,
+                "fencing": fencing_token,
+            },
         )
 
 

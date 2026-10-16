@@ -29,8 +29,13 @@ def parse_file_map(value: object, *, limit: int = 32, allow_empty: bool = False)
     for name, content in value.items():
         if not isinstance(name, str) or not isinstance(content, str):
             raise BundleError("path_rejected")
+        try:
+            encoded = content.encode("utf-8")
+            name.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise BundleError("bundle_invalid") from exc
         parsed[safe_relative(name)] = content
-        if len(content.encode("utf-8")) > 256 * 1024:
+        if len(encoded) > 256 * 1024:
             raise BundleError("bundle_invalid")
     return parsed
 

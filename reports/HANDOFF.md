@@ -101,7 +101,9 @@ ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F35 接替。Watch 循�
 
 取消和 TTL 见 ADR-F36。任务 `cancel` 把 `resume_state` 写成 `cancel_requested`。作业轮询到这个状态，或任务已是 `CANCELLED`，就先留下限长日志，再用 10 秒 grace 停掉带 `aether.coding=<job id>` 标签的容器，第二次列表为空才写成 `CANCELLED`。事件里 `cancel_state` 是 `confirmed`，`external_effect` 仍是 `unknown`。capability 撤销，该次预留按实际 0 结算。容器还在就不进入终态，租约清掉，已预留账单 `mark_unknown`。租约在 `operations.lease_until`，领取和轮询各续 30 秒。截止时间已到且租约过期才回收；抢不到租约不调用 docker，也不删除作业行。确认停掉后截止时间到达是 `FAILED` / `deadline_exceeded`。`CANCELLED` 不能用同一作业键重试。ADR-F26 的 `LinuxRunner.cancel` 没有改。
 
-技能评测：合法 `skill.evaluate` 返回 202，不插入不能更新的 `QUEUED` 行。`evaluation.create` 仍只插入没有分数的 `QUEUED`。verifier 按数据集清单用 SYS-02 隔离评分器逐项评分，`record_evaluation` 写不可变评测和报告。指标沿用 SYS-07。`baseline_cost` 为 0 且 `candidate_cost` 不为 0 时，在启动容器前记 `REJECTED`，`metrics` 为 NULL，`error_code` 为 `non_finite`。一个 family 是 `INSUFFICIENT_EVIDENCE`，版本变为 `EVALUATING`，不晋升。development 遇到 holdout 是 `dataset_isolated`。终态用 `GET /v1/projects/{id}/evaluations` 查询。`apply_verdict` 同时更新状态列和 `manifest.status`。
+技能评测：合法 `skill.evaluate` 返回 202，不插入不能更新的 `QUEUED` 行。`evaluation.create` 仍只插入没有分数的 `QUEUED`。verifier 按数据集清单用 SYS-02 隔离评分器逐项评分，`record_evaluation` 写不可变评测和报告。指标沿用 SYS-07。`baseline_cost` 为 0 且 `candidate_cost` 不为 0 时，在启动容器前记 `REJECTED`，`metrics` 为 NULL，`error_code` 为 `non_finite`。一个 family 是 `INSUFFICIENT_EVIDENCE`，版本变为 `EVALUATING`，不晋升。development 遇到 holdout 是 `dataset_isolated`。终态用 `GET /v1/projects/{id}/evaluations` 查询。`apply_verdict` 同时更新状态列和 `manifest.status`，但不覆盖已经是 `CANARY` 或 `ACTIVE` 的版本。
+
+审查收紧见 ADR-F37。过期的编码尝试不能靠旧的 fencing 或 operation 改写重试后的行。同一作业键在受理事务里串行，已有未消费命令时再次 202 返回同一个资源。沙箱日志只留尾部。未等待的 `async def test_*` 记失败。请求若带 `budget.active_seconds`，整次评测到点就停掉评分容器并记 `deadline_exceeded`；没有这个字段不加期限。`baseline_version_id` 必须属于同一技能，否则 404 且不写 outbox，合法基线写入评测行。`security_failure` 先于样本量门槛。终态追加任务事件 `coding_job.terminal`，代码页用现有事件流查看并保留作业编号。没有新增合同路由。
 
 有意改写的断言：
 
@@ -111,27 +113,27 @@ ADR-F33 里这两条入口的 422 `unsupported` 由 ADR-F35 接替。Watch 循�
 - `tests/integration/test_sys01_entry.py` 的 `_assert_missing_jobs_are_not_queued`：随机任务、产物、技能 id 从 422 `unsupported` 改为 404 `not_found`。编码作业和评测行数仍是 0。
 - `tests/integration/test_console_browser.py` 的 `test_console_shows_real_states_and_does_not_execute_html`：页面文案改为终态说明。登录后的代码页提交真实作业，状态是「作业已排队，还没有通过结果。」刷新会轮换 CSRF，所以提交前重新读取会话。未登录的窄屏仍是「还没有登录。」
 
-新增测试：`tests/unit/test_coding_job_lease.py` 的 `test_stop_uses_a_ten_second_grace_and_checks_the_job_label`、`test_live_lease_blocks_reap_and_unconfirmed_stop_is_not_terminal`；`tests/integration/test_r7_coding_cancel.py` 的 `test_cancel_is_cancelled_only_after_the_container_is_gone`、`test_reaper_does_not_remove_a_leased_job`。这些测试先因缺少函数而失败，补上实现后通过。没有 skip 或 xfail，没有改 `contracts/` 或 `reference/`。
+新增测试：`tests/unit/test_coding_job_lease.py` 的 `test_stop_uses_a_ten_second_grace_and_checks_the_job_label`、`test_live_lease_blocks_reap_and_unconfirmed_stop_is_not_terminal`；`tests/integration/test_r7_coding_cancel.py` 的 `test_cancel_is_cancelled_only_after_the_container_is_gone`、`test_reaper_does_not_remove_a_leased_job`。审查跟进：`tests/unit/test_review_bounds.py` 的 `test_log_tail_keeps_only_the_requested_bytes`、`test_zero_active_seconds_is_already_due`、`test_missing_active_seconds_sets_no_deadline`、`test_grader_timeout_removes_the_named_container`、`test_negative_active_seconds_is_a_deadline_error`；`tests/unit/test_coding_skill_pipeline.py` 的 `test_lone_surrogate_is_rejected_as_an_invalid_bundle`；`tests/unit/test_skill_judge_metrics.py` 的 `test_threshold_failures_stay_ineligible` 增加「一个 family 且 `security_failure` 为真是 `REJECTED`」，原有门槛断言仍在；`tests/integration/test_r7_review_followups.py` 的 `test_duplicate_job_key_is_one_accepted_command`、`test_unrelated_baseline_is_not_accepted`、`test_active_seconds_zero_rejects_before_a_grade`、`test_canary_and_baseline_survive_evaluation`、`test_slow_grader_stops_when_active_seconds_expire`、`test_async_failure_is_visible_on_the_task_stream`、`test_stale_attempt_cannot_overwrite_a_requeued_job`。这些测试先失败，补上实现后通过。没有 skip 或 xfail，没有改 `contracts/` 或 `reference/`。
 
-变基到 `6f223f7` 并补上取消确认之后的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 可用，Python 3.13.16）：
+审查收紧之后的本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal 1.9.1，Docker 可用，Python 3.13.16）：
 
 ```text
 uv run --locked --no-build python scripts/verify_freeze.py
-# exit 0
+# exit 0，api_operations 50
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
 # Ran 76 tests, OK
 uv run --locked --no-build pytest -q tests/unit
-# 238 passed in 108.32s
+# 244 passed in 105.56s
 AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
   PATH="$HOME/.local/bin:.hermes/.venv/bin:$PATH" uv run --locked --no-build pytest -q tests/integration
-# 351 passed, 1 warning in 319.18s
+# 358 passed, 1 warning in 330.18s
 uv run --locked --no-build python scripts/doctor.py --require-services
 # exit 0。reports/doctor.json 的本机探测差异没有提交。
 (cd apps/web && pnpm typecheck)
 # exit 0（本机 Node 22.14.0；CI 使用 Node 24）
 ```
 
-做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
+做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。没有新增编码作业 GET。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
 
 下一步：同一 PR 保持 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）全绿。若失败或出现新的审查意见，修到全绿再收口。
 

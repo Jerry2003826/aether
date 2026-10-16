@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import tempfile
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -118,6 +119,56 @@ def _ensure_grader_image() -> bool:
     return built.returncode == 0
 
 
+def run_grader_container(
+    workspace: Path,
+    *,
+    timeout_seconds: float | None,
+    host_sentinel: str = "/aether-host-sentinel",
+) -> subprocess.CompletedProcess[str]:
+    """Run the grader. A deadline names the container so a timeout can remove it."""
+    name = None if timeout_seconds is None else f"aether-grade-{uuid.uuid4().hex[:20]}"
+    args = ["run"]
+    if name is not None:
+        args.extend(["--name", name])
+    args.extend(
+        [
+            "--rm",
+            "--network",
+            "none",
+            "--read-only",
+            "--security-opt",
+            "no-new-privileges",
+            "--pids-limit",
+            "64",
+            "--tmpfs",
+            "/run/aether:rw,nosuid,nodev,mode=0711",
+            "-e",
+            "HOME=/run/aether",
+            "-e",
+            "TMPDIR=/run/aether",
+            "-e",
+            "PYTHONDONTWRITEBYTECODE=1",
+            "-e",
+            "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
+            "-e",
+            f"AETHER_HOST_SENTINEL={host_sentinel}",
+            "-v",
+            f"{workspace}:/work:ro",
+            GRADER_IMAGE,
+            "python",
+            "-I",
+            "-c",
+            _GRADER_PROGRAM,
+        ]
+    )
+    try:
+        return _docker(args, timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as exc:
+        if name is not None:
+            _docker(["rm", "-f", name])
+        raise VerificationError("deadline_exceeded") from exc
+
+
 def _result(
     verdict: str,
     reason: str,
@@ -154,6 +205,7 @@ def grade(
     contract_sha256: str,
     candidate_sha256: str,
     host_sentinel: Path | None = None,
+    timeout_seconds: float | None = None,
 ) -> dict[str, Any]:
     """Verify the bound suite and contract, then run only that suite inside the sandbox."""
     observed_suite = export_candidate(suite)["candidate_sha256"]
@@ -176,38 +228,7 @@ def grade(
         if protocol is not None:
             _publish_protocol(workspace, protocol)
         sentinel = str(host_sentinel) if host_sentinel is not None else "/aether-host-sentinel"
-        completed = _docker(
-            [
-                "run",
-                "--rm",
-                "--network",
-                "none",
-                "--read-only",
-                "--security-opt",
-                "no-new-privileges",
-                "--pids-limit",
-                "64",
-                "--tmpfs",
-                "/run/aether:rw,nosuid,nodev,mode=0711",
-                "-e",
-                "HOME=/run/aether",
-                "-e",
-                "TMPDIR=/run/aether",
-                "-e",
-                "PYTHONDONTWRITEBYTECODE=1",
-                "-e",
-                "PYTEST_DISABLE_PLUGIN_AUTOLOAD=1",
-                "-e",
-                f"AETHER_HOST_SENTINEL={sentinel}",
-                "-v",
-                f"{workspace}:/work:ro",
-                GRADER_IMAGE,
-                "python",
-                "-I",
-                "-c",
-                _GRADER_PROGRAM,
-            ]
-        )
+        completed = run_grader_container(workspace, timeout_seconds=timeout_seconds, host_sentinel=sentinel)
     if completed.returncode != 0 or not completed.stdout.startswith("ISOLATION "):
         return _result("FAIL", "评分容器没有完成", suite_sha256, contract_sha256, observed_candidate)
     parsed = _parse_grader(completed.stdout)

@@ -69,9 +69,11 @@ def judge(metrics: dict[str, Any], *, synthetic: bool) -> dict[str, Any]:
     if measured is None:
         return _insufficient()
     families, ci_lower, delta, cost_ratio = measured
+    if metrics.get("security_failure"):
+        return _rejected()
     if families < THRESHOLDS["min_families"] or ci_lower <= THRESHOLDS["min_ci_lower"]:
         return _insufficient()
-    if delta < THRESHOLDS["min_success_delta"] or cost_ratio > THRESHOLDS["max_cost_ratio"] or metrics.get("security_failure"):
+    if delta < THRESHOLDS["min_success_delta"] or cost_ratio > THRESHOLDS["max_cost_ratio"]:
         return _rejected()
     return {"decision": "ELIGIBLE", "label": "not_synthetic", "promoted": True, "learned": False}
 
@@ -89,6 +91,7 @@ def record_evaluation(
     synthetic: bool,
     report_store: ArtifactStore | None = None,
     evaluation_id: str | None = None,
+    baseline_version_id: str | None = None,
 ) -> str:
     """Record a verifier evaluation. With a report store, the report is written in the same transaction.
 
@@ -126,8 +129,8 @@ def record_evaluation(
         conn.execute(
             text(
                 "INSERT INTO evaluation_runs (id, project_id, purpose, dataset_manifest_sha256, model_manifest, "
-                "candidate_version_id, configuration, status, metrics, report_artifact_id, evaluator_identity) "
-                "VALUES (:id, :project_id, :purpose, :dataset, CAST(:model AS jsonb), :candidate, CAST(:configuration AS jsonb), "
+                "candidate_version_id, baseline_version_id, configuration, status, metrics, report_artifact_id, evaluator_identity) "
+                "VALUES (:id, :project_id, :purpose, :dataset, CAST(:model AS jsonb), :candidate, :baseline, CAST(:configuration AS jsonb), "
                 ":status, CAST(:metrics AS jsonb), :report, :identity)"
             ),
             {
@@ -137,6 +140,7 @@ def record_evaluation(
                 "dataset": dataset_sha256,
                 "model": json.dumps({"scripted": True}),
                 "candidate": candidate_version_id,
+                "baseline": baseline_version_id,
                 "configuration": json.dumps(configuration),
                 "status": verdict["decision"],
                 "metrics": json.dumps(recorded),
@@ -178,15 +182,21 @@ def apply_verdict(database: Database, *, owner_id: str, project_id: str, version
     if verdict["decision"] == "INSUFFICIENT_EVIDENCE":
         status = "EVALUATING"
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
+        updated = conn.execute(
             text(
                 "UPDATE skill_versions SET status = :status, "
                 "manifest = jsonb_set(manifest, '{status}', to_jsonb(CAST(:status AS text)), true) "
-                "WHERE project_id = :project_id AND id = :id"
+                "WHERE project_id = :project_id AND id = :id AND status NOT IN ('CANARY', 'ACTIVE')"
             ),
             {"status": status, "project_id": project_id, "id": version_id},
-        )
-    return status
+        ).rowcount
+        if updated == 1:
+            return status
+        current = conn.execute(
+            text("SELECT status FROM skill_versions WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": version_id},
+        ).scalar()
+    return status if current is None else str(current)
 
 
 def approve_canary(

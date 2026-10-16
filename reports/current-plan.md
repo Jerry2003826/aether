@@ -32,8 +32,8 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 (cd apps/web && pnpm typecheck)
 ```
 
-进度：变基冲突已按「保留 ADR-F34 的采集与工具，编码决定改记 ADR-F35」处理。规格第 6 节的取消确认和 TTL 租约回收记为 ADR-F36。失败测试先写，再补实现。
+进度：变基冲突已按「保留 ADR-F34 的采集与工具，编码决定改记 ADR-F35」处理。规格第 6 节的取消确认和 TTL 租约回收记为 ADR-F36。PR 审查意见记为 ADR-F37：围栏、同一作业键串行、日志尾部、async 测试失败、评测 `active_seconds`、基线绑定、不覆盖 CANARY/ACTIVE、安全失败优先，以及用现有任务事件查看终态。失败测试先写，再补实现。
 
-结果：冻结检查通过。参考套件 76。单元 238 passed（108.32s）。集成 351 passed、1 warning（319.18s）。doctor exit 0。web typecheck exit 0（本机 Node 22，CI 用 Node 24）。`reports/doctor.json` 的本机差异没有提交。
+结果：冻结检查通过，`api_operations` 仍是 50。参考套件 76。单元 244 passed（105.56s）。集成 358 passed、1 warning（330.18s）。doctor exit 0。web typecheck exit 0（本机 Node 22，CI 用 Node 24）。`reports/doctor.json` 的本机差异没有提交。
 
-阻塞：不启动 OpenHands，也不在沙箱里调用模型。`live_ready` 保持 pending。
+阻塞：不启动 OpenHands，也不在沙箱里调用模型。没有新增编码作业 GET。`live_ready` 保持 pending。

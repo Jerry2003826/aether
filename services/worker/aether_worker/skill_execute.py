@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,16 @@ from aether_worker.skill_dataset import DatasetError, parse_candidate, parse_dat
 from aether_worker.skill_eval import SkillEvalError, apply_verdict, judge, record_evaluation
 from aether_worker.skill_metrics import assert_finite_costs, metrics_from_grades
 from aether_worker.verification import VerificationError, export_candidate, grade, text_sha256
+
+
+def evaluation_deadline(budget: object, *, now: float) -> float | None:
+    """None means the request did not set active_seconds. Zero is already due."""
+    if not isinstance(budget, dict) or "active_seconds" not in budget:
+        return None
+    seconds = budget["active_seconds"]
+    if isinstance(seconds, bool) or not isinstance(seconds, (int, float)) or seconds < 0:
+        raise SkillEvalError("deadline_exceeded")
+    return now + float(seconds)
 
 
 def require_development_split(split: str) -> None:
@@ -110,16 +121,20 @@ def _run_one(
 
 
 def _grade_payload(store: ArtifactStore, *, owner_id: str, project_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    baseline_id = _bound_baseline(store, owner_id=owner_id, project_id=project_id, payload=payload)
     dataset_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(payload["dataset_manifest_id"]))
     dataset = parse_dataset(dataset_bytes)
     require_development_split(dataset["split"])
     assert_finite_costs(int(dataset["candidate_cost"]), int(dataset["baseline_cost"]))
     candidate_bytes = _candidate_bytes(store, owner_id=owner_id, project_id=project_id, version_id=str(payload["candidate_version_id"]))
     candidate = parse_candidate(candidate_bytes)
-    grades = [
-        _grade_case(candidate["files"], case["suite_files"], dataset["contract"])
-        for case in dataset["cases"]
-    ]
+    deadline = evaluation_deadline(payload.get("budget"), now=time.monotonic())
+    grades = []
+    for case in dataset["cases"]:
+        remaining = None if deadline is None else deadline - time.monotonic()
+        if remaining is not None and remaining <= 0:
+            raise SkillEvalError("deadline_exceeded")
+        grades.append(_grade_case(candidate["files"], case["suite_files"], dataset["contract"], timeout_seconds=remaining))
     metrics = metrics_from_grades(
         grades,
         baseline_passes=int(dataset["baseline_passes"]),
@@ -131,7 +146,22 @@ def _grade_payload(store: ArtifactStore, *, owner_id: str, project_id: str, payl
         "split": dataset["split"],
         "synthetic": dataset["synthetic"],
         "metrics": metrics,
+        "baseline_version_id": baseline_id,
     }
+
+
+def _bound_baseline(store: ArtifactStore, *, owner_id: str, project_id: str, payload: dict[str, Any]) -> str | None:
+    baseline = payload.get("baseline_version_id")
+    if baseline in (None, ""):
+        return None
+    with store.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        skill_id = conn.execute(
+            text("SELECT skill_id::text FROM skill_versions WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": str(baseline)},
+        ).scalar()
+    if skill_id is None or str(skill_id) != str(payload.get("skill_id")):
+        raise SkillEvalError("baseline_unrelated")
+    return str(baseline)
 
 
 def _candidate_bytes(store: ArtifactStore, *, owner_id: str, project_id: str, version_id: str) -> bytes:
@@ -146,7 +176,13 @@ def _candidate_bytes(store: ArtifactStore, *, owner_id: str, project_id: str, ve
     return data
 
 
-def _grade_case(candidate_files: dict[str, str], suite_files: dict[str, str], contract: str) -> dict[str, Any]:
+def _grade_case(
+    candidate_files: dict[str, str],
+    suite_files: dict[str, str],
+    contract: str,
+    *,
+    timeout_seconds: float | None,
+) -> dict[str, Any]:
     with tempfile.TemporaryDirectory(prefix="aether-skill-") as temporary:
         root = Path(temporary)
         candidate = root / "candidate"
@@ -162,6 +198,7 @@ def _grade_case(candidate_files: dict[str, str], suite_files: dict[str, str], co
             contract_text=contract,
             contract_sha256=text_sha256(contract),
             candidate_sha256=candidate_sha,
+            timeout_seconds=timeout_seconds,
         )
 
 
@@ -196,6 +233,7 @@ def _record(
         synthetic=bool(outcome["synthetic"]),
         report_store=report_store,
         evaluation_id=str(payload["evaluation_id"]),
+        baseline_version_id=None if outcome.get("baseline_version_id") is None else str(outcome["baseline_version_id"]),
     )
     return judge(outcome["metrics"], synthetic=bool(outcome["synthetic"]))
 
@@ -239,11 +277,12 @@ def _record_blocked(
             classification="skill_evaluation_report",
             conn=conn,
         )
+        baseline = _persistable_baseline(conn, project_id=project_id, version_id=payload.get("baseline_version_id"))
         conn.execute(
             text(
                 "INSERT INTO evaluation_runs (id, project_id, purpose, dataset_manifest_sha256, model_manifest, "
-                "candidate_version_id, configuration, status, metrics, report_artifact_id, evaluator_identity) "
-                "VALUES (:id, :project_id, 'development', :dataset, CAST(:model AS jsonb), :candidate, CAST(:configuration AS jsonb), "
+                "candidate_version_id, baseline_version_id, configuration, status, metrics, report_artifact_id, evaluator_identity) "
+                "VALUES (:id, :project_id, 'development', :dataset, CAST(:model AS jsonb), :candidate, :baseline, CAST(:configuration AS jsonb), "
                 "'REJECTED', NULL, :report, :identity)"
             ),
             {
@@ -252,11 +291,22 @@ def _record_blocked(
                 "dataset": dataset_sha,
                 "model": json.dumps({"scripted": True}),
                 "candidate": payload.get("candidate_version_id"),
+                "baseline": baseline,
                 "configuration": json.dumps({"kind": "skill.evaluate", "error_code": code, "report_sha256": stored["sha256"]}, ensure_ascii=False),
                 "report": stored["artifact_id"],
                 "identity": identity,
             },
         )
+
+
+def _persistable_baseline(conn: Any, *, project_id: str, version_id: object) -> str | None:
+    if not isinstance(version_id, str) or not version_id:
+        return None
+    found = conn.execute(
+        text("SELECT 1 FROM skill_versions WHERE project_id = :project_id AND id = :id"),
+        {"project_id": project_id, "id": version_id},
+    ).first()
+    return version_id if found is not None else None
 
 
 def _dataset_sha(store: ArtifactStore, *, owner_id: str, project_id: str, artifact_id: str) -> str:

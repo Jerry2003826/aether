@@ -7,7 +7,7 @@ import math
 
 import pytest
 
-from aether_worker.bundle_files import BundleError
+from aether_worker.bundle_files import BundleError, parse_file_map
 from aether_worker.coding_sandbox import container_arguments
 from aether_worker.coding_workspace import WorkspaceError, parse_workspace, unified_patch
 from aether_worker.skill_dataset import DatasetError, parse_candidate, parse_dataset
@@ -23,6 +23,20 @@ def _workspace() -> dict:
         "files": {"app.py": "def value():\n    return 42\n"},
         "tests": {"test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n"},
     }
+
+
+def test_lone_surrogate_is_rejected_as_an_invalid_bundle() -> None:
+    body = _workspace()
+    body["files"] = {"app.py": "def value():\n    return '\ud800'\n"}
+    with pytest.raises(WorkspaceError) as rejected:
+        parse_workspace(json.dumps(body).encode())
+    assert rejected.value.code == "workspace_invalid"
+    with pytest.raises(BundleError) as bundle:
+        parse_file_map({"app.py": "\ud800"})
+    assert bundle.value.code == "bundle_invalid"
+    with pytest.raises(BundleError) as named:
+        parse_file_map({"\ud800.py": "x = 1\n"})
+    assert named.value.code == "bundle_invalid"
 
 
 def test_patch_is_the_candidate_diff_and_paths_cannot_escape() -> None:

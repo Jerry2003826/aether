@@ -5,16 +5,17 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, BinaryIO
 
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 
 CODING_RUNNER = r"""
-import importlib.util, json, os, signal, sys, time
+import importlib.util, inspect, json, os, signal, sys, time
 from pathlib import Path
 
 def _on_term(_signum, _frame):
@@ -64,13 +65,18 @@ def main():
             if not callable(fn):
                 continue
             try:
-                fn()
+                value = fn()
             except Exception as exc:
                 failed += 1
                 cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": type(exc).__name__})
-            else:
-                passed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "PASS", "detail": ""})
+                continue
+            if inspect.iscoroutine(value):
+                value.close()
+                failed += 1
+                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": "async"})
+                continue
+            passed += 1
+            cases.append({"name": path.stem + "." + attr, "verdict": "PASS", "detail": ""})
     errno = None
     try:
         sock = __import__("socket").socket()
@@ -107,6 +113,7 @@ raise SystemExit(code)
 
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
+LOG_CAPTURE_LIMIT = 65536
 POLL_SECONDS = 0.25
 
 
@@ -187,11 +194,49 @@ def coding_container_ids(job_id: str) -> list[str] | None:
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
+def read_bounded_tail(stream: BinaryIO, limit: int) -> str:
+    """Keep only the last `limit` bytes. The host does not retain the rest."""
+    if limit < 1:
+        return ""
+    kept = bytearray()
+    while True:
+        chunk = stream.read(8192)
+        if not chunk:
+            break
+        kept.extend(chunk)
+        if len(kept) > limit:
+            del kept[:-limit]
+    return kept.decode("utf-8", errors="replace")
+
+
+def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
+    if shutil.which("docker") is None:
+        return {"stdout": "", "stderr": ""}
+    process = subprocess.Popen(["docker", "logs", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    stdout: list[str] = []
+    stderr: list[str] = []
+    assert process.stdout is not None and process.stderr is not None
+    threads = [
+        threading.Thread(target=_collect_tail, args=(process.stdout, limit, stdout)),
+        threading.Thread(target=_collect_tail, args=(process.stderr, limit, stderr)),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    process.wait()
+    return {"stdout": stdout[0] if stdout else "", "stderr": stderr[0] if stderr else ""}
+
+
+def _collect_tail(stream: BinaryIO, limit: int, sink: list[str]) -> None:
+    sink.append(read_bounded_tail(stream, limit))
+
+
 def container_log_tails(job_id: str) -> dict[str, str]:
     found = coding_container_ids(job_id)
     target = found[0] if found else container_name(job_id)
-    completed = _docker(["logs", target])
-    return {"stdout": (completed.stdout or "")[-LOG_TAIL_LIMIT:], "stderr": (completed.stderr or "")[-LOG_TAIL_LIMIT:]}
+    logs = _bounded_logs(target, limit=LOG_CAPTURE_LIMIT)
+    return {"stdout": logs["stdout"][-LOG_TAIL_LIMIT:], "stderr": logs["stderr"][-LOG_TAIL_LIMIT:]}
 
 
 def confirm_coding_stop(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS) -> bool:
@@ -293,11 +338,11 @@ def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pend
 
 
 def _collect_exit(name: str) -> dict[str, Any]:
-    completed = _docker(["logs", name])
-    logs = {"stdout": (completed.stdout or "")[-LOG_TAIL_LIMIT:], "stderr": (completed.stderr or "")[-LOG_TAIL_LIMIT:]}
+    captured = _bounded_logs(name, limit=LOG_CAPTURE_LIMIT)
+    logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
     code = _exit_code(name)
     _docker(["rm", "-f", name])
-    result = _result_line(logs["stdout"])
+    result = _result_line(captured["stdout"])
     if code not in {0, 1} or result is None:
         raise CodingSandboxError("sandbox_failed", logs)
     return {

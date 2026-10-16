@@ -139,6 +139,9 @@ def test_threshold_failures_stay_ineligible() -> None:
     unsafe = judge({**GOOD, "security_failure": True}, synthetic=False)
     assert unsafe["decision"] == "REJECTED"
     assert unsafe["promoted"] is False
+    small = judge({**GOOD, "families": 1, "security_failure": True}, synthetic=False)
+    assert small["decision"] == "REJECTED"
+    assert small["promoted"] is False
 
 
 def test_synthetic_control_stays_rejected() -> None:
