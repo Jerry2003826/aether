@@ -6,7 +6,15 @@
 
 替换：feedparser 6.0.14、trafilatura 2.3.1、docling-slim 2.140.0（`format-pdf` 与 `format-office`，不用完整 docling）、jieba 0.42.1、python-frontmatter 1.3.0、httpx（采集传输原本已是 httpx）、langchain-text-splitters 1.1.3 的 `CharacterTextSplitter`、tenacity 9.2.1。jieba 只有 sdist，wheel 在 `third_party/wheels/jieba-0.42.1-py3-none-any.whl`。`CHUNKER_VERSION` 仍是 `codepoint-1`，`PARSER_VERSION` 仍是 `text-1`。`TOKENIZER_VERSION` 改为 `jieba-0.42.1-cut+code-symbols`。
 
-本机没有 PostgreSQL、Temporal 和 Docker。`tests/integration` 全套没有跑。`test_fixture_download_is_real_and_parser_stays_static` 因没有数据库被 skip。直接对本地 `/slow` 调用 `fetch_url`：`ReadTimeout`，3 次尝试，15.65 秒。抓取失败集成测试的等待改为 45 秒，断言仍是 `FAILED` 与 `fetch_failed`。这次提交的 CI 还没有记入。
+本机没有 PostgreSQL、Temporal 和 Docker。`tests/integration` 全套没有在本机跑。`test_fixture_download_is_real_and_parser_stays_static` 因没有数据库被 skip。直接对本地 `/slow` 调用 `fetch_url`：`ReadTimeout`，3 次尝试，15.65 秒。抓取失败集成测试的等待改为 45 秒，断言仍是 `FAILED` 与 `fetch_failed`。
+
+PR https://github.com/Jerry2003826/aether/pull/30 的 CI 已通过：`pack-and-unit`、`integration`、SonarCloud。两次 workflow 都是 success：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38934988113
+- https://github.com/Jerry2003826/aether/actions/runs/38935020559
+- SonarCloud：https://sonarcloud.io/dashboard?id=Jerry2003826_aether&pullRequest=30
+
+`live_ready` 仍是 pending。
 
 ```text
 uv lock

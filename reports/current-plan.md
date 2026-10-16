@@ -13,4 +13,4 @@
 - 重试：`tenacity`，只包采集 HTTP
 - 产物：只增加三种 OOXML 媒体类型
 
-结果：冻结检查通过，参考套件 76 OK，单元测试与不依赖数据库的采集测试通过。全套集成测试没有跑，因为本机没有 PostgreSQL、Temporal 和 Docker。`live_ready` 保持 pending。
+结果：冻结检查通过，参考套件 76 OK，单元测试与不依赖数据库的采集测试通过。全套集成测试没有在本机跑，因为没有 PostgreSQL、Temporal 和 Docker。PR #30 的 `pack-and-unit`、`integration` 和 SonarCloud 已通过。`live_ready` 保持 pending。
