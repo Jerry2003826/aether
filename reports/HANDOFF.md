@@ -10,7 +10,7 @@ SYS-04：有用户草案时冻结其中的验收条款和 `required_artifacts`�
 
 先失败再修：同一段已提交 JSON 被内容寻址去重后，矛盾账本会绑到后来的 PASS 产物上，正向用例因此是假失败；已改成不同字节。已降到 standard 的行再请求 standard 是 `declassification_rejected`；仍为 high 的旧行使用已消费授权是 `declassification_unauthorized`。
 
-本机回归在变基后重跑，结果见本节末尾。
+本机回归在变基后重跑，结果见本节末尾。PR #22 已标为 ready，不合并。下一步：等变基后的 CI（含 SonarCloud，不加抑制）绿。
 
 ## SYS-02 协议评分与 SYS-07 指标校验（分支 `cursor/r6-grader-isolation-f31b`）
 
