@@ -78,6 +78,22 @@ def test_swapped_values_and_unit_changes_do_not_cover_the_fact() -> None:
     assert goal_completion_detail(answer="室温记录为六十华氏度。", goal="根据资料回答室温。", source_text=fact) == "missing_fact"
 
 
+def test_subjectless_numbers_do_not_cover_two_objects() -> None:
+    source = "甲接口每分钟最多接受60次请求。\n乙接口每分钟最多接受90次请求。"
+    goal = "根据资料，分别说明甲接口和乙接口每分钟最多接受多少次请求。"
+    answer = "每分钟最多60次，每分钟最多90次"
+    assert goal_completion_state(answer=answer, goal=goal, source_text=source) != "pass"
+    assert goal_completion_detail(answer=answer, goal=goal, source_text=source) == "missing_fact"
+
+
+def test_shared_generic_word_does_not_support_a_second_object() -> None:
+    fact = "客户端请求限额为每分钟60次。"
+    goal = "分别说明客户端限额和服务端限额"
+    answer = f"资料记载：{fact}"
+    assert goal_completion_state(answer=answer, goal=goal, source_text=fact) == "unverifiable"
+    assert goal_completion_detail(answer=answer, goal=goal, source_text=fact) == "unsupported_goal_part"
+
+
 def test_two_overlapping_lines_are_both_required() -> None:
     source = "接口请求上限为每分钟六十次。\n实验设备每九十天完成一次保养。"
     goal = "请根据资料分别回答接口请求上限和实验设备保养周期。"

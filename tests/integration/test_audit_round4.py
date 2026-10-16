@@ -464,6 +464,17 @@ def test_codex_zero_remaining_time_does_not_dispatch(client, role_urls, monkeypa
     result = materialize_goal_effect(endpoints, payload)
     assert state["calls"] == 0, result
     assert result["stop_reason"] == "budget_exhausted"
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        usage = conn.execute(
+            text("SELECT usage_status, actual_micro_usd FROM model_requests WHERE task_id = :task"),
+            {"task": payload["task_id"]},
+        ).one()
+        held = conn.execute(
+            text("SELECT held_micro_usd FROM budget_accounts WHERE task_id = :task"),
+            {"task": payload["task_id"]},
+        ).scalar_one()
+    assert usage == ("cancelled_before_dispatch", None)
+    assert held == 0
 
 
 def test_codex_missing_explicit_file_is_not_dispatched(client, role_urls, monkeypatch) -> None:

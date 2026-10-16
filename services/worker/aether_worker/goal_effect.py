@@ -8,6 +8,8 @@ stays in place; a new observation gets a new row.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
+import functools
 import hashlib
 import json
 from dataclasses import dataclass
@@ -36,7 +38,7 @@ from aether_worker.research import (
 )
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-7"
+VERIFIER_VERSION = "goal-artifact-8"
 OUTPUT_TOKEN_CAP = 256
 # Local dispatch ceiling, not a provider price list. A model priced above this
 # bound can still report an overrun after the bill arrives.
@@ -89,6 +91,26 @@ def canonical_json(value: object) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"))
 
 
+_CONTROL_EXECUTOR: concurrent.futures.Executor | None = None
+
+
+def set_control_executor(executor: concurrent.futures.Executor | None) -> None:
+    """Pause and cancel run here, not on the pool that blocks inside model calls."""
+    global _CONTROL_EXECUTOR
+    _CONTROL_EXECUTOR = executor
+
+
+async def _await_off_loop(work: asyncio.Future, heartbeat: str):
+    while True:
+        done, _pending = await asyncio.wait({work}, timeout=2)
+        if work in done:
+            return work.result()
+        try:
+            activity.heartbeat(heartbeat)
+        except RuntimeError:
+            continue
+
+
 async def _run_blocking(func, *args):
     """Run sync database, disk, and provider work off the activity event loop.
 
@@ -97,14 +119,17 @@ async def _run_blocking(func, *args):
     receipt rather than a new success.
     """
     work = asyncio.create_task(asyncio.to_thread(func, *args))
-    while True:
-        done, _pending = await asyncio.wait({work}, timeout=2)
-        if work in done:
-            return work.result()
-        try:
-            activity.heartbeat("running")
-        except RuntimeError:
-            continue
+    return await _await_off_loop(work, "running")
+
+
+async def run_control_activity(func, *args):
+    """Run a control effect on the reserved executor when the worker has one."""
+    executor = _CONTROL_EXECUTOR
+    if executor is None:
+        return await _run_blocking(func, *args)
+    loop = asyncio.get_running_loop()
+    work = loop.run_in_executor(executor, functools.partial(func, *args))
+    return await _await_off_loop(work, "control")
 
 
 @activity.defn
@@ -125,7 +150,7 @@ async def execute_task(payload: dict) -> dict[str, str]:
 async def apply_task_control(payload: dict) -> dict[str, Any]:
     if ENDPOINTS is None:
         raise RuntimeError("worker endpoints are not configured")
-    return await _run_blocking(apply_task_control_effect, ENDPOINTS, payload)
+    return await run_control_activity(apply_task_control_effect, ENDPOINTS, payload)
 
 
 @activity.defn
@@ -267,6 +292,7 @@ def apply_task_control_effect(endpoints: WorkerEndpoints, payload: dict[str, Any
             allowed=PAUSEABLE_STATUSES,
             resume_state="pause_requested",
         )
+        BudgetLedger(worker).revoke_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id)
         return {"status": actual, "task_id": task_id, "resumed": False}
     if kind == "resume":
         if state != "PAUSED":
@@ -292,6 +318,7 @@ def apply_task_control_effect(endpoints: WorkerEndpoints, payload: dict[str, Any
         allowed=NON_TERMINAL_STATUSES,
         resume_state="cancel_requested",
     )
+    BudgetLedger(worker).revoke_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id)
     return {"status": actual, "task_id": task_id, "resumed": False}
 
 
@@ -842,9 +869,18 @@ def request_cost_ceiling(*, input_tokens: int, output_tokens: int) -> int:
 
 
 def _live_dispatch_plan(*, prompt: str, tokens_left: int, cost_left: int) -> dict[str, int] | None:
-    """Refuse the call when the framed request cannot fit the remaining budget."""
+    """Refuse the call when even one output token cannot fit the remaining budget.
+
+    A full 256-token output reservation is not required. The cap shrinks to the
+    output the remaining money can still cover.
+    """
     input_estimate = estimate_provider_request_tokens(prompt)
     output_cap = min(OUTPUT_TOKEN_CAP, max(0, tokens_left - input_estimate))
+    input_cost = input_estimate * INPUT_MICRO_USD_PER_TOKEN
+    if output_cap < 1 or cost_left <= input_cost:
+        return None
+    affordable_output = (cost_left - input_cost) // OUTPUT_MICRO_USD_PER_TOKEN
+    output_cap = min(output_cap, int(affordable_output))
     amount = request_cost_ceiling(input_tokens=input_estimate, output_tokens=output_cap)
     if output_cap < 1 or amount < 1 or cost_left < amount:
         return None
@@ -988,7 +1024,7 @@ def _ensure_live_answer(
     if action == "send":
         remaining = float(spec["active_seconds"]) - _task_age_seconds(database, owner_id, project_id, task_id)
         if remaining <= 0:
-            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
         gateway = ModelGateway(
             database,
@@ -1006,6 +1042,12 @@ def _ensure_live_answer(
         if blocked is not None:
             ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return {"status": blocked, "task_id": task_id}
+        if not ledger.acquire_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key):
+            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return {"status": _task_status(database, owner_id, project_id, task_id), "task_id": task_id}
+        if not ledger.consume_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key):
+            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            return {"status": _task_status(database, owner_id, project_id, task_id), "task_id": task_id}
         try:
             result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
         except GatewayDenied:

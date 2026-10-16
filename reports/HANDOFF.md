@@ -1,6 +1,18 @@
 # 交接
 
-PR #9 已由用户合并进 main，合并提交 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。main 上 pack-and-unit 与 integration 均为 success。SonarCloud 对这个合并提交是 neutral（Quality Gate not computed）；PR 当时的 quality gate passed。巡检开始时没有开放的 PR。F00–F27 在 `tasks/backlog.yaml` 与 `STATUS.json` 仍是 done。`readiness` 里 kernel、product、live_ready、codegraph 仍是 passed。`comparative_evidence` 仍是 `not_run`，不声称领先。
+PR #10 与 PR #11 已由用户合并进 main，合并提交 `967b55f691af0559308a1c7d33d100d47ffde388`。main 上 pack-and-unit 与 integration 均为 success。F00–F27 仍是 done。`live_ready` 与 `comparative_evidence` 没有改成假绿；`comparative_evidence` 仍是 `not_run`。
+
+PR #11 合并后 Codex 仍有未解决的 P1，修在 `cursor/audit-round5-codex-p1-7618`。多对象答案不能靠空主语通过；目标的每一部分要有自己的对象，不能只共享「限额」。pause/cancel 即使排在非控制命令后面也会被抽出来。`apply_task_control` 走独立控制线程池。派发许可在 `permitted` 阶段可以被已提交的停止撤销，撤销后不再调用供应商。尚未派发就到期的预留会释放。输出上限按剩余金额缩小。验收版本是 `goal-artifact-8`。细节在 `reports/audits/gpt_round5/REPAIR_RESULT.md`。
+
+本机没有 live model key。不把 F26 或 `live_task_check` 标成失败，也不改 `live_ready`。合入后仍建议监督者用真实 key 重跑 `scripts/run_live_task_check.py` 和 `scripts/run_f26_acceptance.py`。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+347 passed, 1 warning in 266.29s
+EXIT:0
+```
+
+PR #9 已由用户合并进 main，合并提交 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。main 上当时 pack-and-unit 与 integration 均为 success。SonarCloud 对那个合并提交是 neutral（Quality Gate not computed）；PR 当时的 quality gate passed。
 
 第五轮审计基线仍是合并提交 `aedbdd54dccaba39e79282f87c09bab6a6dcc873`。Codex 在 PR #9 上的 P1 与 R5-01 到 R5-05 在同一分支 `cursor/audit-round5-repairs-7618`。对象对调、时段改错、比较关系反转都不能成功；目标多问一项而资料没有时是 `unverifiable`。正确转述可以成功。空正文和 token 超额都把已知 token 计入总账。任务已经 PAUSED 或 CANCELLED 后，还没发出的调用不会再发出。已有答案的重试和最终成功提交都会再核对墙钟。原样引用去重后，`project_private` 资料仍能被选为来源。验收版本是 `goal-artifact-7`。细节在 `reports/audits/gpt_round5/REPAIR_RESULT.md`。
 

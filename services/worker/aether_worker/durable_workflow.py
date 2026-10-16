@@ -54,8 +54,7 @@ class DurableTaskWorkflow:
 
     async def _drain_controls(self, task_id: str) -> bool:
         blocked = False
-        while self._pending and str(self._pending[0].get("kind") or "") in _CONTROL:
-            item = self._pending.pop(0)
+        for item in extract_pending_controls(self._pending):
             kind = str(item.get("kind") or "")
             controlled = await workflow.execute_activity(
                 apply_task_control,
@@ -119,6 +118,19 @@ class DurableTaskWorkflow:
             await handle
             return
         await workflow.execute_activity(execute_task, activity_input, start_to_close_timeout=timedelta(seconds=60))
+
+
+def extract_pending_controls(pending: list[dict]) -> list[dict]:
+    """Pull pause, resume and cancel out even when a non-control command is in front."""
+    controls: list[dict] = []
+    kept: list[dict] = []
+    for item in pending:
+        if str(item.get("kind") or "") in _CONTROL:
+            controls.append(item)
+        else:
+            kept.append(item)
+    pending[:] = kept
+    return controls
 
 
 def _activity_input(task_id: str, item: dict) -> dict[str, str]:

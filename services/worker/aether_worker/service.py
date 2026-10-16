@@ -20,7 +20,7 @@ from aether_storage.db import Database
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
-from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task
+from aether_worker.goal_effect import WorkerEndpoints, apply_task_control, configure, execute_task, prepare_task, set_control_executor
 from aether_worker.memory import apply_memory_commands
 
 
@@ -122,6 +122,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         raise
     loop = asyncio.get_running_loop()
     loop.set_default_executor(activity_executor)
+    set_control_executor(control_executor)
     worker = Worker(
         client,
         task_queue=resolved.task_queue,
