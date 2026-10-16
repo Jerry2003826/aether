@@ -152,9 +152,10 @@ CREATE TABLE artifacts (
  created_at timestamptz NOT NULL DEFAULT now(),
  task_id uuid, sha256 text NOT NULL CHECK(sha256 ~ '^[0-9a-f]{64}$'), byte_size bigint NOT NULL CHECK(byte_size>=0),
 media_type text NOT NULL, storage_key text NOT NULL, classification text NOT NULL,
-manifest jsonb, deleted_at timestamptz, UNIQUE(project_id,storage_key), FOREIGN KEY(project_id,task_id) REFERENCES tasks(project_id,id),
+manifest jsonb, deleted_at timestamptz, FOREIGN KEY(project_id,task_id) REFERENCES tasks(project_id,id),
  PRIMARY KEY(project_id,id)
 );
+CREATE UNIQUE INDEX IF NOT EXISTS artifacts_live_identity ON artifacts (project_id, storage_key, classification, media_type) WHERE deleted_at IS NULL;
 
 CREATE TABLE verification_results (
  project_id uuid NOT NULL REFERENCES projects(id),

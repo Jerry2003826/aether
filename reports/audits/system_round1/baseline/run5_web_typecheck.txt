@@ -1,0 +1,6 @@
+ WARN  Unsupported engine: wanted: {"node":">=24"} (current: {"node":"v22.14.0","pnpm":"10.33.4"})
+
+> aether-web@1.4.0 typecheck /workspace/apps/web
+> tsc --noEmit
+
+EXIT=0

@@ -700,7 +700,7 @@ class ArtifactStore:
         storage_key: str,
         classification: str,
     ) -> tuple[str, str, str]:
-        existing = self._live_identity(conn, project_id, storage_key)
+        existing = self._live_identity(conn, project_id, storage_key, classification, media_type)
         if existing is not None:
             return existing
         try:
@@ -721,25 +721,20 @@ class ArtifactStore:
                     },
                 )
         except IntegrityError:
-            raced = self._live_identity(conn, project_id, storage_key)
+            raced = self._live_identity(conn, project_id, storage_key, classification, media_type)
             if raced is not None:
                 return raced
-            retained = conn.execute(
-                text("SELECT id::text FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key"),
-                {"project_id": project_id, "storage_key": storage_key},
-            ).scalar()
-            if retained is not None:
-                raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址") from None
             raise
         return artifact_id, media_type, classification
 
-    def _live_identity(self, conn, project_id: str, storage_key: str) -> tuple[str, str, str] | None:
+    def _live_identity(self, conn, project_id: str, storage_key: str, classification: str, media_type: str) -> tuple[str, str, str] | None:
         row = conn.execute(
             text(
                 "SELECT id::text AS id, media_type, classification FROM artifacts "
-                "WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL"
+                "WHERE project_id = :project_id AND storage_key = :storage_key AND deleted_at IS NULL "
+                "AND classification = :classification AND media_type = :media_type"
             ),
-            {"project_id": project_id, "storage_key": storage_key},
+            {"project_id": project_id, "storage_key": storage_key, "classification": classification, "media_type": media_type},
         ).mappings().first()
         if row is None:
             return None
@@ -761,7 +756,8 @@ class ArtifactStore:
             row = conn.execute(
                 text(
                     "SELECT id::text AS id, sha256, byte_size, media_type, storage_key, classification, deleted_at "
-                    "FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key"
+                    "FROM artifacts WHERE project_id = :project_id AND storage_key = :storage_key "
+                    "ORDER BY (deleted_at IS NULL) DESC, created_at DESC LIMIT 1"
                 ),
                 {"project_id": project_id, "storage_key": storage_key},
             ).mappings().first()

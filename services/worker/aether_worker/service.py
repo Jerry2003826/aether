@@ -57,12 +57,15 @@ def route_pending(dispatcher: Database, worker: Database, verifier: Database, st
     for project_id, bucket in grouped.items():
         owner_id = str(bucket["owner_id"])
         kinds: set[str] = bucket["kinds"]
-        if kinds & set(CONSOLE_KINDS):
-            apply_console_commands(worker, owner_id=owner_id, project_id=project_id)
-        if kinds & set(VERIFIER_KINDS):
-            apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
-        if any(kind.startswith("memory.") for kind in kinds):
-            apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
+        try:
+            if kinds & set(CONSOLE_KINDS):
+                apply_console_commands(worker, owner_id=owner_id, project_id=project_id)
+            if kinds & set(VERIFIER_KINDS):
+                apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
+            if any(kind.startswith("memory.") for kind in kinds):
+                apply_memory_commands(worker, store, owner_id=owner_id, project_id=project_id)
+        except Exception as exc:
+            print(f"aether-route-failed project={project_id} error={type(exc).__name__}", flush=True)
 
 
 def _intake_pause_seconds() -> float:
@@ -140,14 +143,20 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         async with worker:
             print("aether-worker-ready", flush=True)
             while not stop.is_set():
-                await deliver_pending(
-                    dispatcher,
-                    client,
-                    task_queue=resolved.task_queue,
-                    workflow=DurableTaskWorkflow,
-                    intake_pause_seconds=resolved.intake_pause_seconds,
-                )
-                await run_control(control_executor, route_pending, dispatcher, database, verifier, store)
+                try:
+                    await deliver_pending(
+                        dispatcher,
+                        client,
+                        task_queue=resolved.task_queue,
+                        workflow=DurableTaskWorkflow,
+                        intake_pause_seconds=resolved.intake_pause_seconds,
+                    )
+                except Exception as exc:
+                    print(f"aether-deliver-failed error={type(exc).__name__}", flush=True)
+                try:
+                    await run_control(control_executor, route_pending, dispatcher, database, verifier, store)
+                except Exception as exc:
+                    print(f"aether-route-failed error={type(exc).__name__}", flush=True)
                 try:
                     await asyncio.wait_for(stop.wait(), timeout=0.25)
                 except TimeoutError:

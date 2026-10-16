@@ -179,11 +179,14 @@ def test_tombstone_blocks_republish_and_recovery(client: TestClient, api_db) -> 
     store = _store(client, api_db)
     stored = store.put(owner_id=owner, project_id=project, data=b"tombstone-bytes", media_type="text/plain")
     store.tombstone(owner_id=owner, project_id=project, artifact_id=str(stored["artifact_id"]))
-    with pytest.raises(ArtifactError) as retained:
-        store.put(owner_id=owner, project_id=project, data=b"tombstone-bytes", media_type="text/plain")
-    assert retained.value.code == "tombstone_retained"
-    with pytest.raises(ArtifactError):
+    again = store.put(owner_id=owner, project_id=project, data=b"tombstone-bytes", media_type="text/plain")
+    assert again["artifact_id"] != stored["artifact_id"]
+    with pytest.raises(ArtifactError) as missing:
         store.get(owner_id=owner, project_id=project, artifact_id=str(stored["artifact_id"]))
+    assert missing.value.code == "not_found"
+    readable, media = store.get(owner_id=owner, project_id=project, artifact_id=str(again["artifact_id"]))
+    assert readable == b"tombstone-bytes"
+    assert media == "text/plain"
     assert store.recover(owner_id=owner, project_id=project) == []
     frozen = _journal(store, project)
     assert store.recover(owner_id=owner, project_id=project) == []

@@ -7,6 +7,7 @@ import uuid
 from typing import Any
 
 from sqlalchemy import text
+from sqlalchemy.exc import OperationalError
 
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
@@ -16,6 +17,7 @@ STATUSES = {"proposed", "source_claim", "user_confirmed", "observed_test", "infe
 KINDS = {"episodic", "semantic", "procedural"}
 CATEGORIES = {"fact", "preference", "procedure", "episode", "project_decision"}
 ACTIONS = {"confirm", "correct", "supersede"}
+CLAIM_CLASSIFICATION = "memory_claim"
 
 
 class MemoryError(Exception):
@@ -221,10 +223,16 @@ def apply_memory_commands(database: Database, store: ArtifactStore, *, owner_id:
         ).mappings().all()
         for row in rows:
             payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
+            nested = conn.begin_nested()
             try:
                 _apply_one(conn, store, owner_id=owner_id, project_id=project_id, kind=str(row["kind"]), payload=payload)
+                nested.commit()
                 status = "DELIVERED"
-            except MemoryError:
+            except OperationalError:
+                nested.rollback()
+                raise
+            except Exception:
+                nested.rollback()
                 status = "FAILED"
             conn.execute(
                 text(
@@ -295,7 +303,14 @@ def _create(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, 
                 text("UPDATE memories SET conflict_group = :conflict WHERE project_id = :project_id AND id = :id AND conflict_group IS NULL"),
                 {"conflict": conflict_id, "project_id": project_id, "id": row["id"]},
             )
-    stored = store.put(owner_id=owner_id, project_id=project_id, data=claim.encode(), media_type="text/plain", conn=conn)
+    stored = store.put(
+        owner_id=owner_id,
+        project_id=project_id,
+        data=claim.encode(),
+        media_type="text/plain",
+        classification=CLAIM_CLASSIFICATION,
+        conn=conn,
+    )
     conn.execute(
         text(
             "INSERT INTO memories (id, project_id, memory_key, revision, kind, claim, category, claim_artifact_id, provenance, epistemic_status, conflict_group) "
@@ -335,12 +350,20 @@ def _patch(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, p
     status = "user_confirmed" if action == "confirm" else "proposed"
     if action == "confirm" and claim != current["claim"]:
         raise MemoryError("confirmation_rejected")
-    stored = store.put(owner_id=owner_id, project_id=project_id, data=claim.encode(), media_type="text/plain", conn=conn)
+    stored = store.put(
+        owner_id=owner_id,
+        project_id=project_id,
+        data=claim.encode(),
+        media_type="text/plain",
+        classification=CLAIM_CLASSIFICATION,
+        conn=conn,
+    )
     new_id = str(payload["result_id"])
     conn.execute(
         text("UPDATE memories SET epistemic_status = 'superseded' WHERE project_id = :project_id AND id = :id"),
         {"project_id": project_id, "id": current["id"]},
     )
+    _retire_claim(conn, project_id=project_id, memory_id=str(current["id"]))
     conn.execute(
         text(
             "INSERT INTO memories (id, project_id, memory_key, revision, kind, claim, category, claim_artifact_id, provenance, epistemic_status, supersedes_id) "
@@ -369,4 +392,16 @@ def _delete(conn: Any, *, project_id: str, payload: dict[str, Any]) -> None:
     ).rowcount
     if updated != 1:
         raise MemoryError("version_conflict")
+    _retire_claim(conn, project_id=project_id, memory_id=str(payload["memory_id"]))
     invalidate_derived(conn, project_id=project_id)
+
+
+def _retire_claim(conn: Any, *, project_id: str, memory_id: str) -> None:
+    conn.execute(
+        text(
+            "UPDATE artifacts SET deleted_at = COALESCE(deleted_at, now()) "
+            "WHERE project_id = :project_id AND id = (SELECT claim_artifact_id FROM memories WHERE project_id = :project_id AND id = :id) "
+            "AND deleted_at IS NULL"
+        ),
+        {"project_id": project_id, "id": memory_id},
+    )

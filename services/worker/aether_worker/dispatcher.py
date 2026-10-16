@@ -41,13 +41,19 @@ def _claim(database: Database, limit: int) -> list[dict[str, Any]]:
                   ORDER BY created_at, command_key
                   FOR UPDATE SKIP LOCKED
                   LIMIT :limit
+                ),
+                updated AS (
+                  UPDATE command_outbox AS outbox
+                  SET status = 'DELIVERING', attempts = attempts + 1
+                  FROM claimed
+                  WHERE outbox.project_id = claimed.project_id AND outbox.id = claimed.id
+                  RETURNING outbox.project_id::text AS project_id, outbox.id::text AS id,
+                            outbox.task_id::text AS task_id, outbox.command_key, outbox.kind,
+                            outbox.payload, outbox.created_at
                 )
-                UPDATE command_outbox AS outbox
-                SET status = 'DELIVERING', attempts = attempts + 1
-                FROM claimed
-                WHERE outbox.project_id = claimed.project_id AND outbox.id = claimed.id
-                RETURNING outbox.project_id::text AS project_id, outbox.id::text AS id,
-                          outbox.task_id::text AS task_id, outbox.command_key, outbox.kind, outbox.payload
+                SELECT project_id, id, task_id, command_key, kind, payload, created_at
+                FROM updated
+                ORDER BY created_at, command_key
                 """
             ),
             {"limit": limit},
@@ -82,35 +88,53 @@ async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: 
     await handle.signal(workflow.command, {"command_id": command_id, "project_id": project_id, "kind": kind})
 
 
+def _reset_pending(database: Database, project_id: str, command_id: str) -> None:
+    with database.transaction(project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE command_outbox SET status = 'PENDING' "
+                "WHERE project_id = :project_id AND id = :id AND status = 'DELIVERING'"
+            ),
+            {"project_id": project_id, "id": command_id},
+        )
+
+
 async def deliver_pending(database: Database, client: Client, *, task_queue: str, limit: int = 20, workflow: type[TaskWorkflow] = TaskWorkflow, intake_pause_seconds: float = 0) -> dict[str, list[str]]:
-    """Signal each pending command. Temporal rejection leaves the row DELIVERING for a later poll."""
+    """Signal pending commands in per-task order. A failed signal blocks later commands of that task."""
     delivered: list[str] = []
     failed: list[str] = []
+    grouped: dict[str, list[dict[str, Any]]] = {}
     for row in _claim(database, limit):
-        payload = _payload(row["payload"])
-        command_key = str(row["command_key"])
-        task_id = row["task_id"]
-        if not task_id:
-            _mark(database, str(row["project_id"]), str(row["id"]), "FAILED")
-            failed.append(command_key)
-            continue
-        workflow_id = str(payload.get("workflow_id") or f"task-{task_id}")
-        command_id = str(payload.get("command_id") or command_key)
-        try:
-            await _signal(
-                client,
-                workflow=workflow,
-                workflow_id=workflow_id,
-                task_id=str(task_id),
-                command_id=command_id,
-                project_id=str(row["project_id"]),
-                task_queue=task_queue,
-                intake_pause_seconds=intake_pause_seconds,
-                kind=str(row["kind"]),
-            )
-        except Exception:
-            failed.append(command_key)
-            continue
-        _mark(database, str(row["project_id"]), str(row["id"]), "DELIVERED")
-        delivered.append(command_key)
+        grouped.setdefault(str(row["task_id"] or ""), []).append(row)
+    for commands in grouped.values():
+        for index, row in enumerate(commands):
+            payload = _payload(row["payload"])
+            command_key = str(row["command_key"])
+            task_id = row["task_id"]
+            project_id = str(row["project_id"])
+            if not task_id:
+                _mark(database, project_id, str(row["id"]), "FAILED")
+                failed.append(command_key)
+                continue
+            workflow_id = str(payload.get("workflow_id") or f"task-{task_id}")
+            command_id = str(payload.get("command_id") or command_key)
+            try:
+                await _signal(
+                    client,
+                    workflow=workflow,
+                    workflow_id=workflow_id,
+                    task_id=str(task_id),
+                    command_id=command_id,
+                    project_id=project_id,
+                    task_queue=task_queue,
+                    intake_pause_seconds=intake_pause_seconds,
+                    kind=str(row["kind"]),
+                )
+            except Exception:
+                failed.append(command_key)
+                for later in commands[index + 1 :]:
+                    _reset_pending(database, str(later["project_id"]), str(later["id"]))
+                break
+            _mark(database, project_id, str(row["id"]), "DELIVERED")
+            delivered.append(command_key)
     return {"delivered": delivered, "failed": failed}
