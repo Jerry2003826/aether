@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-16",
   "artifact_type": "core_done_live_pending",
-  "current_task": "P2-09 review-budget ADR-F35",
+  "current_task": "R7-1 coding jobs ADR-F36",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,7 +14,7 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready is pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. A four-way live probe is recorded in reports/hermes_compare_result.json on head fcceba5. Each group n=1, Wilson 95% about 0.21-1.0, so it does not support a winner. superior stays null, cost_status stays unknown. Requested alias deepseek-chat; provider returned deepseek-flash. semantic_support stays not_judged. Coding jobs and skill.evaluate reach a worker terminal state. Cancel becomes CANCELLED only after the labelled container is gone, and a live lease is not reaped. Review follow-ups fence the attempt, bound logs, reject async tests, honor active_seconds, bind the baseline, keep CANARY and ACTIVE, and publish coding_job.terminal on the existing task event stream. That does not change live_ready. OpenHands and a job-scoped model call are not part of this run.",
+  "next_action": "readiness.live_ready is pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. A four-way live probe is recorded in reports/hermes_compare_result.json on head fcceba5. Each group n=1, Wilson 95% about 0.21-1.0, so it does not support a winner. superior stays null, cost_status stays unknown. Requested alias deepseek-chat; provider returned deepseek-flash. semantic_support stays not_judged. Coding jobs and skill.evaluate reach a worker terminal state. Cancel becomes CANCELLED only after the labelled container is gone, and a live lease is not reaped. Review follow-ups fence the attempt, bound logs, reject async tests, honor active_seconds, bind the baseline, keep CANARY and ACTIVE, and publish coding_job.terminal on the existing task event stream. That does not change live_ready. Rebased onto origin/main 5fa78f7. ADR-F35 stays the merged review-budget decision. Coding jobs are ADR-F36, cancel and TTL are ADR-F37, and the review follow-ups are ADR-F38. OpenHands and a job-scoped model call are not part of this run.",
   "last_executed_commands": [
     "uv run --locked --no-build python scripts/verify_freeze.py",
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
@@ -23,7 +23,7 @@
     "(cd apps/web && pnpm typecheck)",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build python scripts/doctor.py --require-services"
   ],
-  "last_test_result": "Local on 2026-10-16 after the PR review follow-ups. verify_freeze passed with api_operations 50. unittest 76 OK. unit 244 passed in 105.56s. integration 358 passed, 1 warning in 330.18s with Playwright Chromium and pinned Hermes on PATH. doctor --require-services exit 0. reports/doctor.json local probe was not committed. web typecheck exit 0 on Node 22.14.0; CI uses Node 24. SonarCloud on 9aa001c rated new-code reliability C because container_name was compared with itself. That assertion now expects aether-code-6f1c1a2e7b344c2a9d10111111111111, and tests/unit/test_coding_job_lease.py is 2 passed. The full unit and integration suites were not rerun for that line. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after rebasing onto origin/main 5fa78f7. verify_freeze passed with api_operations 50. unittest 76 OK. unit 244 passed in 104.54s. integration 368 passed, 1 warning in 360.79s with Playwright Chromium and pinned Hermes on PATH. web typecheck exit 0 on Node 22.14.0; CI uses Node 24. doctor was not rerun after this rebase, and reports/doctor.json was not committed. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
