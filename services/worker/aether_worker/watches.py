@@ -16,6 +16,7 @@ from temporalio.client import (
     ScheduleIntervalSpec,
     ScheduleSpec,
 )
+from temporalio.service import RPCError, RPCStatusCode
 
 from aether_storage.db import Database
 from aether_worker.watches_workflow import WatchWorkflow
@@ -125,6 +126,94 @@ async def enable_watch(
             {"owner_id": owner_id, "project_id": project_id, "id": watch_id},
         )
     return {"id": watch_id, "schedule_id": schedule_id, "status": "ACTIVE", "external_sent": False}
+
+
+async def ensure_watch_schedules(
+    client: Client,
+    database: Database,
+    projects: dict[str, str],
+    task_queue: str,
+) -> None:
+    """Create a missing Temporal schedule for each ACTIVE watch on this worker's queue."""
+    for project_id, owner_id in projects.items():
+        for watch in _active_watches(database, owner_id=owner_id, project_id=project_id):
+            await _ensure_watch_schedule(client, watch, project_id=project_id, owner_id=owner_id, task_queue=task_queue)
+
+
+def _active_watches(database: Database, *, owner_id: str, project_id: str) -> list[dict[str, Any]]:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        rows = conn.execute(
+            text(
+                "SELECT id::text AS id, schedule_id, schedule_spec FROM watches "
+                "WHERE project_id = :project_id AND status = 'ACTIVE' ORDER BY id"
+            ),
+            {"project_id": project_id},
+        ).mappings().all()
+    loaded: list[dict[str, Any]] = []
+    for row in rows:
+        spec = row["schedule_spec"]
+        if isinstance(spec, str):
+            spec = json.loads(spec)
+        loaded.append(
+            {
+                "id": str(row["id"]),
+                "schedule_id": str(row["schedule_id"]),
+                "every_seconds": _every_seconds(spec),
+            }
+        )
+    return loaded
+
+
+def _every_seconds(spec: Any) -> int | None:
+    if not isinstance(spec, dict):
+        return None
+    raw = spec.get("interval_seconds", spec.get("every_seconds"))
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return None
+    return raw
+
+
+async def _ensure_watch_schedule(
+    client: Client,
+    watch: dict[str, Any],
+    *,
+    project_id: str,
+    owner_id: str,
+    task_queue: str,
+) -> None:
+    every = watch["every_seconds"]
+    if every is None:
+        print(f"aether-watch-schedule-skipped watch={watch['id']}", flush=True)
+        return
+    schedule_id = str(watch["schedule_id"])
+    if not await _schedule_missing(client, schedule_id):
+        return
+    try:
+        await client.create_schedule(
+            schedule_id,
+            Schedule(
+                action=ScheduleActionStartWorkflow(
+                    WatchWorkflow.run,
+                    args=[str(watch["id"]), project_id, owner_id],
+                    id=f"{schedule_id}-tick",
+                    task_queue=task_queue,
+                ),
+                spec=ScheduleSpec(intervals=[ScheduleIntervalSpec(every=timedelta(seconds=int(every)))]),
+            ),
+            trigger_immediately=True,
+        )
+    except ScheduleAlreadyRunningError:
+        return
+
+
+async def _schedule_missing(client: Client, schedule_id: str) -> bool:
+    try:
+        await client.get_schedule_handle(schedule_id).describe()
+    except RPCError as exc:
+        if exc.status == RPCStatusCode.NOT_FOUND:
+            return True
+        raise
+    return False
 
 
 async def stop_watch(database: Database, client: Client, *, owner_id: str, project_id: str, watch_id: str) -> dict[str, Any]:

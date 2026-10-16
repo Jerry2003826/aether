@@ -207,14 +207,14 @@ def test_skill_import_does_not_score_or_execute(client, role_urls) -> None:
         headers=_headers(csrf, "console-skill-eval"),
         json={"candidate_version_id": version_id, "dataset_manifest_id": artifact_id, "budget": {"max_tokens": 10}},
     )
-    assert queued.status_code == 202, queued.text
+    assert queued.status_code == 422, queued.text
+    assert queued.json()["code"] == "unsupported"
     verifier = Database(role_urls["aether_verifier"])
     apply_verifier_commands(verifier, owner_id=owner_id, project_id=project_id)
     evaluations = client.get(f"/v1/projects/{project_id}/evaluations")
     assert evaluations.status_code == 200
-    row = evaluations.json()["items"][0]
-    assert row["status"] == "QUEUED"
-    assert row["metrics"] is None
+    assert evaluations.json()["items"] == []
+    row = {"id": str(uuid.uuid4())}
     api = Database(role_urls["aether_api"])
     try:
         with api.transaction(owner_id=owner_id, project_id=project_id) as conn:

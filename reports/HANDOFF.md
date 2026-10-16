@@ -73,6 +73,32 @@ uv run --locked --no-build python scripts/doctor.py --require-services          
 
 未覆盖、不能称为已修复：容器逃逸、ptrace 父进程、猜中期望值、不能归约的白盒断言。`os.kill(-1, SIGKILL)` 只出现在评分容器程序里，宿主机测试不执行它。SYS-01/03/04/05/06/08/09 保持审计状态，本分支不关单。决定见 ADR-F30。不改变 `live_ready`。
 
+## SYS-01 公开入口接到真实检索，未实现的作业显式 unsupported（分支 `cursor/r6-entry-sys01-ac4b`）
+
+基线 `8b90363`，变基到 `e2e4c6d`。没有改 `STATUS.json`、`contracts/`、`verification.py`、`acceptance_report.py`、`memory.py`。没有把 `live_ready` 改成通过。
+
+- `POST /v1/projects/{id}/search` 在有 ACTIVE 索引时走 `authorised_search`，没有索引仍是 503 `index_unavailable`。
+- 生产 worker 把已入队的 url / rss / local_document 采集跑到 SUCCEEDED 或 FAILED，并写出版本、分块和索引代。命令已经 DELIVERED、采集仍是 QUEUED 或 RUNNING 时，重启后按索引根目录的 `projects.json` 继续执行。
+- 来源名单对得上的 Watch 变为 ACTIVE 后，在 worker 自己的任务队列上创建 Temporal schedule（间隔 `interval_seconds`），立刻跑第一次。水位变化才写通知和 `watch-run` 产物。
+- `skill.evaluate` 与编码作业返回 422 `unsupported`，不写 outbox。`docs/08_api_ui.md` 的编码作业行改为 unsupported。决定见 ADR-F33（ADR-F30 已被 SYS-02/07 占用，ADR-F31 已被 SYS-04/06 占用，ADR-F32 已被 SYS-08/03 占用）。ADR-F27 里「保持 202 + QUEUED」的旧记录保留。
+- 进程测试从公开 HTTP 开始，不直接调用内部 consumer。
+
+本机回归（Postgres 17.11 + pgvector 0.8.7，Temporal dev server `SERVING`）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit                                   # 227 passed
+AETHER_REQUIRE_SERVICES=1 PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration
+# 343 passed，1 warning（pydantic ReadOnly，既有）
+uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
+(cd apps/web && pnpm typecheck)                                                    # exit 0（本机 Node 22；CI 使用 Node 24）
+```
+
+环境变量：`AETHER_REQUIRE_SERVICES=1`，`AETHER_ADMIN_DATABASE_URL` 指向本机 Postgres 17，`AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233`。`reports/doctor.json` 的本机探测差异没有提交。
+
+剩余边界：github/arxiv 采集仍显式拒绝；水位没有变化时不发通知；持有 worker 数据库口令的人仍可以伪造账本。这些没有记成已修复。不改变 `live_ready`。
+
 下一步：PR 标为 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。
 
 ## F26 缺事实不再记成引用失败（分支 `cursor/f26-missing-fact-1f84`）

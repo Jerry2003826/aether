@@ -29,6 +29,8 @@ from aether_api.memory_routes import _enqueue
 from aether_api.settings import Settings
 from aether_domain.security import sha256_text
 from aether_worker.recommendations import rank_candidates
+from aether_worker.retrieval import RetrievalError
+from aether_worker.search_api import authorised_search
 
 _ERRORS = {
     401: {"description": "未登录"},
@@ -40,6 +42,7 @@ _ERRORS = {
     503: {"description": "依赖不可用"},
 }
 _SOURCE_KINDS = {"url", "rss", "local_document", "github_api", "arxiv_api"}
+_INGESTIBLE_KINDS = {"url", "rss", "local_document"}
 _FEEDBACK_KINDS = {"click", "save", "helpful", "dwell", "hide", "unsave"}
 _SCORE_KEYS = {"metrics", "score", "decision", "success_delta", "promoted"}
 
@@ -133,16 +136,26 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
     def create_ingestion(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         if set(body) != {"source_id"}:
             raise ApiError(422, "invalid_ingestion", "采集请求不合法")
-        _task_id(str(body["source_id"]))
+        source_id = str(body["source_id"])
+        _task_id(source_id)
+        owner = _owner(app, request, csrf=True, origin=settings)
+        _owned(app, owner, project_id)
+        with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+            kind = conn.execute(
+                text("SELECT kind FROM sources WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+                {"project_id": project_id, "id": source_id},
+            ).scalar()
+        if kind is not None and str(kind) not in _INGESTIBLE_KINDS:
+            raise ApiError(422, "unsupported", "这种来源的采集不支持，不会进入排队")
         ingestion_id = str(uuid.uuid4())
-        command = {"ingestion_id": ingestion_id, "source_id": str(body["source_id"])}
-        return _accept(app, settings, request, project_id, "ingestion.create", {"source_id": command["source_id"]}, command, ingestion_id)
+        command = {"ingestion_id": ingestion_id, "source_id": source_id}
+        return _accept(app, settings, request, project_id, "ingestion.create", {"source_id": source_id}, command, ingestion_id)
 
     @app.post("/v1/projects/{project_id}/search", operation_id="searchKnowledge", responses=_ERRORS)
     def search_knowledge(project_id: str, request: Request, body: dict[str, Any]) -> dict[str, Any]:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
-        _search_body(body, project_id)
+        parsed = _search_body(body, project_id)
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
             generation = conn.execute(
                 text(
@@ -152,10 +165,21 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
                 {"project_id": project_id},
             ).mappings().first()
         if generation is None:
-            message = "项目还没有可用索引"
-        else:
-            message = "索引存在，但这次请求没有绑定的检索进程"
-        raise ApiError(503, "index_unavailable", message, retryable=True)
+            raise ApiError(503, "index_unavailable", "项目还没有可用索引", retryable=True)
+        try:
+            return authorised_search(
+                _db(app),
+                owner_id=owner,
+                project_id=project_id,
+                query=parsed["query"],
+                mode=parsed["mode"],
+                limit=parsed["limit"],
+                source_ids=parsed["source_ids"],
+                index_root=settings.index_root,
+                generation_id=str(generation["id"]),
+            )
+        except RetrievalError as exc:
+            raise ApiError(503, "index_unavailable", "检索进程没有完成这次查询", retryable=True) from exc
 
     @app.get("/v1/projects/{project_id}/recommendations", operation_id="getRecommendations", responses=_ERRORS)
     def get_recommendations(project_id: str, request: Request) -> dict[str, Any]:
@@ -240,10 +264,11 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.post("/v1/projects/{project_id}/skills/{skill_id}/evaluate", status_code=202, operation_id="evaluateSkill", responses=_ERRORS)
     def evaluate_skill(project_id: str, skill_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
+        owner = _owner(app, request, csrf=True, origin=settings)
+        _owned(app, owner, project_id)
         _task_id(skill_id)
-        stable = _evaluate_body(body)
-        command = {**stable, "skill_id": skill_id, "evaluation_id": str(uuid.uuid4())}
-        return _accept(app, settings, request, project_id, "skill.evaluate", {**stable, "skill_id": skill_id}, command, command["evaluation_id"])
+        _evaluate_body(body)
+        raise ApiError(422, "unsupported", "技能评测不支持：不会受理后停在排队，也不能据此晋升")
 
     @app.post("/v1/projects/{project_id}/skills/{skill_id}/deployments", status_code=202, operation_id="deploySkill", responses=_ERRORS)
     def deploy_skill(project_id: str, skill_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
@@ -254,14 +279,10 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
 
     @app.post("/v1/projects/{project_id}/coding-jobs", status_code=202, operation_id="createCodingJob", responses=_ERRORS)
     def create_coding_job(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
-        stable = _coding_body(body)
-        command = {
-            **stable,
-            "coding_job_id": str(uuid.uuid4()),
-            "operation_id": str(uuid.uuid4()),
-            "capability_id": str(uuid.uuid4()),
-        }
-        return _accept(app, settings, request, project_id, "coding.create", stable, command, command["coding_job_id"])
+        owner = _owner(app, request, csrf=True, origin=settings)
+        _owned(app, owner, project_id)
+        _coding_body(body)
+        raise ApiError(422, "unsupported", "编码作业不支持：没有会执行到终态的编码沙箱，不会受理后一直排队")
 
     @app.get("/v1/projects/{project_id}/watches", operation_id="listWatches", responses=_ERRORS)
     def list_watches(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -557,15 +578,24 @@ def _source_row(conn: Any, project_id: str, row: Any) -> dict[str, Any]:
     }
 
 
-def _search_body(body: dict[str, Any], project_id: str) -> None:
+def _search_body(body: dict[str, Any], project_id: str) -> dict[str, Any]:
     if not isinstance(body, dict) or set(body) - {"project_id", "query", "mode", "limit", "source_ids"}:
         raise ApiError(422, "invalid_search", "检索请求不合法")
     query = body.get("query")
     mode = body.get("mode", "hybrid")
+    limit = body.get("limit", 8)
+    source_ids = body.get("source_ids") or []
     if body.get("project_id") != project_id or not isinstance(query, str) or not query.strip() or len(query) > 4000:
         raise ApiError(422, "invalid_search", "检索请求不合法")
     if mode not in {"lexical", "dense", "hybrid"}:
         raise ApiError(422, "invalid_search", "检索模式不合法")
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1 or limit > 50:
+        raise ApiError(422, "invalid_search", "检索条数不合法")
+    if not isinstance(source_ids, list):
+        raise ApiError(422, "invalid_search", "来源过滤不合法")
+    for item in source_ids:
+        _task_id(str(item))
+    return {"query": query.strip(), "mode": mode, "limit": limit, "source_ids": [str(item) for item in source_ids]}
 
 
 def _feedback_body(body: dict[str, Any]) -> dict[str, Any]:
