@@ -41,6 +41,7 @@ from aether_worker.research import (
 CRITERION_ID = "goal_artifact"
 VERIFIER_VERSION = "goal-artifact-9"
 OUTPUT_TOKEN_CAP = 256
+TRUNCATED_ANSWER = "模型输出因长度上限被截断，不能当作完整回答"
 # Local dispatch ceiling, not a provider price list. A model priced above this
 # bound can still report an overrun after the bill arrives.
 INPUT_MICRO_USD_PER_TOKEN = 100
@@ -1041,6 +1042,38 @@ def _task_age_seconds(database: Database, owner_id: str, project_id: str, task_i
     return (datetime.now(UTC) - created).total_seconds()
 
 
+def _book_truncated_call(
+    ledger: BudgetLedger,
+    result: dict[str, Any],
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> None:
+    """Record the spent call. The cut text is not stored as the answer."""
+    input_tokens = result.get("input_tokens")
+    output_tokens = result.get("output_tokens")
+    if result.get("usage_status") == "unknown" or input_tokens is None or output_tokens is None:
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        return
+    ledger.record_model_response(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        output="",
+        input_tokens=int(input_tokens),
+        output_tokens=int(output_tokens),
+        cost_micro_usd=None if result.get("actual_cost_micro_usd") is None else int(result["actual_cost_micro_usd"]),
+        upstream_model=None if result.get("upstream_model") is None else str(result["upstream_model"]),
+        requested_alias=None if result.get("requested_alias") is None else str(result["requested_alias"]),
+        cost_source=str(result.get("cost_source") or "unreported"),
+        pricing_version=None if result.get("pricing_version") is None else str(result["pricing_version"]),
+        finish_reason="length",
+    )
+
+
 def _ensure_live_answer(
     endpoints: WorkerEndpoints,
     database: Database,
@@ -1160,6 +1193,23 @@ def _ensure_live_answer(
                 return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型网关拒绝了这次调用", code="gateway_denied")
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")
+        if result.get("finish_reason") == "length":
+            _book_truncated_call(
+                ledger,
+                result,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+            )
+            return _needs_review(
+                database,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                reason=TRUNCATED_ANSWER,
+                code="output_truncated",
+            )
         if result.get("usage_status") == "unknown" and not result.get("output"):
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游超时", code="upstream_timeout")
@@ -1197,6 +1247,15 @@ def _ensure_live_answer(
         }
     else:
         recorded = dict(prepared.get("response") or {})
+        if recorded.get("finish_reason") == "length":
+            return _needs_review(
+                database,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                reason=TRUNCATED_ANSWER,
+                code="output_truncated",
+            )
         book_result = str(prepared.get("book_result") or recorded.get("book_result") or "replayed")
         output = str(recorded.get("output") or "").strip()
         if not output:

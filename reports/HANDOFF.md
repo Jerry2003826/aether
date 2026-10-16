@@ -1,5 +1,34 @@
 # 交接
 
+## F26 验收与研究路径的两处不稳定（分支 `cursor/f26-hardening-1f84`）
+
+基线 `0767a5e`。没有改 `contracts/`、`reference/`、验收通过条件的判定口径，也没有改 `STATUS.json` 的 `live_ready`。本机没有 live model key，不能重跑真实 DeepSeek。所有者需要重跑 `scripts/run_f26_acceptance.py` 和 `scripts/run_live_task_check.py`。
+
+两处修复：
+
+- 版本字段除 `version` 加可选 `=` / `:` / `：` 加数字外，接受 `version 为 N`、`版本 N`、`版本号：N`、`version is N`。数字必须出现在同一分句里、并绑到对应的 source id。同一分句只有一个版本号时，这个数字绑到该分句里的每个 source id。错误版本、版本只写在另一条来源上、版本单独成句、或缺少引用，仍然失败。研究提示要求写成 `version=N`。
+- 研究报告单次输出上限改为 2048 token（`RESEARCH_OUTPUT_TOKENS`）。编码和协议调用仍是 512。8 次研究上限是 16384，仍低于累计 20000 和 1 美元。网关读取 `finish_reason`；`length` 不把截断正文当成完整回答。F26 验收记 `output_truncated`。产品研究路径把任务标成人工复核，已知用量照常入账，截断正文不写入任务回答。决定见 `docs/DECISIONS.md` 的 ADR-F28。
+
+先失败再修：在未改解析器和网关时，四种新表述、共享分句绑定、2048 上限、`version=` 提示，以及网关 `finish_reason` 断言都失败。错误版本、未绑定版本、缺少引用在旧代码上已经失败，修复后仍然失败。
+
+本机回归（Postgres 17.11 + pgvector 0.8.7，Temporal dev server `SERVING`）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit                                   # 145 passed
+PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration
+# 324 passed，1 failed：test_hermes_compare_protocol.py::test_pinned_hermes_identity_and_local_protocol
+# 身份探测在全量负载下得到 commit=None（与上次交接里同一条用例的超时相同，本分支没有改 Hermes 身份代码）
+# 单独重跑该用例：1 passed
+uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
+(cd apps/web && pnpm typecheck)                                                    # exit 0（本机 Node 22；CI 使用 Node 24）
+```
+
+环境变量：`AETHER_REQUIRE_SERVICES=1`，`AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres`，`AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233`。
+
+下一步：PR 标为 ready，不合并。等 CI（含 SonarCloud，不加抑制）绿。所有者在有 live key 的机器上重跑 F26 验收和 live 任务检查。
+
 ## 系统审计第一轮 · C 组 P2-04 收紧（分支 `cursor/sysfix-c2-f4de`）
 
 PR #16 已合入 main `b735f28`。所有者批准了 P2-04 的三项收紧，并批准相应修改验收用例 `test_owner_can_roll_a_canary_back_through_the_api`。本分支从 `b735f28` 开出，决定与剩余风险写在 `docs/DECISIONS.md` 的 ADR-F27 P2-04 段。`STATUS.json` 的 `live_ready`、`product_engineering` 未改，没有新迁移。

@@ -30,6 +30,7 @@ class Upstream(BaseHTTPRequestHandler):
     body_text = ""
     delay = 0.0
     model_name = "fake-upstream-model"
+    finish_reason = "stop"
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("content-length") or "0")
@@ -46,7 +47,7 @@ class Upstream(BaseHTTPRequestHandler):
                     "id": "chatcmpl-local",
                     "object": "chat.completion",
                     "model": Upstream.model_name,
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": Upstream.body_text}, "finish_reason": "stop"}],
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": Upstream.body_text}, "finish_reason": Upstream.finish_reason}],
                     "usage": {"prompt_tokens": 11, "completion_tokens": 7, "total_tokens": 18},
                 }
             ).encode()
@@ -61,12 +62,13 @@ class Upstream(BaseHTTPRequestHandler):
         return
 
 
-def _server(*, mode: str = "ok", body: str | None = None, delay: float = 0.0):
+def _server(*, mode: str = "ok", body: str | None = None, delay: float = 0.0, finish_reason: str = "stop"):
     Upstream.seen = []
     Upstream.mode = mode
     Upstream.body_text = f"资料记载：{FACT}" if body is None else body
     Upstream.delay = delay
     Upstream.model_name = "fake-upstream-model"
+    Upstream.finish_reason = finish_reason
     server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -89,11 +91,11 @@ def _endpoints(role_urls, root, base: str, *, key: str = KEY, timeout: float = 5
     )
 
 
-def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeout: float = 5, backdate: bool = False, mode: str = "ok", body: str | None = None, delay: float = 0.0, goal: str | None = None):
+def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeout: float = 5, backdate: bool = False, mode: str = "ok", body: str | None = None, delay: float = 0.0, goal: str | None = None, finish_reason: str = "stop"):
     owner, project, _headers = _project(client)
     worker = Database(role_urls["aether_worker"])
     root = client.app.state.settings.artifact_root
-    server = _server(mode=mode, body=body, delay=delay)
+    server = _server(mode=mode, body=body, delay=delay, finish_reason=finish_reason)
     base = f"http://127.0.0.1:{server.server_address[1]}/v1"
     try:
         store = ArtifactStore(root, worker)
@@ -173,6 +175,15 @@ def test_invented_boiling_point_fails_with_the_unsupported_number(client, role_u
     assert result["status"] != "SUCCEEDED"
     assert status["status"] != "SUCCEEDED"
     assert result["detail"] == "unsupported_number:'九十'"
+
+
+def test_length_truncated_research_answer_is_not_accepted(client, role_urls) -> None:
+    answer = "根据资料1原句：“水在标准大气压下于一百摄氏度沸腾”。因此，沸点为一百摄氏度。"
+    result, status, events, _artifact = _run(client, role_urls, body=answer, finish_reason="length")
+    assert result["status"] != "SUCCEEDED"
+    assert status["status"] != "SUCCEEDED"
+    assert result["stop_reason"] == "output_truncated"
+    assert not any(row["event_type"] == "research.call" for row in events)
 
 
 def test_wrong_live_answer_is_not_succeeded(client, role_urls) -> None:

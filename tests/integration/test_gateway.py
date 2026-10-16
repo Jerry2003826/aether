@@ -21,6 +21,7 @@ class Upstream(BaseHTTPRequestHandler):
     mode = "ok"
     body_text = "upstream-ok"
     delay = 0.0
+    finish_reason = "stop"
 
     def do_POST(self) -> None:  # noqa: N802
         length = int(self.headers.get("content-length") or "0")
@@ -37,7 +38,7 @@ class Upstream(BaseHTTPRequestHandler):
                 {
                     "id": "chatcmpl-test",
                     "object": "chat.completion",
-                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": "stop"}],
+                    "choices": [{"index": 0, "message": {"role": "assistant", "content": content}, "finish_reason": Upstream.finish_reason}],
                     "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
                 }
             ).encode()
@@ -57,6 +58,7 @@ def upstream():
     Upstream.mode = "ok"
     Upstream.body_text = "upstream-ok"
     Upstream.delay = 0.0
+    Upstream.finish_reason = "stop"
     server = ThreadingHTTPServer(("127.0.0.1", 0), Upstream)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
@@ -149,6 +151,18 @@ def test_upstream_error_is_not_success(client, api_db, role_urls, aether_admin, 
         gateway.complete(token, {"alias": "actor", "prompt": "hello"})
     assert denied.value.code == "upstream_error"
     assert len(Upstream.seen) == 1
+
+
+def test_length_truncated_completion_is_not_a_complete_answer(client, api_db, role_urls, aether_admin, upstream) -> None:
+    Upstream.finish_reason = "length"
+    Upstream.body_text = "PARTIAL-NOT-COMPLETE"
+    _project, token, gateway = _gateway(client, api_db, role_urls, aether_admin, upstream)
+    result = gateway.complete(token, {"alias": "actor", "prompt": "hello"})
+    encoded = json.dumps(result)
+    assert result["finish_reason"] == "length"
+    assert result["output"] is None
+    assert "PARTIAL-NOT-COMPLETE" not in encoded
+    assert result["usage_status"] == "known"
 
 
 def test_upstream_timeout_is_unknown_not_zero(client, api_db, role_urls, aether_admin, upstream) -> None:

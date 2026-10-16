@@ -3,7 +3,13 @@ import importlib.util
 import json
 import os
 import shutil
+import threading
+import urllib.error
+import urllib.request
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+import pytest
 
 from aether_worker.f26_acceptance import (
     LIVE_ALIAS,
@@ -13,7 +19,9 @@ from aether_worker.f26_acceptance import (
     MAX_OUTPUT_TOKENS,
     MAX_TOTAL_TOKENS,
     QUERY,
+    RESEARCH_OUTPUT_TOKENS,
     SNAPSHOT,
+    _Gateway,
     _coding_prompt,
     _copy_snapshot,
     _forward_body,
@@ -21,6 +29,8 @@ from aether_worker.f26_acceptance import (
     _local_check,
     _read_sources,
     _report_cites,
+    _research_prompt,
+    _research_verdict,
     run_f26_acceptance,
 )
 
@@ -102,6 +112,212 @@ def test_caps_stay_under_one_dollar() -> None:
     assert MAX_CALLS == 8
     assert MAX_TOTAL_TOKENS == 20000
     assert MAX_OUTPUT_TOKENS == 512
+
+
+def _phrased_report(template: str) -> str:
+    lines = ["两点都写沸点是 100。"]
+    for item in _read_sources():
+        if item["source_id"] == "src-piano":
+            continue
+        written = template.format(version=item["version"])
+        lines.append(
+            f"{item['source_id']} {written} sha256 {item['content_sha256']} "
+            f"offset {item['start_offset']}-{item['end_offset']}"
+        )
+    return "\n".join(lines)
+
+
+@pytest.mark.parametrize(
+    "phrase",
+    [
+        "version 为 {version}",
+        "版本 {version}",
+        "版本号：{version}",
+        "version is {version}",
+    ],
+)
+def test_version_phrasing_is_accepted(phrase: str) -> None:
+    assert _report_cites(_phrased_report(phrase), _read_sources()) is True
+
+
+def test_shared_clause_binds_one_version_to_each_named_source() -> None:
+    sources = [item for item in _read_sources() if item["source_id"] in {"src-zh", "src-en"}]
+    zh, en = sources
+    report = (
+        f"src-zh 与 src-en 的 version 为 {zh['version']}。"
+        f"sha256 {zh['content_sha256']} 与 {en['content_sha256']}。"
+        f"offset {zh['start_offset']}-{zh['end_offset']} 与 offset {en['start_offset']}-{en['end_offset']}。"
+        "沸点是 100。"
+    )
+    assert _report_cites(report, _read_sources()) is True
+
+
+def test_wrong_version_phrasing_is_rejected() -> None:
+    report = _phrased_report("version 为 {version}").replace("version 为 1", "version 为 9")
+    assert _report_cites(report, _read_sources()) is False
+
+
+def test_version_bound_to_the_other_source_is_not_enough() -> None:
+    sources = _read_sources()
+    zh = next(item for item in sources if item["source_id"] == "src-zh")
+    en = next(item for item in sources if item["source_id"] == "src-en")
+    report = "\n".join(
+        [
+            "沸点是 100。",
+            (
+                f"src-zh 版本号：9 sha256 {zh['content_sha256']} "
+                f"offset {zh['start_offset']}-{zh['end_offset']}"
+            ),
+            (
+                f"src-en version is {en['version']} sha256 {en['content_sha256']} "
+                f"offset {en['start_offset']}-{en['end_offset']}"
+            ),
+        ]
+    )
+    assert _report_cites(report, sources) is False
+
+
+def test_missing_version_citation_is_rejected() -> None:
+    lines = ["两点都写沸点是 100。"]
+    for item in _read_sources():
+        if item["source_id"] == "src-piano":
+            continue
+        lines.append(
+            f"{item['source_id']} sha256 {item['content_sha256']} "
+            f"offset {item['start_offset']}-{item['end_offset']}"
+        )
+    assert _report_cites("\n".join(lines), _read_sources()) is False
+
+
+def test_unbound_version_phrase_is_not_a_citation() -> None:
+    lines = ["version 为 1", "两点都写沸点是 100。"]
+    for item in _read_sources():
+        if item["source_id"] == "src-piano":
+            continue
+        lines.append(
+            f"{item['source_id']} sha256 {item['content_sha256']} "
+            f"offset {item['start_offset']}-{item['end_offset']}"
+        )
+    assert _report_cites("\n".join(lines), _read_sources()) is False
+
+
+def test_research_report_cap_accepts_2048_tokens() -> None:
+    raw, _dropped = _forward_body(
+        json.dumps(
+            {
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": "比较"}],
+                "max_tokens": 2048,
+            }
+        ).encode(),
+        "deepseek-chat",
+    )
+    assert json.loads(raw)["max_tokens"] == 2048
+    assert RESEARCH_OUTPUT_TOKENS == 2048
+    assert MAX_CALLS * RESEARCH_OUTPUT_TOKENS <= MAX_TOTAL_TOKENS
+    over, _dropped = _forward_body(
+        json.dumps(
+            {
+                "model": "deepseek-chat",
+                "messages": [{"role": "user", "content": "比较"}],
+                "max_tokens": 9000,
+            }
+        ).encode(),
+        "deepseek-chat",
+    )
+    assert json.loads(over)["max_tokens"] == 2048
+
+
+def test_research_prompt_requests_version_equals_form() -> None:
+    prompt = _research_prompt(_read_sources(), ["src-zh", "src-en", "src-piano"])
+    assert "version=" in prompt
+
+
+class _FinishUpstream(BaseHTTPRequestHandler):
+    finish_reason = "stop"
+    content = "完整回答"
+
+    def do_POST(self) -> None:  # noqa: N802
+        length = int(self.headers.get("Content-Length", "0"))
+        self.rfile.read(length)
+        body = json.dumps(
+            {
+                "id": "chatcmpl-finish",
+                "choices": [
+                    {
+                        "index": 0,
+                        "message": {"role": "assistant", "content": _FinishUpstream.content},
+                        "finish_reason": _FinishUpstream.finish_reason,
+                    }
+                ],
+                "usage": {"prompt_tokens": 4, "completion_tokens": 8, "total_tokens": 12},
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: object) -> None:
+        return
+
+
+def _gateway_roundtrip(monkeypatch, *, finish_reason: str, content: str) -> tuple[int, dict, dict]:
+    _FinishUpstream.finish_reason = finish_reason
+    _FinishUpstream.content = content
+    upstream = ThreadingHTTPServer(("127.0.0.1", 0), _FinishUpstream)
+    upstream_thread = threading.Thread(target=upstream.serve_forever, daemon=True)
+    upstream_thread.start()
+    monkeypatch.setenv("AETHER_GATEWAY_TOKEN", "job-token")
+    gateway = _Gateway(
+        f"http://127.0.0.1:{upstream.server_address[1]}/v1/chat/completions",
+        "sk-live",
+        "deepseek-chat",
+    )
+    gateway_thread = threading.Thread(target=gateway.serve_forever, daemon=True)
+    gateway_thread.start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{gateway.server_address[1]}/v1/chat/completions",
+        data=json.dumps(
+            {"model": "deepseek-chat", "messages": [{"role": "user", "content": "比较"}], "max_tokens": 512}
+        ).encode(),
+        headers={"Authorization": "Bearer job-token", "Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                status = response.status
+                payload = json.loads(response.read().decode())
+        except urllib.error.HTTPError as exc:
+            status = exc.code
+            payload = json.loads(exc.read().decode())
+        assert gateway.calls
+        return status, payload, gateway.calls[-1]
+    finally:
+        gateway.shutdown()
+        gateway.server_close()
+        upstream.shutdown()
+        upstream.server_close()
+        gateway_thread.join(timeout=2)
+        upstream_thread.join(timeout=2)
+
+
+def test_length_truncated_gateway_response_is_recorded(monkeypatch) -> None:
+    status, payload, row = _gateway_roundtrip(monkeypatch, finish_reason="length", content="PARTIAL-REPORT")
+    assert status == 200
+    assert payload["choices"][0]["message"]["content"] == "PARTIAL-REPORT"
+    assert row["finish_reason"] == "length"
+    assert _research_verdict(True, "length") == ("fail", "output_truncated")
+
+
+def test_stop_gateway_response_records_finish_reason(monkeypatch) -> None:
+    _status, payload, row = _gateway_roundtrip(monkeypatch, finish_reason="stop", content="完整回答")
+    assert payload["choices"][0]["message"]["content"] == "完整回答"
+    assert row["finish_reason"] == "stop"
+    assert _research_verdict(True, "stop") == ("pass", None)
+    assert _research_verdict(False, None) == ("fail", "citation_mismatch")
 
 
 def test_authorized_snapshot_fails_before_any_patch() -> None:
