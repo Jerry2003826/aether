@@ -159,18 +159,18 @@ def _exercise(http: httpx.Client, role_urls, worker, worker_logs: list[str], sec
     assert found.status_code == 200, found.text + "".join(worker_logs[-40:])
     assert found.json()["hits"][0]["text"] == APPLE
     assert found.json()["hits"][0]["document_id"] == job["source_version_id"]
-    _assert_unsupported(http, csrf, project_id, role_urls, owner_id)
+    _assert_missing_jobs_are_not_queued(http, csrf, project_id, role_urls, owner_id)
     _assert_watch(http, csrf, project_id, source_id, worker, worker_logs, role_urls, owner_id, artifact_root, task_queue)
 
 
-def _assert_unsupported(http: httpx.Client, csrf: str, project_id: str, role_urls, owner_id: str) -> None:
+def _assert_missing_jobs_are_not_queued(http: httpx.Client, csrf: str, project_id: str, role_urls, owner_id: str) -> None:
     coding = http.post(
         f"/v1/projects/{project_id}/coding-jobs",
         headers=_headers(csrf, "sys01-code"),
         json={"task_id": str(uuid.uuid4()), "base_artifact_id": str(uuid.uuid4()), "job_key": "edit", "objective": "改一处"},
     )
-    assert coding.status_code == 422, coding.text
-    assert coding.json()["code"] == "unsupported"
+    assert coding.status_code == 404, coding.text
+    assert coding.json()["code"] == "not_found"
     skill = http.post(
         f"/v1/projects/{project_id}/skills/{uuid.uuid4()}/evaluate",
         headers=_headers(csrf, "sys01-skill"),
@@ -180,8 +180,8 @@ def _assert_unsupported(http: httpx.Client, csrf: str, project_id: str, role_url
             "budget": {"max_tokens": 10},
         },
     )
-    assert skill.status_code == 422, skill.text
-    assert skill.json()["code"] == "unsupported"
+    assert skill.status_code == 404, skill.text
+    assert skill.json()["code"] == "not_found"
     evaluations = http.get(f"/v1/projects/{project_id}/evaluations")
     assert evaluations.status_code == 200
     assert evaluations.json()["items"] == []

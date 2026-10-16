@@ -141,8 +141,8 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
     }
 
 
-def _docker(args: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False)
+def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=timeout)
 
 
 def docker_available() -> bool:

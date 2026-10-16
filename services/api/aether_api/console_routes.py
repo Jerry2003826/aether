@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
@@ -267,8 +268,13 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
         _task_id(skill_id)
-        _evaluate_body(body)
-        raise ApiError(422, "unsupported", "技能评测不支持：不会受理后停在排队，也不能据此晋升")
+        stable = _evaluate_body(body)
+        _require_skill_version(app, owner, project_id, skill_id, stable["candidate_version_id"])
+        if stable["baseline_version_id"] is not None:
+            _require_skill_version(app, owner, project_id, skill_id, stable["baseline_version_id"])
+        _require_artifact(app, owner, project_id, stable["dataset_manifest_id"])
+        command = {**stable, "skill_id": skill_id, "evaluation_id": str(uuid.uuid4())}
+        return _accept(app, settings, request, project_id, "skill.evaluate", stable, command, command["evaluation_id"])
 
     @app.post("/v1/projects/{project_id}/skills/{skill_id}/deployments", status_code=202, operation_id="deploySkill", responses=_ERRORS)
     def deploy_skill(project_id: str, skill_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
@@ -281,8 +287,34 @@ def register_console_routes(app: FastAPI, settings: Settings) -> None:
     def create_coding_job(project_id: str, request: Request, body: dict[str, Any]) -> JSONResponse:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
-        _coding_body(body)
-        raise ApiError(422, "unsupported", "编码作业不支持：没有会执行到终态的编码沙箱，不会受理后一直排队")
+        stable = _coding_body(body)
+        _require_coding_refs(app, owner, project_id, stable)
+
+        def reserve(conn: Any) -> tuple[Any, ...]:
+            _lock_coding_key(conn, project_id, stable["task_id"], stable["job_key"])
+            pending = _pending_coding_command(conn, project_id, stable["task_id"], stable["job_key"])
+            if pending is not None:
+                return ("reuse", pending[0], pending[1])
+            existing = _coding_job_row(conn, project_id, stable["task_id"], stable["job_key"])
+            if existing is None:
+                created = {
+                    **stable,
+                    "coding_job_id": str(uuid.uuid4()),
+                    "operation_id": str(uuid.uuid4()),
+                    "capability_id": str(uuid.uuid4()),
+                }
+                return ("enqueue", "coding.create", created["coding_job_id"], created)
+            if existing["state"] != "FAILED":
+                raise ApiError(409, "job_not_retryable", "这个作业还不能重试")
+            retry = {
+                **stable,
+                "coding_job_id": existing["id"],
+                "operation_id": str(uuid.uuid4()),
+                "capability_id": str(uuid.uuid4()),
+            }
+            return ("enqueue", "coding.retry", existing["id"], retry)
+
+        return _accept(app, settings, request, project_id, "coding.create", stable, stable, stable["task_id"], reserve=reserve)
 
     @app.get("/v1/projects/{project_id}/watches", operation_id="listWatches", responses=_ERRORS)
     def list_watches(project_id: str, request: Request, cursor: str | None = None, limit: int = 20) -> dict[str, Any]:
@@ -464,20 +496,33 @@ def _accept(
     stable: dict[str, Any],
     command: dict[str, Any],
     resource_id: str,
+    reserve: Callable[[Any], tuple[Any, ...]] | None = None,
 ) -> JSONResponse:
     owner = _owner(app, request, csrf=True, origin=settings)
     _owned(app, owner, project_id)
     key = _idempotency_key(request)
     command_id = str(uuid.uuid4())
-    command = {"command_id": command_id, "owner_id": owner, **command}
     route = f"{request.method} {request.url.path}"
     digest = sha256_text(json.dumps(stable, sort_keys=True, ensure_ascii=False, default=str, separators=(",", ":")))
     with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
         existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=digest)
         if existing is not None:
             return JSONResponse(status_code=existing["response_status"], content=existing["response_body"])
-        _enqueue(conn, project_id=project_id, command_key=command_id, kind=kind, payload=command)
-        accepted = _accepted(request, command_id, resource_id)
+        chosen_kind = kind
+        chosen_resource = resource_id
+        chosen_command_id = command_id
+        payload = {"command_id": command_id, "owner_id": owner, **command}
+        if reserve is not None:
+            decision = reserve(conn)
+            if decision[0] == "reuse":
+                accepted = _accepted(request, str(decision[1]), str(decision[2]))
+                _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
+                return JSONResponse(status_code=202, content=accepted)
+            chosen_kind = str(decision[1])
+            chosen_resource = str(decision[2])
+            payload = {"command_id": command_id, "owner_id": owner, **decision[3]}
+        _enqueue(conn, project_id=project_id, command_key=command_id, kind=chosen_kind, payload=payload)
+        accepted = _accepted(request, chosen_command_id, chosen_resource)
         _store_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, body=accepted)
     return JSONResponse(status_code=202, content=accepted)
 
@@ -675,6 +720,75 @@ def _deploy_body(body: dict[str, Any]) -> dict[str, Any]:
         "approval_id": str(body["approval_id"]),
         "report_sha256": digest,
     }
+
+
+def _require_artifact(app: FastAPI, owner: str, project_id: str, artifact_id: str) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": artifact_id},
+        ).first()
+    if found is None:
+        raise ApiError(404, "not_found", "产物不存在")
+
+
+def _require_skill_version(app: FastAPI, owner: str, project_id: str, skill_id: str, version_id: str) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        found = conn.execute(
+            text("SELECT 1 FROM skill_versions WHERE project_id = :project_id AND skill_id = :skill_id AND id = :id"),
+            {"project_id": project_id, "skill_id": skill_id, "id": version_id},
+        ).first()
+    if found is None:
+        raise ApiError(404, "not_found", "技能版本不存在")
+
+
+def _require_coding_refs(app: FastAPI, owner: str, project_id: str, body: dict[str, Any]) -> None:
+    with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
+        task = conn.execute(
+            text("SELECT 1 FROM tasks WHERE project_id = :project_id AND id = :id"),
+            {"project_id": project_id, "id": body["task_id"]},
+        ).first()
+        artifact = conn.execute(
+            text("SELECT 1 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": body["base_artifact_id"]},
+        ).first()
+    if task is None or artifact is None:
+        raise ApiError(404, "not_found", "任务或基线产物不存在")
+
+
+def _lock_coding_key(conn: Any, project_id: str, task_id: str, job_key: str) -> None:
+    conn.execute(
+        text("SELECT pg_advisory_xact_lock(hashtextextended(CAST(:key AS text), CAST(0 AS bigint)))"),
+        {"key": f"{project_id}:{task_id}:{job_key}"},
+    )
+
+
+def _pending_coding_command(conn: Any, project_id: str, task_id: str, job_key: str) -> tuple[str, str] | None:
+    rows = conn.execute(
+        text(
+            "SELECT payload FROM command_outbox WHERE project_id = :project_id "
+            "AND kind IN ('coding.create', 'coding.retry') AND status = 'PENDING'"
+        ),
+        {"project_id": project_id},
+    ).scalars().all()
+    for payload in rows:
+        body = payload if isinstance(payload, dict) else json.loads(payload)
+        if str(body.get("task_id")) == task_id and str(body.get("job_key")) == job_key:
+            return str(body["command_id"]), str(body["coding_job_id"])
+    return None
+
+
+def _coding_job_row(conn: Any, project_id: str, task_id: str, job_key: str) -> dict[str, str] | None:
+    existing = conn.execute(
+        text(
+            "SELECT id::text AS id, state FROM coding_jobs "
+            "WHERE project_id = :project_id AND task_id = :task_id AND job_key = :job_key"
+        ),
+        {"project_id": project_id, "task_id": task_id, "job_key": job_key},
+    ).mappings().first()
+    if existing is None:
+        return None
+    return {"id": str(existing["id"]), "state": str(existing["state"])}
 
 
 def _coding_body(body: dict[str, Any]) -> dict[str, Any]:

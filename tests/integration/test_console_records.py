@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from sqlalchemy import text
@@ -6,6 +7,7 @@ from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.memory import apply_memory_commands
+from aether_worker.service import route_pending
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 CONSOLE = Path("apps/web/app/console/page.tsx").read_text(encoding="utf-8")
@@ -76,6 +78,7 @@ def test_console_memory_create_matches_the_database(client, role_urls, tmp_path:
 
 def test_console_coding_job_matches_the_database(client, role_urls) -> None:
     assert CODING_PATH in CODE
+    assert "终态是 FINISHED 或 FAILED" in CODE
     owner_id, project_id, csrf = _session(client, "console-record-code-project")
     task = client.post(
         f"/v1/projects/{project_id}/tasks",
@@ -83,10 +86,16 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
         json={"goal": "改一处断言"},
     )
     assert task.status_code == 202, task.text
+    workspace = {
+        "kind": "aether.coding_workspace",
+        "base_files": {"app.py": "def value():\n    return 0\n"},
+        "files": {"app.py": "def value():\n    return 42\n"},
+        "tests": {"test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n"},
+    }
     uploaded = client.post(
         f"/v1/projects/{project_id}/artifacts",
         headers=_headers(csrf, "console-record-code-file"),
-        files={"file": ("base.txt", "基线".encode(), "text/plain")},
+        files={"file": ("base.json", json.dumps(workspace).encode(), "application/json")},
     )
     assert uploaded.status_code == 201, uploaded.text
     objective = "只改测试，不改可信评分器"
@@ -101,20 +110,27 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
             "objective": objective,
         },
     )
-    assert created.status_code == 422, created.text
-    assert created.json()["code"] == "unsupported"
-    assert "不支持" in CODE
+    assert created.status_code == 202, created.text
+    assert created.json()["status"] == "accepted"
+    assert objective not in created.text
     worker = Database(role_urls["aether_worker"])
-    apply_console_commands(worker, owner_id=owner_id, project_id=project_id)
+    store = ArtifactStore(client.app.state.settings.artifact_root, worker)
+    route_pending(Database(role_urls["aether_dispatcher"]), worker, Database(role_urls["aether_verifier"]), store)
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        count = conn.execute(
-            text("SELECT COUNT(*) FROM coding_jobs WHERE project_id = :project_id AND job_key = :job_key"),
+        row = conn.execute(
+            text(
+                "SELECT state, patch_artifact_id::text AS patch_id, result_artifact_id::text AS result_id "
+                "FROM coding_jobs WHERE project_id = :project_id AND job_key = :job_key"
+            ),
             {"project_id": project_id, "job_key": job_key},
-        ).scalar_one()
-        queued = conn.execute(
-            text("SELECT COUNT(*) FROM command_outbox WHERE project_id = :project_id AND kind = 'coding.create'"),
+        ).mappings().one()
+        command = conn.execute(
+            text("SELECT status FROM command_outbox WHERE project_id = :project_id AND kind = 'coding.create'"),
             {"project_id": project_id},
         ).scalar_one()
-    assert int(count) == 0
-    assert int(queued) == 0
-    assert objective not in created.text
+    assert row["state"] == "FINISHED"
+    assert command == "DELIVERED"
+    patch, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["patch_id"])
+    result, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["result_id"])
+    assert b"return 42" in patch
+    assert b'"passed":1' in result or b'"passed": 1' in result
