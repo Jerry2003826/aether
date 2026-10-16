@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from aether_worker.coding_sandbox import container_arguments
@@ -16,6 +17,38 @@ from aether_worker.runner_process import _ensure_coding_image
 
 _ENTRY = Path("services/worker/aether_worker/openhands_sandbox_entry.py")
 _PYTHON = Path("environments/openhands/.venv/bin/python")
+# cgroup limit is 262144 KiB. The protocol child needs room beside the entry.
+_ENTRY_RSS_BUDGET_KB = 131072
+
+
+def _resident_kb(pid: int) -> int:
+    try:
+        status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
+    except OSError:
+        return 0
+    for line in status.splitlines():
+        if line.startswith("VmRSS:"):
+            return int(line.split()[1])
+    return 0
+
+
+def _tree_resident_kb(pid: int) -> int:
+    total = 0
+    pending = [pid]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        total += _resident_kb(current)
+        children = Path(f"/proc/{current}/task/{current}/children")
+        try:
+            text = children.read_text(encoding="ascii")
+        except OSError:
+            continue
+        pending.extend(int(item) for item in text.split())
+    return total
 
 
 def test_entry_source_calls_local_workspace_and_launch_keeps_other_images(monkeypatch) -> None:
@@ -58,7 +91,8 @@ def test_local_workspace_strips_its_secret_before_the_protocol(tmp_path: Path) -
     assert _PYTHON.is_file(), "environments/openhands lock was not synced"
     protocol = tmp_path / "protocol.py"
     protocol.write_text(
-        "import json, os, sys\n"
+        "import json, os, sys, time\n"
+        "time.sleep(0.3)\n"
         "body = {"
         "'passed': 1, 'failed': 0, 'errors': 0, "
         "'cases': [{'name': 'suite.test_value', 'verdict': 'PASS', 'detail': ''}], "
@@ -83,17 +117,30 @@ def test_local_workspace_strips_its_secret_before_the_protocol(tmp_path: Path) -
             "PYTHONDONTWRITEBYTECODE": "1",
         }
     )
-    completed = subprocess.run(
+    proc = subprocess.Popen(
         [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
         cwd=tmp_path,
         env=env,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        timeout=60,
-        check=False,
     )
-    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
-    assert completed.returncode == 0 and line, completed.stdout + completed.stderr
+    peak = 0
+    tree_peak = 0
+    deadline = time.monotonic() + 60
+    while proc.poll() is None and time.monotonic() < deadline:
+        peak = max(peak, _resident_kb(proc.pid))
+        tree_peak = max(tree_peak, _tree_resident_kb(proc.pid))
+        time.sleep(0.02)
+    try:
+        stdout, stderr = proc.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        stdout, stderr = proc.communicate()
+    line = next((item for item in reversed(stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert proc.returncode == 0 and line, stdout + stderr
+    assert 0 < peak <= _ENTRY_RSS_BUDGET_KB, peak
+    assert tree_peak <= 200000, tree_peak
     body = json.loads(line[len("RESULT ") :])
     assert body["executor"] == "openhands.sdk.LocalWorkspace"
     assert body["passed"] == 1

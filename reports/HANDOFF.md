@@ -4,7 +4,7 @@
 
 基线已变基到 `origin/main` 的 `ab1ebef`。采集解析是已合并的 ADR-F41，威胁情报浏览器是已合并的 ADR-F43，本决定记为 ADR-F42。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 或 `f27.live_ready` 改成 passed。`f27.codegraph_enabled` 改为 true：锁文件 `product_enabled` 已是 true，`readiness.codegraph_enabled` 已是 passed，证据是 `reports/f15_product_result.json`。
 
-编码作业：控制面不安装 OpenHands。四个包仍钉在 `environments/openhands` 的 1.54.0。沙箱标志仍由 `container_arguments` 手写。`JOB_IMAGE` 仍是 Alpine digest。runner 使用在 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` 上构建的镜像，入口调用 `LocalWorkspace.execute_command`。不调用模型。证明：`test_local_workspace_strips_its_secret_before_the_protocol`、`test_entry_source_calls_local_workspace_and_launch_keeps_other_images`。
+编码作业：控制面不安装 OpenHands。四个包仍钉在 `environments/openhands` 的 1.54.0。沙箱标志仍由 `container_arguments` 手写，内存上限仍是 268435456 字节。`JOB_IMAGE` 仍是 Alpine digest。runner 使用在 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` 上构建的镜像。入口在导入前挡住 `openhands.sdk` 包初始化、litellm 和 LLM 栈，然后调用 wheel 里的 `LocalWorkspace.execute_command`。不调用模型。证明：`test_local_workspace_strips_its_secret_before_the_protocol`（含入口 VmRSS 不超过 131072 KiB）、`test_entry_source_calls_local_workspace_and_launch_keeps_other_images`。
 
 技能评测：`Dataset.evaluate_sync` 调度用例，`grade` 仍写分。证明：`test_dataset_evaluate_sync_schedules_each_case`、`test_expired_deadline_raises_before_a_second_grade`。
 
@@ -18,7 +18,7 @@
 
 安装：`environments/openhands` 使用 `uv sync --locked --no-build`。`func-timeout==4.3.5` 没有 wheel，锁文件指向仓库内由官方 sdist 构建、uv 记下哈希的 wheel。runner 在 Docker 可用且标签镜像不存在时构建；命令也写在 README。证明：`test_ci_workflow`、`test_runner_builds_the_openhands_image_when_docker_is_enabled`、`test_runner_stays_up_when_the_openhands_image_build_fails`。沙箱作业目录不再使用固定的公开路径，改由 `tempfile.mkdtemp` 创建。
 
-2026-10-16 本地：冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 293 passed、1 warning（22.15s），Gitleaks 8.30.1 无泄漏（含工作区扫描）。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次提交的 CI 还没有记入。
+2026-10-16 变基到 `13bc096` 之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.259s），单元 313 passed、1 warning（24.65s），Gitleaks 8.30.1 无泄漏（git 历史和工作区各扫一次）。变基前同一入口的一次 `/proc` 采样：父进程 VmRSS 峰值 41736 KiB，协议子进程 12264 KiB。本机没有 Docker、Postgres 和 Temporal，集成测试没有跑，web typecheck 和 doctor 没有跑。`live_ready` 仍是 pending。这次变基提交的 CI 还没有记入。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 

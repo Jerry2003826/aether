@@ -21,8 +21,8 @@ gitleaks detect --source . --config .gitleaks.toml --redact --no-banner
 
 进度：七项替换都接到库调用。`JOB_IMAGE` 常量未改。`f27.codegraph_enabled` 改为 true。
 
-结果：这一笔变基还没有重跑测试。变基前的本地结果是冻结检查通过（`api_operations` 50），参考套件 76 OK，单元 293 passed、1 warning（22.15s）。Gitleaks 8.30.1 无泄漏。`live_ready` 保持 pending。
+结果：2026-10-16 变基到 `13bc096` 之后，冻结检查通过（`api_operations` 50），参考套件 76 OK（1.259s），单元 313 passed、1 warning（24.65s）。Gitleaks 8.30.1 无泄漏。本机没有 Docker、Postgres 和 Temporal，集成测试、web typecheck 和 doctor 没有跑。`live_ready` 保持 pending。
 
-修正：OpenHands 安装改为 `uv sync --locked --no-build`。`func-timeout==4.3.5` 使用仓库内 wheel。`exec`、`kill`、日志尾部和 runner 构建镜像已接上。CI 结果还没有记入。
+修正：OpenHands 安装改为 `uv sync --locked --no-build`。`func-timeout==4.3.5` 使用仓库内 wheel。`exec`、`kill`、日志尾部和 runner 构建镜像已接上。入口只加载 `LocalWorkspace.execute_command` 用到的模块，避开会超过 256 MiB 的 LLM 栈。一次 `/proc` 采样的父进程峰值是 41736 KiB。CI 结果还没有记入。
 
-阻塞：编码镜像要在 CI 的 Docker 上构建后，集成测试才能看到 OpenHands 容器终态。
+阻塞：本机没有 Docker，编码作业的容器终态仍要由 CI 的 integration 证明。

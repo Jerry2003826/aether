@@ -8,15 +8,80 @@ import socket
 import sys
 import tempfile
 import time
+import types
 from pathlib import Path
 
 os.environ["OPENHANDS_SUPPRESS_BANNER"] = "1"
 
-from openhands.sdk.workspace.local import LocalWorkspace
-
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
 EXECUTOR = "openhands.sdk.LocalWorkspace"
+
+
+def _bind(module: types.ModuleType) -> None:
+    sys.modules[module.__name__] = module
+    parent_name, _, child = module.__name__.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    if parent is not None:
+        setattr(parent, child, module)
+
+
+def _package(name: str, path: Path | None) -> types.ModuleType:
+    module = types.ModuleType(name)
+    module.__package__ = name
+    if path is not None:
+        module.__path__ = [str(path)]
+        module.__file__ = str(path / "__init__.py")
+    _bind(module)
+    return module
+
+
+def _sdk_directory() -> Path:
+    for entry in sys.path:
+        candidate = Path(entry) / "openhands" / "sdk"
+        if candidate.joinpath("workspace", "local.py").is_file():
+            return candidate
+    raise RuntimeError("openhands_sdk_missing")
+
+
+def _observability_headers_from_env() -> dict[str, str]:
+    return {}
+
+
+def _install_workspace_import_boundary() -> None:
+    """Load the real LocalWorkspace without the unused LLM stack.
+
+    The pinned SDK package initializer imports the agent, conversation, and
+    model clients. Those clients are not used by execute_command, and loading
+    them exceeds the sandbox memory limit of 268435456 bytes. The workspace,
+    event, and conversation packages stay on disk so LocalWorkspace itself is
+    the class shipped in the pinned wheel.
+    """
+    sdk = _sdk_directory()
+    litellm = _package("litellm", None)
+    litellm.suppress_debug_info = True
+    litellm.set_verbose = False
+    _package("openhands", sdk.parent)
+    _package("openhands.sdk", sdk)
+    _package("openhands.sdk.workspace", sdk / "workspace")
+    _package("openhands.sdk.conversation", sdk / "conversation")
+    _package("openhands.sdk.event", sdk / "event")
+    llm = _package("openhands.sdk.llm", None)
+    unused = type("UnusedModelType", (), {})
+    llm.ImageContent = unused
+    llm.Message = unused
+    llm.TextContent = unused
+    streaming = _package("openhands.sdk.llm.streaming", None)
+    streaming.TokenCallbackType = object
+    _package("openhands.sdk.observability", None)
+    laminar = _package("openhands.sdk.observability.laminar", None)
+    laminar.observability_headers_from_env = _observability_headers_from_env
+
+
+# This import follows the boundary on purpose. Running it first executes
+# openhands.sdk's package initializer and exhausts the sandbox memory limit.
+_install_workspace_import_boundary()
+from openhands.sdk.workspace.local import LocalWorkspace
 
 
 def copy_tree(src: Path, dst: Path) -> None:
