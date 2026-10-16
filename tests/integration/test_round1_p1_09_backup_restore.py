@@ -187,3 +187,95 @@ def test_restore_does_not_bring_back_a_memory_deleted_after_the_backup(client, r
     assert live == (0,)
     assert restored["kept_live_rows"]["memories"] == 2
     assert name == ("备份恢复",)
+
+
+def _memory(conn, project_id: str, artifact_id: str, revision: int, supersedes: str | None) -> str:
+    memory_id = str(uuid.uuid4())
+    conn.execute(
+        "INSERT INTO memories (project_id, id, memory_key, revision, kind, claim, category, claim_artifact_id, provenance, epistemic_status, supersedes_id) "
+        "VALUES (%s, %s, 'boiling-point', %s, 'fact', %s, 'science', %s, '{}'::jsonb, 'user_confirmed', %s)",
+        (project_id, memory_id, revision, FACT, artifact_id, supersedes),
+    )
+    return memory_id
+
+
+def test_restore_does_not_revive_a_memory_corrected_after_the_backup(client, role_urls, aether_admin, tmp_path) -> None:
+    project_id, headers = _project(client)
+    fact = _upload(client, project_id, headers, f"{FACT}\n")
+    with psycopg.connect(aether_admin) as conn:
+        original = _memory(conn, project_id, fact, 1, None)
+    root = client.app.state.settings.artifact_root
+    backup_project(aether_admin, root, tmp_path / "backup")
+    with psycopg.connect(aether_admin) as conn:
+        conn.execute("UPDATE memories SET epistemic_status = 'superseded' WHERE id = %s", (original,))
+        corrected = _memory(conn, project_id, fact, 2, original)
+    restore_project(aether_admin, root, tmp_path / "backup", confirm="restore-aether")
+    with psycopg.connect(aether_admin) as conn:
+        usable = conn.execute(
+            "SELECT id::text FROM memories WHERE project_id = %s AND deleted_at IS NULL AND epistemic_status <> 'superseded'",
+            (project_id,),
+        ).fetchall()
+    assert usable == [(corrected,)], f"恢复后仍可用的记忆 {usable}；被更正的 {original} 不应复活"
+
+
+def test_restore_keeps_the_index_generation_activated_after_the_backup(client, role_urls, aether_admin, tmp_path) -> None:
+    project_id, headers = _project(client)
+    manifest = _upload(client, project_id, headers, "索引清单\n")
+    insert = (
+        "INSERT INTO index_generations (project_id, generation_key, tokenizer_version, source_watermark, manifest_artifact_id, state, manifest_sha256, activated_at) "
+        "VALUES (%s, %s, 'round1', 1, %s, 'ACTIVE', %s, now()) RETURNING id::text"
+    )
+    with psycopg.connect(aether_admin) as conn:
+        old = conn.execute(insert, (project_id, "before-backup", manifest, "1" * 64)).fetchone()[0]
+    root = client.app.state.settings.artifact_root
+    backup_project(aether_admin, root, tmp_path / "backup")
+    with psycopg.connect(aether_admin) as conn:
+        conn.execute("UPDATE index_generations SET state = 'RETIRED' WHERE id = %s", (old,))
+        new = conn.execute(insert, (project_id, "after-backup", manifest, "2" * 64)).fetchone()[0]
+    error = None
+    try:
+        restore_project(aether_admin, root, tmp_path / "backup", confirm="restore-aether")
+    except Exception as exc:
+        error = f"{type(exc).__name__}: {str(exc)[:200]}"
+    assert error is None, f"备份后换了活动索引代，恢复中止：{error}"
+    with psycopg.connect(aether_admin) as conn:
+        states = dict(conn.execute("SELECT id::text, state FROM index_generations WHERE project_id = %s", (project_id,)).fetchall())
+    assert states == {old: "RETIRED", new: "ACTIVE"}
+
+
+def test_restore_keeps_a_classification_decided_after_the_backup(client, role_urls, aether_admin, tmp_path) -> None:
+    project_id, headers = _project(client)
+    claim = _upload(client, project_id, headers, f"{FACT}\n")
+    root = client.app.state.settings.artifact_root
+    backup_project(aether_admin, root, tmp_path / "backup")
+    with psycopg.connect(aether_admin) as conn:
+        conn.execute("UPDATE artifacts SET classification = 'memory_claim' WHERE id = %s", (claim,))
+    restore_project(aether_admin, root, tmp_path / "backup", confirm="restore-aether")
+    with psycopg.connect(aether_admin) as conn:
+        classification = conn.execute("SELECT classification FROM artifacts WHERE id = %s", (claim,)).fetchone()
+    assert classification == ("memory_claim",), "备份后改成记忆 claim 的产物，恢复后又成了可当资料的 project_private"
+
+
+def test_a_restore_that_cannot_stage_every_file_changes_nothing(client, role_urls, aether_admin, tmp_path) -> None:
+    project_id, headers = _project(client)
+    _upload(client, project_id, headers, "备份之前的资料。\n")
+    root = client.app.state.settings.artifact_root
+    backup_project(aether_admin, root, tmp_path / "backup")
+    stored = next(path for path in root.rglob("*") if path.is_file() and path.relative_to(root).parts[0] == project_id)
+    stored.write_bytes(b"live bytes that differ from the snapshot\n")
+    blocked = tmp_path / "backup" / "artifacts" / "zzzz-blocked" / "file"
+    blocked.parent.mkdir(parents=True)
+    blocked.write_bytes(b"cannot be placed\n")
+    (root / "zzzz-blocked").write_bytes(b"a live file where the snapshot has a directory\n")
+    with psycopg.connect(aether_admin) as conn:
+        conn.execute("UPDATE projects SET name = '备份之后改的名字' WHERE id = %s", (project_id,))
+    error = None
+    try:
+        restore_project(aether_admin, root, tmp_path / "backup", confirm="restore-aether")
+    except Exception as exc:
+        error = type(exc).__name__
+    with psycopg.connect(aether_admin) as conn:
+        name = conn.execute("SELECT name FROM projects WHERE id = %s", (project_id,)).fetchone()
+    assert error is not None
+    assert stored.read_bytes() == b"live bytes that differ from the snapshot\n", "恢复失败前已经替换了部分产物文件"
+    assert name == ("备份之后改的名字",), "产物没能写回，数据库却已按备份恢复"
