@@ -1,0 +1,28 @@
+# 第 2 次运行：集成测试，VM 上尚未安装 Docker / Playwright Chromium / Hermes
+# 汇总：tests=239 failures=24 errors=0 skipped=0 time=160.426s
+# 原始 pytest 尾行见 run2_integration_tail.txt；以下逐条列出失败用例和 junit 里的失败原因首行
+
+tests.integration.test_codegraph::test_fixed_release_telemetry_and_blocked_network | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_indexes_snapshot_copy_and_hash_expires | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_cross_project_rejected_and_actor_path_discarded | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_cancel_clears_snapshot_and_fallback_stays_inside | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_cold_index_and_graph_on_off_do_not_claim_vendor_savings | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_trusted_suite_unchanged_and_affected_is_advisory | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_codegraph::test_callers_and_callees_match_the_fixture_source | FileNotFoundError: [Errno 2] No such file or directory: 'docker'
+tests.integration.test_console_browser::test_console_shows_real_states_and_does_not_execute_html | playwright._impl._errors.Error: BrowserType.launch: Executable doesn't exist at /home/ubuntu/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-headless-shell
+tests.integration.test_hermes_compare_protocol::test_pinned_hermes_identity_and_local_protocol | AssertionError: assert False
+tests.integration.test_hermes_probe::test_pinned_hermes_cli_prints_its_real_version | AssertionError: {'status': 'not_run', 'reason': 'hermes_cli_missing', 'version': None, 'path': None}
+tests.integration.test_ingest::test_playwright_profile_renders_javascript | playwright._impl._errors.Error: BrowserType.launch_persistent_context: Executable doesn't exist at /home/ubuntu/.cache/ms-playwright/chromium_headless_shell-1248/chrome-headless-shell-linux64/chrome-h
+tests.integration.test_runner::test_container_is_single_isolated_and_reattaches | Failed: Docker is required to prove container isolation
+tests.integration.test_security_regression::test_probes_block_release_even_when_the_classifier_score_is_high | AssertionError: network probe needs the container runner
+tests.integration.test_security_regression::test_fault_matrix_checks_effects | AssertionError: runner restart probe needs docker
+tests.integration.test_skill_sandbox::test_tampered_sibling_is_rejected | Failed: approved skill scripts require the F13 container runner
+tests.integration.test_skill_sandbox::test_host_secrets_are_not_visible | Failed: approved skill scripts require the F13 container runner
+tests.integration.test_verification::test_changed_candidate_invalidates_the_previous_pass | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_candidate_vacuous_tests_fail | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_candidate_conftest_cannot_rewrite_the_report | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_candidate_cannot_forge_the_isolation_line | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_candidate_atexit_cannot_forge_a_pass | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_grader_cannot_read_host_files_or_credentials | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_empty_or_skipped_suite_does_not_pass | Failed: Docker is required to grade inside the sandbox
+tests.integration.test_verification::test_worker_death_runner_death_and_cancel_do_not_pass | Failed: Docker is required for the runner-death demonstration
