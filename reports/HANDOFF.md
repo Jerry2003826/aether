@@ -11,7 +11,7 @@
 
 ```text
 AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q -p no:cacheprovider tests/unit tests/integration
-375 passed, 1 warning in 296.90s
+400 passed, 1 warning in 313.26s
 EXIT:0
 uv run --locked --no-build python scripts/verify_freeze.py              -> exit 0
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'   -> Ran 76 tests, OK
