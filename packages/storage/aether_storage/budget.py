@@ -358,6 +358,7 @@ class BudgetLedger:
         output_cap: int,
         source_snapshot_sha256: str,
         attempt_id: str,
+        source_manifest: list[dict[str, str]] | None = None,
     ) -> dict[str, object]:
         """Reserve once, then either send, reuse a stored response, or stop.
 
@@ -431,6 +432,7 @@ class BudgetLedger:
                             "prompt_sha256": prompt_sha256,
                             "output_cap": output_cap,
                             "source_snapshot_sha256": source_snapshot_sha256,
+                            "source_manifest": source_manifest or [],
                         }
                     )
                     conn.execute(
@@ -472,6 +474,7 @@ class BudgetLedger:
                 "prompt_sha256": prompt_sha256,
                 "output_cap": output_cap,
                 "source_snapshot_sha256": source_snapshot_sha256,
+                "source_manifest": source_manifest or [],
             }
             conn.execute(
                 text(

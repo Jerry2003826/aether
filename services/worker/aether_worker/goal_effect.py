@@ -39,7 +39,7 @@ from aether_worker.research import (
 )
 
 CRITERION_ID = "goal_artifact"
-VERIFIER_VERSION = "goal-artifact-8"
+VERIFIER_VERSION = "goal-artifact-9"
 OUTPUT_TOKEN_CAP = 256
 # Local dispatch ceiling, not a provider price list. A model priced above this
 # bound can still report an overrun after the bill arrives.
@@ -210,7 +210,7 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     start_payload = _task_start_payload(worker, project_id, task_id)
     allowed_ids = start_payload.get("allowed_source_ids")
     allowed = allowed_ids if isinstance(allowed_ids, list) else None
-    sources, _snapshot, source_state, missing_sources = _source_snapshot(worker, store, owner_id, project_id, allowed_ids=allowed)
+    sources, manifest, _snapshot, source_state, missing_sources = _read_sources(worker, store, owner_id, project_id, allowed_ids=allowed)
     if source_state == "empty":
         return _needs_review(worker, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
     if source_state == "invalid":
@@ -222,7 +222,7 @@ def execute_task_effect(endpoints: WorkerEndpoints, payload: dict[str, Any]) -> 
     if blocked is not None:
         return {"status": blocked, "task_id": task_id}
     if endpoints.research_provider == "scripted":
-        answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources, snapshot_sha=_snapshot)
+        answer = _ensure_answer(worker, store, owner_id=owner_id, project_id=project_id, task_id=task_id, goal=goal, sources=sources, manifest=manifest)
     else:
         answer = _ensure_live_answer(
             endpoints,
@@ -589,7 +589,7 @@ def _ensure_verification(
     store = ArtifactStore(endpoints.artifact_root, verifier)
     ledger, deleted = _artifact_ledger(verifier, owner_id, project_id, artifact_id)
     observed, readable = _observe_bytes(store, owner_id, project_id, artifact_id)
-    sources, snapshot, source_state, _missing = _source_snapshot(verifier, store, owner_id, project_id, allowed_ids=allowed_ids)
+    sources, snapshot, source_problem = _seen_sources(verifier, store, owner_id, project_id, task_id, goal=goal, allowed_ids=allowed_ids)
     authoritative = _load_authoritative_contract(verifier, owner_id, project_id, task_id)
     contract_ok = (
         authoritative is not None
@@ -598,9 +598,9 @@ def _ensure_verification(
         and authoritative["stored_digest"] == authoritative["digest"]
     )
     byte_ok = (not deleted) and readable is not None and ledger is not None and observed == ledger
-    if source_state == "invalid":
-        goal_state = "fail"
-        goal_detail = "allowed_source_unreadable:" + ",".join(_missing)
+    if source_problem:
+        goal_state = "unverifiable"
+        goal_detail = source_problem
     else:
         goal_state = _goal_state(readable, goal, sources)
         goal_detail = _goal_detail(readable, goal, sources)
@@ -620,7 +620,12 @@ def _ensure_verification(
         detail = "字节完整性未通过"
     elif goal_state == "unverifiable":
         outcome = "unverifiable"
-        detail = "字节与合同可以通过，离线摘录不能确认目标完成"
+        if source_problem:
+            detail = "模型当时看到的资料已无法原样核对"
+        elif goal_detail == "conflicting_sources":
+            detail = "资料之间对同一数值说法不一，不能确认答案"
+        else:
+            detail = "字节与合同可以通过，离线摘录不能确认目标完成"
     elif goal_state != "pass":
         outcome = "fail"
         detail = goal_detail or "回答没有覆盖目标"
@@ -792,8 +797,25 @@ def _source_snapshot(
     *,
     allowed_ids: list[str] | None = None,
 ) -> tuple[list[str], str, str, list[str]]:
+    texts, _manifest, snapshot, state, missing = _read_sources(database, store, owner_id, project_id, allowed_ids=allowed_ids)
+    return texts, snapshot, state, missing
+
+
+def _manifest_sha(manifest: list[dict[str, str]]) -> str:
+    return sha256_text("\n".join(f"{entry['id']}:{entry['sha256']}" for entry in manifest))
+
+
+def _read_sources(
+    database: Database,
+    store: ArtifactStore,
+    owner_id: str,
+    project_id: str,
+    *,
+    allowed_ids: list[str] | None = None,
+) -> tuple[list[str], list[dict[str, str]], str, str, list[str]]:
+    """Source texts plus the manifest of artifact hashes the snapshot hash is computed from."""
     if allowed_ids is not None and len(allowed_ids) == 0:
-        return [], sha256_text(""), "empty", []
+        return [], [], sha256_text(""), "empty", []
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         if allowed_ids is None:
             rows = conn.execute(
@@ -816,10 +838,10 @@ def _source_snapshot(
                     {"project_id": project_id, "id": item},
                 ).mappings().first()
                 if row is None or row["deleted_at"] is not None or row["media_type"] != "text/plain" or row["classification"] != "project_private":
-                    return [], sha256_text("invalid"), "invalid", [str(item)]
+                    return [], [], sha256_text("invalid"), "invalid", [str(item)]
                 rows.append(row)
     texts: list[str] = []
-    parts: list[str] = []
+    manifest: list[dict[str, str]] = []
     explicit = allowed_ids is not None
     for row in rows:
         artifact_id = str(row["id"])
@@ -827,17 +849,70 @@ def _source_snapshot(
             data, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=artifact_id)
         except (ArtifactError, OSError):
             if explicit:
-                return [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
-            parts.append(f"{artifact_id}:unreadable")
+                return [], [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
+            manifest.append({"id": artifact_id, "sha256": "unreadable"})
             continue
-        parts.append(f"{artifact_id}:{row['sha256']}")
+        manifest.append({"id": artifact_id, "sha256": str(row["sha256"])})
         try:
             texts.append(data.decode("utf-8"))
         except UnicodeError:
             if explicit:
-                return [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
+                return [], [], sha256_text(f"invalid:{artifact_id}"), "invalid", [artifact_id]
             continue
-    return texts, sha256_text("\n".join(parts)), "ok", []
+    return texts, manifest, _manifest_sha(manifest), "ok", []
+
+
+def _seen_sources(
+    database: Database,
+    store: ArtifactStore,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    *,
+    goal: str,
+    allowed_ids: list[str] | None,
+) -> tuple[list[str], str, str]:
+    """Re-read the sources recorded for this task's generation. Returns texts, snapshot and a problem code.
+
+    The current project may have gained or lost sources since the model was
+    called. Only the recorded manifest is evidence for the answer.
+    """
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text("SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"),
+            {"project_id": project_id, "task_id": task_id, "request_key": f"research-{task_id}"},
+        ).scalar()
+    detail = raw if isinstance(raw, dict) else json.loads(raw) if isinstance(raw, str) else {}
+    manifest = detail.get("source_manifest")
+    if not isinstance(manifest, list) or not manifest or not all(isinstance(entry, dict) and entry.get("id") and entry.get("sha256") for entry in manifest):
+        return [], sha256_text("unrecorded"), "source_manifest_missing"
+    snapshot = _manifest_sha(manifest)
+    if detail.get("source_snapshot_sha256") != snapshot:
+        return [], snapshot, "source_manifest_mismatch"
+    if allowed_ids is not None and any(str(entry["id"]) not in allowed_ids for entry in manifest):
+        return [], snapshot, "source_outside_allowed"
+    texts: list[str] = []
+    changed: list[str] = []
+    for entry in manifest:
+        artifact_id = str(entry["id"])
+        expected = str(entry["sha256"])
+        if expected == "unreadable":
+            continue
+        ledger, deleted = _artifact_ledger(database, owner_id, project_id, artifact_id)
+        observed, data = _observe_bytes(store, owner_id, project_id, artifact_id)
+        if deleted or data is None or ledger != expected or observed != expected:
+            changed.append(artifact_id)
+            continue
+        try:
+            texts.append(data.decode("utf-8"))
+        except UnicodeError:
+            continue
+    if changed:
+        return [], snapshot, "source_changed:" + ",".join(changed)
+    prompt_sha = detail.get("prompt_sha256")
+    if prompt_sha is not None and prompt_sha != sha256_text(research_prompt(goal=goal, sources=texts)):
+        return [], snapshot, "source_prompt_mismatch"
+    return texts, snapshot, ""
 
 
 def _missing_live_settings(endpoints: WorkerEndpoints) -> list[str]:
@@ -985,7 +1060,7 @@ def _ensure_live_answer(
         return existing["id"]
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
-    fresh, snapshot_sha, fresh_state, missing_sources = _source_snapshot(database, store, owner_id, project_id, allowed_ids=allowed_ids)
+    fresh, manifest, snapshot_sha, fresh_state, missing_sources = _read_sources(database, store, owner_id, project_id, allowed_ids=allowed_ids)
     if fresh_state == "empty":
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="允许的来源是空的", code="allowed_sources_empty")
     if fresh_state != "ok":
@@ -1035,6 +1110,7 @@ def _ensure_live_answer(
         prompt_sha256=prompt_sha,
         output_cap=output_cap,
         source_snapshot_sha256=snapshot_sha,
+        source_manifest=manifest,
         attempt_id=attempt_id,
     )
     action = str(prepared["action"])
@@ -1200,7 +1276,7 @@ def _ensure_answer(
     task_id: str,
     goal: str,
     sources: list[str],
-    snapshot_sha: str,
+    manifest: list[dict[str, str]],
 ) -> str | None:
     existing = _task_artifact(database, owner_id, project_id, task_id, "task_answer")
     if existing is not None:
@@ -1212,7 +1288,7 @@ def _ensure_answer(
         return ""
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
-    _record_scripted_generation(database, owner_id=owner_id, project_id=project_id, task_id=task_id, snapshot_sha=snapshot_sha)
+    _record_scripted_generation(database, owner_id=owner_id, project_id=project_id, task_id=task_id, manifest=manifest)
     stored = store.put(owner_id=owner_id, project_id=project_id, data=output.encode(), media_type="text/plain", classification="task_answer")
     if _block_execution(database, owner_id, project_id, task_id) is not None:
         return None
@@ -1236,9 +1312,9 @@ def _ensure_answer(
     return str(stored["artifact_id"])
 
 
-def _record_scripted_generation(database: Database, *, owner_id: str, project_id: str, task_id: str, snapshot_sha: str) -> None:
+def _record_scripted_generation(database: Database, *, owner_id: str, project_id: str, task_id: str, manifest: list[dict[str, str]]) -> None:
     """The scripted answer gets the same generation row a live call has, at zero cost."""
-    detail = {"model_mode": "scripted", "source_snapshot_sha256": snapshot_sha}
+    detail = {"model_mode": "scripted", "source_manifest": manifest, "source_snapshot_sha256": _manifest_sha(manifest)}
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text(
