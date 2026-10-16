@@ -1,4 +1,4 @@
-"""Independent grading. The bound suite runs in the sandbox, not the candidate's tests."""
+"""Independent grading. Protocol assertions stay outside the candidate process."""
 
 from __future__ import annotations
 
@@ -13,6 +13,8 @@ from typing import Any
 from sqlalchemy import text
 
 from aether_storage.db import Database
+from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
+from aether_worker.grader_runner import GRADER_PROGRAM as _GRADER_PROGRAM
 from aether_worker.runner import JOB_IMAGE, _docker
 
 GRADER_IMAGE = "aether-grader:local"
@@ -117,6 +119,9 @@ def _result(
     *,
     sentinel_visible: bool = False,
     credential_present: bool = False,
+    trust: str = "unverified",
+    security_certified: bool = False,
+    auto_promote: bool = False,
 ) -> dict[str, Any]:
     return {
         "verdict": verdict,
@@ -126,6 +131,9 @@ def _result(
         "candidate_sha256": candidate_sha256,
         "sentinel_visible": sentinel_visible,
         "credential_present": credential_present,
+        "trust": trust,
+        "security_certified": security_certified,
+        "auto_promote": auto_promote,
     }
 
 
@@ -153,9 +161,12 @@ def grade(
         return _result("FAIL", "候选包含会遮蔽评分器的模块", observed_suite, observed_contract, observed_candidate)
     if not _ensure_grader_image():
         return _result("FAIL", "评分容器不可用", suite_sha256, contract_sha256, observed_candidate)
+    protocol = extract_protocol(candidate, suite)
     with tempfile.TemporaryDirectory(prefix="aether-grade-") as temporary:
         workspace = Path(temporary) / "work"
         _stage(candidate, suite, workspace)
+        if protocol is not None:
+            _publish_protocol(workspace, protocol)
         sentinel = str(host_sentinel) if host_sentinel is not None else "/aether-host-sentinel"
         completed = _docker(
             [
@@ -202,144 +213,92 @@ def grade(
             sentinel_visible=parsed["sentinel_visible"],
             credential_present=parsed["credential_present"],
         )
-    if parsed["exit_code"] != 0 or not parsed["passed"]:
+    return _verdict(protocol, parsed, suite_sha256, contract_sha256, observed_candidate)
+
+
+def _publish_protocol(workspace: Path, protocol: tuple[Any, ...]) -> None:
+    path = workspace / "protocol.json"
+    path.write_text(json.dumps(probes_document(protocol), ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
+    path.chmod(0o600)
+    suite_root = workspace / "suite"
+    suite_root.chmod(0o700)
+    for child in suite_root.rglob("*"):
+        child.chmod(0o600 if child.is_file() else 0o700)
+
+
+def _verdict(
+    protocol: tuple[Any, ...] | None,
+    parsed: dict[str, Any],
+    suite_sha256: str,
+    contract_sha256: str,
+    candidate_sha256: str,
+) -> dict[str, Any]:
+    if protocol is not None and parsed["trust"] == "isolated" and values_match(protocol, parsed["values"]):
         return _result(
-            "FAIL",
-            "绑定套件未通过",
+            "PASS",
+            "绑定套件通过且哈希一致",
             suite_sha256,
             contract_sha256,
-            observed_candidate,
-            sentinel_visible=False,
-            credential_present=False,
+            candidate_sha256,
+            trust="isolated",
+            security_certified=True,
+            auto_promote=False,
         )
-    return _result("PASS", "绑定套件通过且哈希一致", suite_sha256, contract_sha256, observed_candidate)
-
-
-# Runs as root inside the sandbox and never imports candidate code. The bound
-# suite runs in a child dropped to nobody, which cannot open this process's
-# stdout through /proc. The verdict comes from the child's exit status and its
-# JUnit report checked against the test names parsed from the trusted suite,
-# not from anything the child chooses to print. Code running inside the child
-# can still rewrite pytest itself; see docs/06_security.md.
-_GRADER_PROGRAM = r"""
-import ast, json, os, secrets, signal, stat, subprocess, sys
-import xml.etree.ElementTree as ElementTree
-from pathlib import Path
-
-NOBODY = 65534
-REPORT_LIMIT = 4 * 1024 * 1024
-SUITE = Path("/work/suite")
-CHILD_HOME = Path("/run/aether/child")
-
-
-def required_tests(root):
-    required = set()
-    for path in sorted(root.rglob("*.py")):
-        if not (path.name.startswith("test_") or path.name.endswith("_test.py")):
-            continue
-        module = ".".join(path.relative_to(root).with_suffix("").parts)
-        try:
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-        except (SyntaxError, UnicodeError, OSError):
-            required.add((module, "<unparseable>"))
-            continue
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
-                required.add((module, node.name))
-            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
-                for item in node.body:
-                    if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
-                        required.add((module + "." + node.name, item.name))
-    return required
-
-
-def read_report(path):
-    try:
-        fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    except OSError:
-        return None
-    try:
-        info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_size > REPORT_LIMIT:
-            return None
-        chunks = []
-        while True:
-            chunk = os.read(fd, 65536)
-            if not chunk:
-                break
-            chunks.append(chunk)
-        return b"".join(chunks)
-    finally:
-        os.close(fd)
-
-
-def grade():
-    required = required_tests(SUITE)
-    if not required:
-        return {"ok": False, "reason": "suite_has_no_tests", "exit_code": None, "tests": 0}
-    CHILD_HOME.mkdir(mode=0o700)
-    os.chown(CHILD_HOME, NOBODY, NOBODY)
-    report = CHILD_HOME / (secrets.token_hex(16) + ".xml")
-    command = [
-        sys.executable, "-I", "-m", "pytest", "-q", "--tb=no", "--noconftest", "-p", "no:cacheprovider",
-        "-o", "pythonpath=/work/src", "--rootdir", str(SUITE), "--junitxml", str(report), str(SUITE),
-    ]
-    environment = {
-        "PATH": "/usr/local/bin:/usr/bin:/bin",
-        "HOME": str(CHILD_HOME),
-        "TMPDIR": str(CHILD_HOME),
-        "LANG": "C.UTF-8",
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1",
-    }
-    try:
-        completed = subprocess.run(
-            command, cwd=str(SUITE), env=environment, user=NOBODY, group=NOBODY, extra_groups=[],
-            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=300,
+    if parsed["trust"] == "cooperative" and parsed["cooperative_passed"]:
+        return _result(
+            "FAIL",
+            "白盒 pytest 只验证合作代码，不能作为安全认证或自动发布",
+            suite_sha256,
+            contract_sha256,
+            candidate_sha256,
+            trust="cooperative",
+            security_certified=False,
+            auto_promote=False,
         )
-        exit_code = completed.returncode
-    except subprocess.TimeoutExpired:
-        exit_code = None
-    # Nothing the candidate left running may touch the report after pytest returns.
-    try:
-        os.kill(-1, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    if exit_code != 0:
-        return {"ok": False, "reason": "pytest_failed", "exit_code": exit_code, "tests": 0}
-    data = read_report(report)
-    if data is None:
-        return {"ok": False, "reason": "report_missing", "exit_code": exit_code, "tests": 0}
-    try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError:
-        return {"ok": False, "reason": "report_unreadable", "exit_code": exit_code, "tests": 0}
-    total = 0
-    passed = set()
-    for case in root.iter("testcase"):
-        total += 1
-        key = (case.get("classname", ""), case.get("name", "").split("[", 1)[0])
-        if any(child.tag in {"failure", "error", "skipped"} for child in case):
-            return {"ok": False, "reason": "test_not_passed", "exit_code": exit_code, "tests": total}
-        passed.add(key)
-    if total < 1 or not required <= passed:
-        return {"ok": False, "reason": "required_test_missing", "exit_code": exit_code, "tests": total}
-    return {"ok": True, "reason": "passed", "exit_code": exit_code, "tests": total}
+    trust = parsed["trust"] if parsed["trust"] in {"isolated", "cooperative"} else "unverified"
+    return _result(
+        "FAIL",
+        "绑定套件未通过",
+        suite_sha256,
+        contract_sha256,
+        candidate_sha256,
+        trust=trust,
+        security_certified=False,
+        auto_promote=False,
+    )
 
 
-sentinel = Path(os.environ.get("AETHER_HOST_SENTINEL", "/aether-host-sentinel"))
-keys = ("AETHER_PROVIDER_KEY", "AETHER_ADMIN_DATABASE_URL")
-isolation = {"sentinel_visible": sentinel.exists(), "credential_present": any(key in os.environ for key in keys)}
-sys.stdout.write("ISOLATION " + json.dumps(isolation) + "\n")
-sys.stdout.flush()
-sys.stdout.write("GRADE " + json.dumps(grade()) + "\n")
-sys.stdout.flush()
-"""
+# An isolated pass can be recorded as a certification. It still does not promote.
+_GRADE_CAN_PROMOTE = False
+
+
+def allows_auto_promotion(graded: dict[str, Any]) -> bool:
+    """Cooperative pytest cannot promote. A certified grade does not promote by itself."""
+    if graded.get("trust") != "isolated" or graded.get("security_certified") is not True:
+        return False
+    if graded.get("verdict") != "PASS" or graded.get("auto_promote") is not True:
+        return False
+    return _GRADE_CAN_PROMOTE
+
+
+def _recordable(graded: dict[str, Any]) -> bool:
+    if graded.get("auto_promote") is True or allows_auto_promotion(graded):
+        return False
+    if graded.get("verdict") != "PASS":
+        return True
+    return graded.get("trust") == "isolated" and graded.get("security_certified") is True
 
 
 def _parse_grader(stdout: str) -> dict[str, Any]:
     """Exactly an ISOLATION line then a GRADE line. Anything else is not a grade."""
-    failed = {"sentinel_visible": True, "credential_present": True, "exit_code": 1, "passed": False}
+    failed = {
+        "sentinel_visible": True,
+        "credential_present": True,
+        "exit_code": 1,
+        "trust": None,
+        "values": None,
+        "cooperative_passed": False,
+    }
     lines = stdout.splitlines()
     if len(lines) != 2 or not lines[0].startswith("ISOLATION ") or not lines[1].startswith("GRADE "):
         return failed
@@ -351,11 +310,15 @@ def _parse_grader(stdout: str) -> dict[str, Any]:
     if not isinstance(isolation, dict) or not isinstance(graded, dict):
         return failed
     exit_code = graded.get("exit_code")
+    trust = graded.get("trust")
+    values = graded.get("values")
     return {
         "sentinel_visible": isolation.get("sentinel_visible") is not False,
         "credential_present": isolation.get("credential_present") is not False,
         "exit_code": exit_code if isinstance(exit_code, int) else 1,
-        "passed": graded.get("ok") is True and exit_code == 0,
+        "trust": trust if trust in {"isolated", "cooperative"} else None,
+        "values": values if isinstance(values, list) else None,
+        "cooperative_passed": graded.get("cooperative_passed") is True,
     }
 
 
@@ -367,6 +330,8 @@ def accept_actor_verdict(actor_verdict: str, graded: dict[str, Any]) -> dict[str
 
 
 def record_grade(database: Database, *, owner_id: str, project_id: str, task_id: str, contract_id: str, artifact_id: str, report_artifact_id: str, graded: dict[str, Any]) -> str:
+    if not _recordable(graded):
+        raise VerificationError("uncertified_pass")
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         identity = conn.execute(text("SELECT current_user")).scalar_one()
         if identity != "aether_verifier":

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import uuid
 from typing import Any
 
@@ -21,17 +22,57 @@ class SkillEvalError(Exception):
         self.code = code
 
 
+def _insufficient() -> dict[str, Any]:
+    return {"decision": "INSUFFICIENT_EVIDENCE", "label": "not_synthetic", "promoted": False, "learned": False}
+
+
+def _rejected() -> dict[str, Any]:
+    return {"decision": "REJECTED", "label": "not_synthetic", "promoted": False, "learned": False}
+
+
+def _families(value: Any) -> int | None:
+    if type(value) is not int or value < 0:
+        return None
+    return value
+
+
+def _finite_in(value: Any, low: float, high: float | None) -> float | None:
+    """Real int/float inside the metric's closed range. Bool, str, NaN and inf are rejected."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    number = float(value)
+    if not math.isfinite(number) or number < low:
+        return None
+    if high is not None and number > high:
+        return None
+    return number
+
+
+def _measured(metrics: dict[str, Any]) -> tuple[int, float, float, float] | None:
+    if not isinstance(metrics, dict):
+        return None
+    if "families" not in metrics or "ci_lower" not in metrics or "success_delta" not in metrics or "cost_ratio" not in metrics:
+        return None
+    families = _families(metrics["families"])
+    ci_lower = _finite_in(metrics["ci_lower"], -1.0, 1.0)
+    delta = _finite_in(metrics["success_delta"], -1.0, 1.0)
+    cost_ratio = _finite_in(metrics["cost_ratio"], 0.0, None)
+    if families is None or ci_lower is None or delta is None or cost_ratio is None:
+        return None
+    return families, ci_lower, delta, cost_ratio
+
+
 def judge(metrics: dict[str, Any], *, synthetic: bool) -> dict[str, Any]:
     if synthetic:
         return {"decision": "REJECTED", "label": "synthetic_control", "promoted": False, "learned": False}
-    families = int(metrics.get("families") or 0)
-    ci_lower = float(metrics.get("ci_lower") or 0)
-    delta = float(metrics.get("success_delta") or 0)
-    cost_ratio = float(metrics.get("cost_ratio") or 99)
+    measured = _measured(metrics)
+    if measured is None:
+        return _insufficient()
+    families, ci_lower, delta, cost_ratio = measured
     if families < THRESHOLDS["min_families"] or ci_lower <= THRESHOLDS["min_ci_lower"]:
-        return {"decision": "INSUFFICIENT_EVIDENCE", "label": "not_synthetic", "promoted": False, "learned": False}
+        return _insufficient()
     if delta < THRESHOLDS["min_success_delta"] or cost_ratio > THRESHOLDS["max_cost_ratio"] or metrics.get("security_failure"):
-        return {"decision": "REJECTED", "label": "not_synthetic", "promoted": False, "learned": False}
+        return _rejected()
     return {"decision": "ELIGIBLE", "label": "not_synthetic", "promoted": True, "learned": False}
 
 
