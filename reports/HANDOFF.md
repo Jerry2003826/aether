@@ -1,5 +1,19 @@
 # 交接
 
+## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
+
+`b40ce32` 的 CI 已绿：`pack-and-unit`、`integration`、SonarCloud（workflow `38937123243` 与 `38937117126`）。随后按 PR #30 的 Codex P1 收紧，没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
+
+- 非法 YAML 的 markdown frontmatter 变成 `IngestError("parse_rejected")`。证明：`test_invalid_markdown_yaml_is_parse_rejected`。
+- Retry-After 的 NaN、无穷不是有限数，改走指数退避。证明：`test_retry_after_rejects_non_finite_values`。
+- ACTIVE 索引的行和 manifest 必须等于当前 `TOKENIZER_VERSION`，否则 `tokenizer_mismatch`，且发生在读缓存和 BM25 之前。search 不重建。证明：`test_require_tokenizer_version_rejects_the_previous_cut`、`test_active_generation_with_old_tokenizer_is_refused_before_cache`、`test_active_manifest_with_old_tokenizer_is_refused_before_bm25`。
+- 重定向链共用一次 tenacity 预算。两跳之后传输失败，起点、中跳和失败目标各 3 次，不是 27 次。证明：`test_redirect_chain_shares_one_retry_budget`。`test_ssrf_does_not_connect_to_loopback_or_follow_redirect` 仍要求重定向前 opener 只调用 1 次。
+- RSS 先按 UTF-8、UTF-16（含 BOM、UTF-16LE 声明、UTF-16BE BOM）和 UTF-32 解码，再拒绝 `<!DOCTYPE` / `<!ENTITY`，并且在 `feedparser.parse` 之前。证明：`test_utf16_entity_declarations_are_rejected_before_feedparser`。`test_rss_parser_is_isolated_and_rejects_entities` 仍要求 UTF-8 billion laughs 为 `parse_rejected`。
+- 网页跳过 BOM、XML 声明和已闭合注释后再交给 trafilatura。未闭合注释仍是纯文本。证明：`test_html_preamble_still_uses_trafilatura`。
+- 技能 metadata 只读到第二个 `---`。证明：`test_metadata_reads_only_the_frontmatter_fence`。
+
+本机没有 PostgreSQL、Temporal 和 Docker。全套集成测试没有在本机跑。这次本地：`verify_freeze` 通过（`api_operations` 50），参考套件 76 OK，`pytest tests/unit` 297 passed。这条修正的 CI 还没有跑。
+
 ## R8-A 采集解析换成固定版本的开源库（分支 `cursor/r8-a-ingest-libraries-47e9`）
 
 基线是 `origin/main` 的 `a2b9313`。ADR-F40 仍是已合并的最后一条，本决定记为 ADR-F41。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed。SSRF、钉住 IP、产物账本、outbox、幂等和 fencing 仍是手写。

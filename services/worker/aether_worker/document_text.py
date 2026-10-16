@@ -7,6 +7,7 @@ from functools import lru_cache
 from pathlib import Path
 
 import frontmatter
+import yaml
 from docling.datamodel.base_models import ConversionStatus, InputFormat
 from docling.datamodel.pipeline_options import NativePdfPipelineOptions
 from docling.document_converter import DocumentConverter, NativePdfFormatOption
@@ -49,7 +50,10 @@ def _markdown(data: bytes) -> str:
     text = _utf8(data)
     if not text.startswith("---"):
         return text
-    post = frontmatter.loads(text)
+    try:
+        post = frontmatter.loads(text)
+    except yaml.YAMLError as exc:
+        raise IngestError("parse_rejected") from exc
     if not post.metadata:
         return text
     return post.content

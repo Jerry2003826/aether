@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import frontmatter
+import yaml
 
 from aether_worker.runner import JOB_IMAGE, _docker, _ensure_image, docker_available
 
@@ -33,18 +34,34 @@ def _skill_file(root: Path) -> Path:
     return path
 
 
-def _parsed(root: Path) -> frontmatter.Post:
-    raw = _skill_file(root).read_text(encoding="utf-8")
-    if not raw.startswith("---"):
-        raise SkillError("frontmatter_missing")
-    post = frontmatter.loads(raw)
+def _frontmatter_only(root: Path) -> str:
+    """Read through the closing fence. The instruction body stays on disk."""
+    with _skill_file(root).open(encoding="utf-8") as handle:
+        first = handle.readline()
+        if first.strip() != "---":
+            raise SkillError("frontmatter_missing")
+        lines = [first]
+        while True:
+            line = handle.readline()
+            if line == "":
+                raise SkillError("frontmatter_missing")
+            lines.append(line)
+            if line.strip() == "---":
+                return "".join(lines)
+
+
+def _loads(text: str) -> frontmatter.Post:
+    try:
+        post = frontmatter.loads(text)
+    except yaml.YAMLError as exc:
+        raise SkillError("metadata_invalid") from exc
     if not post.metadata:
         raise SkillError("frontmatter_missing")
     return post
 
 
 def _frontmatter(root: Path) -> dict[str, Any]:
-    loaded = _parsed(root).metadata
+    loaded = _loads(_frontmatter_only(root)).metadata
     if not isinstance(loaded, dict) or not loaded.get("name") or not loaded.get("description"):
         raise SkillError("metadata_invalid")
     return {"name": str(loaded["name"]), "description": str(loaded["description"])}
@@ -58,7 +75,7 @@ def load_metadata(root: Path) -> dict[str, Any]:
 
 
 def load_body(root: Path) -> str:
-    return _parsed(root).content.strip() + "\n"
+    return _loads(_skill_file(root).read_text(encoding="utf-8")).content.strip() + "\n"
 
 
 def load_resource(root: Path, relative: str) -> str:

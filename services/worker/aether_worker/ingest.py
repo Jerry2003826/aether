@@ -2,12 +2,13 @@
 
 from __future__ import annotations
 
-import ssl
 import hashlib
 import ipaddress
 import json
+import math
 import os
 import socket
+import ssl
 import subprocess
 import sys
 from pathlib import Path
@@ -228,9 +229,12 @@ def _retry_after(headers: Any) -> float | None:
     if raw is None:
         return None
     try:
-        return float(raw)
+        value = float(raw)
     except (TypeError, ValueError):
         return None
+    if not math.isfinite(value):
+        return None
+    return value
 
 
 def fetch_url(
@@ -288,6 +292,45 @@ def _fetch_attempt(
     host = parsed.hostname or ""
     headers = dict(extra_headers or {})
     headers["Host"] = host
+    return _fetch_once(
+        url,
+        resolve=resolve,
+        allow_hosts=allow_hosts,
+        allowed_domains=allowed_domains,
+        opener=opener,
+        redirects_left=redirects_left,
+        max_bytes=max_bytes,
+        verify=verify,
+        extra_headers=extra_headers,
+        pinned=pinned,
+        headers=headers,
+    )
+
+
+def _fetch_once(
+    url: str,
+    *,
+    resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]],
+    allow_hosts: set[str] | None,
+    allowed_domains: set[str] | None,
+    opener: Callable[..., httpx.Response] | None,
+    redirects_left: int,
+    max_bytes: int,
+    verify: ssl.SSLContext | str | bool,
+    extra_headers: dict[str, str] | None,
+    pinned: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> bytes:
+    """One hop. Redirects stay inside the caller's single Tenacity budget."""
+    if redirects_left < 0:
+        raise IngestError("redirect_rejected")
+    if allowed_domains is not None:
+        _require_domain(url, allowed_domains)
+    if pinned is None or headers is None:
+        pinned = assert_public_target(url, resolve=resolve, allow_hosts=_connect_hosts(allow_hosts, allowed_domains))
+        parsed = urlsplit(url)
+        headers = dict(extra_headers or {})
+        headers["Host"] = parsed.hostname or ""
     if opener is not None:
         return _opener_body(
             opener,
@@ -305,12 +348,12 @@ def _fetch_attempt(
     with httpx.Client(transport=transport, verify=verify, follow_redirects=False, trust_env=False, timeout=5.0) as client:
         with client.stream("GET", url, headers=headers) as response:
             if response.status_code in _REDIRECTS:
-                location = _location(response, url)
-                return fetch_url(
-                    location,
+                return _fetch_once(
+                    _location(response, url),
                     resolve=resolve,
                     allow_hosts=allow_hosts,
                     allowed_domains=allowed_domains,
+                    opener=opener,
                     redirects_left=redirects_left - 1,
                     max_bytes=max_bytes,
                     verify=verify,
@@ -378,7 +421,7 @@ def _follow(
     verify: ssl.SSLContext | str | bool,
     extra_headers: dict[str, str] | None,
 ) -> bytes:
-    return fetch_url(
+    return _fetch_once(
         _location(response, url),
         resolve=resolve,
         allow_hosts=allow_hosts,

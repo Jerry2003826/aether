@@ -42,7 +42,25 @@ def extract_html(document: str) -> tuple[str, list[str]]:
 
 
 def _looks_like_html(data: bytes) -> bool:
-    return _HTML_START.match(data.lstrip(b"\xef\xbb\xbf")) is not None
+    return _HTML_START.match(_skip_preamble(data)) is not None
+
+
+def _skip_preamble(data: bytes) -> bytes:
+    view = data.lstrip(b"\xef\xbb\xbf").lstrip()
+    while True:
+        if view.startswith(b"<?"):
+            end = view.find(b"?>")
+            if end < 0:
+                return view
+            view = view[end + 2 :].lstrip()
+            continue
+        if view.startswith(b"<!--"):
+            end = view.find(b"-->")
+            if end < 0:
+                return view
+            view = view[end + 3 :].lstrip()
+            continue
+        return view
 
 
 def _script_sources(document: str) -> list[str]:

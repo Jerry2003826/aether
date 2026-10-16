@@ -9,6 +9,9 @@ import sys
 
 import feedparser
 
+_ENTITY_MARKERS = ("<!doctype", "<!entity")
+_WIDE_ENCODINGS = ("utf-16", "utf-16-le", "utf-16-be", "utf-32", "utf-32-le", "utf-32-be")
+
 
 def main() -> None:
     resource.setrlimit(resource.RLIMIT_CPU, (1, 1))
@@ -30,14 +33,63 @@ def main() -> None:
 
 def parse_feed(payload: bytes, *, mode: str) -> list[str]:
     """Parse with feedparser. Custom entities are refused before the library expands them."""
-    lowered = payload.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
+    if _declares_entity(payload):
         raise ValueError("entity_rejected")
     parsed = feedparser.parse(payload)
     texts = _arxiv_texts(parsed) if mode == "arxiv" else _rss_texts(parsed)
     if parsed.get("bozo") and not texts:
         raise ValueError("parse_rejected")
     return texts
+
+
+def _declares_entity(payload: bytes) -> bool:
+    """Refuse a DTD before feedparser expands it. UTF-16 and UTF-32 hide the ASCII bytes behind NULs."""
+    for text in _xml_texts(payload):
+        lowered = text.lower()
+        if any(marker in lowered for marker in _ENTITY_MARKERS):
+            return True
+    return False
+
+
+def _xml_texts(payload: bytes) -> list[str]:
+    encodings: list[str] = []
+    detected = _xml_encoding(payload)
+    if detected is not None:
+        encodings.append(detected)
+    encodings.append("utf-8")
+    if b"\x00" in payload or detected in _WIDE_ENCODINGS:
+        encodings.extend(_WIDE_ENCODINGS)
+    texts: list[str] = []
+    seen: set[str] = set()
+    for encoding in encodings:
+        if encoding in seen:
+            continue
+        seen.add(encoding)
+        try:
+            texts.append(payload.decode(encoding, errors="replace"))
+        except (UnicodeError, LookupError):
+            continue
+    return texts
+
+
+def _xml_encoding(payload: bytes) -> str | None:
+    if payload.startswith(b"\xff\xfe\x00\x00"):
+        return "utf-32-le"
+    if payload.startswith(b"\x00\x00\xfe\xff"):
+        return "utf-32-be"
+    if payload.startswith((b"\xff\xfe", b"\xfe\xff")):
+        return "utf-16"
+    if payload.startswith(b"\xef\xbb\xbf"):
+        return "utf-8-sig"
+    if len(payload) >= 4 and payload[1] == 0 and payload[3] == 0 and payload[0] != 0:
+        return "utf-16-le"
+    if len(payload) >= 4 and payload[0] == 0 and payload[2] == 0 and payload[1] != 0:
+        return "utf-16-be"
+    if len(payload) >= 4 and payload[:3] == b"\x00\x00\x00":
+        return "utf-32-be"
+    if len(payload) >= 4 and payload[1:4] == b"\x00\x00\x00":
+        return "utf-32-le"
+    return None
 
 
 def _clean(value: object) -> str:

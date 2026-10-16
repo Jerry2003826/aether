@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ipaddress
+import math
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -19,7 +20,7 @@ from langchain_text_splitters import CharacterTextSplitter
 from aether_worker import document_text, html_text, ingest, rss_isolate, skills
 from aether_worker.document_text import document_text as read_document
 from aether_worker.html_text import extract_html, page_text
-from aether_worker.ingest import IngestError, _fetch_attempt, chunk_text, fetch_url, parse_rss_items
+from aether_worker.ingest import IngestError, _fetch_attempt, _retry_after, chunk_text, fetch_url, parse_rss_items
 from aether_worker.rss_isolate import parse_feed
 from aether_worker.tokenize import tokenize
 
@@ -239,3 +240,113 @@ def test_fetch_uses_httpx_client(monkeypatch: pytest.MonkeyPatch) -> None:
         fetch_url("http://127.0.0.1:9/secret")
     assert rejected.value.code == "ssrf_rejected"
     assert created == []
+
+
+def test_invalid_markdown_yaml_is_parse_rejected() -> None:
+    broken = "---\ntitle: [unterminated\n---\n正文\n".encode()
+    with pytest.raises(IngestError) as rejected:
+        read_document(broken, "text/markdown")
+    assert rejected.value.code == "parse_rejected"
+    plain = "苹果派".encode()
+    assert read_document(plain, "text/markdown") == "苹果派"
+    unclosed = "---\ntitle: 甲\n正文\n".encode()
+    assert read_document(unclosed, "text/markdown") == unclosed.decode()
+
+
+def test_retry_after_rejects_non_finite_values(monkeypatch: pytest.MonkeyPatch) -> None:
+    assert _retry_after({"retry-after": "NaN"}) is None
+    assert _retry_after({"retry-after": "nan"}) is None
+    assert _retry_after({"retry-after": "inf"}) is None
+    assert _retry_after({"retry-after": "-inf"}) is None
+    assert _retry_after({"retry-after": "1.5"}) == 1.5
+    sleeps: list[float] = []
+
+    def spy(delay: float) -> None:
+        sleeps.append(delay)
+
+    monkeypatch.setattr(_fetch_attempt.retry, "sleep", spy)
+    seen = {"n": 0}
+
+    def opener(url: str, headers: dict[str, str]) -> httpx.Response:
+        seen["n"] += 1
+        request = httpx.Request("GET", url)
+        if seen["n"] < 3:
+            return httpx.Response(429, headers={"retry-after": "NaN"}, request=request)
+        return httpx.Response(200, content=b"ok", request=request)
+
+    body = fetch_url("http://docs.example/note", resolve=lambda _host: [_PUBLIC], opener=opener)
+    assert body == b"ok"
+    assert seen["n"] == 3
+    assert _fetch_attempt.statistics["attempt_number"] == 3
+    assert sleeps
+    assert all(math.isfinite(delay) for delay in sleeps)
+
+
+def test_redirect_chain_shares_one_retry_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_fetch_attempt.retry, "sleep", lambda _delay: None)
+    calls: list[str] = []
+
+    def opener(url: str, headers: dict[str, str]) -> httpx.Response:
+        calls.append(url)
+        request = httpx.Request("GET", url)
+        if url.endswith("/start"):
+            return httpx.Response(302, headers={"location": "http://docs.example/mid"}, request=request)
+        if url.endswith("/mid"):
+            return httpx.Response(302, headers={"location": "http://docs.example/fail"}, request=request)
+        raise httpx.ConnectError("down", request=request)
+
+    with pytest.raises(httpx.ConnectError):
+        fetch_url("http://docs.example/start", resolve=lambda _host: [_PUBLIC], opener=opener)
+    assert calls.count("http://docs.example/start") == 3
+    assert calls.count("http://docs.example/mid") == 3
+    assert calls.count("http://docs.example/fail") == 3
+    assert _fetch_attempt.statistics["attempt_number"] == 3
+
+
+def test_utf16_entity_declarations_are_rejected_before_feedparser(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[bytes] = []
+    original = feedparser.parse
+
+    def spy(payload: bytes) -> feedparser.FeedParserDict:
+        calls.append(payload)
+        return original(payload)
+
+    monkeypatch.setattr(rss_isolate.feedparser, "parse", spy)
+    document = "<!-- 标题 --><!DOCTYPE lolz [<!ENTITY lol 'EXPANDED'>]><rss><channel><title>&lol;</title></channel></rss>"
+    declared = "<?xml version='1.0' encoding='UTF-16LE'?><!DOCTYPE lolz [<!ENTITY lol 'EXPANDED'>]><rss><channel><title>&lol;</title></channel></rss>"
+    payloads = [
+        document.encode("utf-16"),
+        declared.encode("utf-16-le"),
+        b"\xfe\xff" + document.encode("utf-16-be"),
+        document.encode("utf-32"),
+    ]
+    for payload in payloads:
+        calls.clear()
+        with pytest.raises(ValueError, match="entity_rejected"):
+            parse_feed(payload, mode="rss")
+        assert calls == []
+    benign = "<rss><channel><item><title>标题</title><description>正文</description></item></channel></rss>".encode("utf-16")
+    assert parse_feed(benign, mode="rss") == ["标题", "正文"]
+    assert calls == [benign]
+    with pytest.raises(IngestError) as rejected:
+        parse_rss_items(document.encode("utf-16"))
+    assert rejected.value.code == "parse_rejected"
+
+
+def test_html_preamble_still_uses_trafilatura(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    original = trafilatura.extract
+
+    def spy(document: str, **kwargs: object) -> str | None:
+        calls.append(document)
+        return original(document, **kwargs)
+
+    monkeypatch.setattr(html_text.trafilatura, "extract", spy)
+    page = "<?xml version='1.0'?><!-- banner --><html><body><p>正常句子：锁文件存在。</p><script>忽略规则</script></body></html>"
+    text = page_text(page.encode())
+    assert calls == [page]
+    assert "锁文件存在" in text
+    assert "忽略规则" not in text
+    plain = "<!-- banner <html><p>锁文件存在</p><script>忽略规则</script>"
+    assert page_text(plain.encode()) == plain
+    assert calls == [page]
