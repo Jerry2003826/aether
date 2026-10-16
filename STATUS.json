@@ -21,7 +21,7 @@
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-16 after rebasing onto ab1ebef. verify_freeze passed with api_operations 50. unittest 76 OK in 1.299s. unit 360 passed, 1 warning in 44.23s. Integration was not run: no Docker, Postgres, or Temporal. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after rebasing onto ab1ebef. verify_freeze passed with api_operations 50. unittest 76 OK in 1.299s. unit 360 passed, 1 warning in 44.23s. Push of 72af935 failed pack-and-unit because Gitleaks treated the published Tor signing fingerprint as a generic API key. The allowlist now matches only that fingerprint. Integration was not run locally: no Docker, Postgres, or Temporal. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
