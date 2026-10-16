@@ -55,9 +55,19 @@ def chunk_text(raw: str, *, width: int = 32) -> list[dict[str, int | str]]:
     return chunks
 
 
+_NAT64 = ipaddress.ip_network("64:ff9b::/96")
+
+
 def _blocked(address: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
+    if isinstance(address, ipaddress.IPv6Address):
+        embedded = address.ipv4_mapped
+        if embedded is None and address in _NAT64:
+            embedded = ipaddress.IPv4Address(int(address) & 0xFFFFFFFF)
+        if address.is_site_local or (embedded is not None and _blocked(embedded)):
+            return True
     return bool(
-        address.is_private
+        not address.is_global
+        or address.is_private
         or address.is_loopback
         or address.is_link_local
         or address.is_multicast

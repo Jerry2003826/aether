@@ -22,10 +22,35 @@ class McpError(Exception):
         self.code = code
 
 
+# argv is admin-configured; these checks catch obvious inline-code launches and are not a sandbox.
+_SHELLS = {"sh", "bash", "dash", "zsh", "ksh", "mksh", "ash", "fish", "csh", "tcsh", "busybox", "pwsh", "powershell", "cmd"}
+_LAUNCHERS = {"env", "xargs", "nohup", "timeout", "nice", "setsid", "stdbuf", "sudo", "doas", "su", "chroot", "unshare", "nsenter", "flock"}
+_INLINE_SHORT = {"python": "c", "node": "ep", "bun": "e", "perl": "eE", "ruby": "e", "php": "r", "lua": "e", "rscript": "e", "osascript": "e"}
+_INLINE_LONG = {"--command", "--eval", "--print"}
+
+
+def _program(path: str) -> str:
+    name = path.replace("\\", "/").rsplit("/", 1)[-1].lower()
+    name = name.removesuffix(".exe")
+    return name.rstrip("0123456789.") or name
+
+
+def _inline_code(program: str, argument: str) -> bool:
+    if argument.split("=", 1)[0] in _INLINE_LONG:
+        return True
+    letters = _INLINE_SHORT.get(program)
+    if letters is None or not argument.startswith("-") or argument.startswith("--"):
+        return False
+    return any(letter in argument[1:] for letter in letters)
+
+
 def _validate_argv(argv: list[str]) -> list[str]:
     if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
         raise McpError("argv_rejected")
     if any(item in {"-c", "--command"} or any(token in item for token in ("|", ";", "`", "$(", "&&")) for item in argv):
+        raise McpError("shell_rejected")
+    program = _program(argv[0])
+    if program in _SHELLS or program in _LAUNCHERS or any(_inline_code(program, item) for item in argv[1:]):
         raise McpError("shell_rejected")
     return argv
 
