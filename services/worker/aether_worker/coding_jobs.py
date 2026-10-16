@@ -191,8 +191,10 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 request_key=request_key,
                 attempt_id=str(fencing),
             )
-            proxy = CodingModelProxy(database, job_token=model_token)
+            restore_status = _ensure_model_runnable(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
+            proxy: CodingModelProxy | None = None
             try:
+                proxy = CodingModelProxy(database, job_token=model_token)
                 try:
                     sandbox = run_coding_sandbox(
                         root,
@@ -237,7 +239,16 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 )
                 reserved = False
             finally:
-                proxy.close()
+                if proxy is not None:
+                    proxy.close()
+                if restore_status is not None:
+                    _restore_task_status(
+                        database,
+                        owner_id=owner_id,
+                        project_id=project_id,
+                        task_id=task_id,
+                        status=restore_status,
+                    )
             result = sandbox["result"]
             passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
             error = None if passed else "test_failed"
@@ -1069,6 +1080,63 @@ def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
     return incoming, outgoing
 
 
+def _ensure_model_runnable(database: Database, *, owner_id: str, project_id: str, task_id: str) -> str | None:
+    """Model admission accepts RUNNING and VERIFYING. A queued coding task is moved for the attempt."""
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        row = conn.execute(
+            text("SELECT status, resume_state FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
+            {"project_id": project_id, "id": task_id},
+        ).mappings().first()
+        if row is None or str(row["resume_state"] or "") in {"pause_requested", "cancel_requested"} or str(row["status"]) == "CANCELLED":
+            raise CodingError("task_not_runnable")
+        status = str(row["status"])
+        if status in {"RUNNING", "VERIFYING"}:
+            return None
+        if status != "QUEUED":
+            raise CodingError("task_not_runnable")
+        conn.execute(
+            text("UPDATE tasks SET status = 'RUNNING' WHERE project_id = :project_id AND id = :id AND status = 'QUEUED'"),
+            {"project_id": project_id, "id": task_id},
+        )
+    return "QUEUED"
+
+
+def _restore_task_status(database: Database, *, owner_id: str, project_id: str, task_id: str, status: str) -> None:
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        conn.execute(
+            text(
+                "UPDATE tasks SET status = :status WHERE project_id = :project_id AND id = :id AND status = 'RUNNING' "
+                "AND COALESCE(resume_state, '') NOT IN ('pause_requested', 'cancel_requested')"
+            ),
+            {"status": status, "project_id": project_id, "id": task_id},
+        )
+
+
+def _measured_usage(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> tuple[int, int] | None:
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+    detail = raw if isinstance(raw, dict) else json.loads(raw) if isinstance(raw, str) else {}
+    if "measured_input_tokens" not in detail or "measured_output_tokens" not in detail:
+        return None
+    incoming = detail["measured_input_tokens"]
+    outgoing = detail["measured_output_tokens"]
+    if type(incoming) is not int or type(outgoing) is not int or incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
+        return None
+    return incoming, outgoing
+
+
 def _settle(
     ledger: BudgetLedger,
     *,
@@ -1081,7 +1149,15 @@ def _settle(
 ) -> None:
     if not reserved:
         return
-    usage = _usage(result)
+    usage = _measured_usage(
+        ledger,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+    )
+    if usage is None:
+        usage = _usage(result)
     if usage is None:
         _release_hold(
             ledger,

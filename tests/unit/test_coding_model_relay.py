@@ -11,7 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
-from aether_gateway.model import GatewayDenied, ModelGateway, scripted_chat_completion
+from aether_gateway.__main__ import GATEWAY_CHAT_TIMEOUT_SECONDS, gateway_timeout
+from aether_gateway.model import GatewayDenied, ModelGateway, accepted_chat_body, scripted_chat_completion
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
 
@@ -38,7 +39,38 @@ def _grant(*, capabilities: list[str] | None = None) -> dict:
 def _gateway(upstream: str) -> ModelGateway:
     gateway = ModelGateway(cast(Database, object()), upstream_base=upstream, provider_key=_KEY, timeout=5)
     gateway._scope = lambda token: _grant() if token == _JOB else (_ for _ in ()).throw(GatewayDenied("token_rejected"))  # type: ignore[method-assign]
+    gateway._spend_coding_ticket = lambda _session, *, alias, prompt: 64  # type: ignore[method-assign]
+    gateway._add_measured_usage = lambda _session, _result: None  # type: ignore[method-assign]
     return gateway
+
+
+def test_chat_body_keeps_only_the_allowlist_and_the_server_timeout() -> None:
+    cleaned = accepted_chat_body(
+        {
+            "model": "coder",
+            "messages": [{"role": "user", "content": "edit"}],
+            "tools": [{"type": "function"}],
+            "tool_choice": "auto",
+            "timeout": 1e12,
+            "stream": True,
+            "user": "root",
+            "max_tokens": 99999,
+        },
+        max_tokens=64,
+    )
+    assert cleaned == {
+        "model": "coder",
+        "messages": [{"role": "user", "content": "edit"}],
+        "tools": [{"type": "function"}],
+        "tool_choice": "auto",
+        "max_tokens": 64,
+    }
+    source = Path("services/gateway/aether_gateway/__main__.py").read_text(encoding="utf-8")
+    assert "timeout=gateway_timeout(path, body)" in source
+    assert gateway_timeout("/v1/chat/completions", {"timeout": 1e12}) == GATEWAY_CHAT_TIMEOUT_SECONDS
+    assert gateway_timeout("/v1/chat/completions", {}) == 30.0
+    assert gateway_timeout("/v1/complete", {"timeout": 12.5}) == 12.5
+    assert gateway_timeout("/v1/complete", {"timeout": 0}) == 30.0
 
 
 def test_empty_upstream_returns_a_finish_call_with_token_usage() -> None:
@@ -89,7 +121,17 @@ def test_relay_posts_the_provider_key_and_ignores_http_proxy(monkeypatch) -> Non
         gateway = _gateway(f"http://127.0.0.1:{port}/v1")
         body = gateway.relay_chat(
             _JOB,
-            {"model": "openai/coder", "messages": [{"role": "user", "content": "edit"}], "aether_job_token": _JOB},
+            {
+                "model": "openai/coder",
+                "messages": [{"role": "user", "content": "edit"}],
+                "tools": [{"type": "function", "function": {"name": "file_editor"}}],
+                "tool_choice": "auto",
+                "aether_job_token": _JOB,
+                "timeout": 1e12,
+                "stream": True,
+                "user": "root",
+                "max_tokens": 99999,
+            },
         )
     finally:
         server.shutdown()
@@ -99,6 +141,11 @@ def test_relay_posts_the_provider_key_and_ignores_http_proxy(monkeypatch) -> Non
     forwarded = seen["body"]
     assert isinstance(forwarded, dict)
     assert "aether_job_token" not in forwarded
+    assert "timeout" not in forwarded
+    assert "stream" not in forwarded
+    assert "user" not in forwarded
+    assert forwarded["max_tokens"] == 64
+    assert forwarded["tool_choice"] == "auto"
     assert forwarded["model"] == "openai/coder"
     assert body["usage"]["prompt_tokens"] == 20
     assert body["usage"]["completion_tokens"] == 11

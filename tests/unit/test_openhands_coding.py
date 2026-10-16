@@ -27,6 +27,19 @@ _PROMPT_TOKENS = 17
 _COMPLETION_TOKENS = 9
 
 
+def _call_names(node: ast.AST) -> list[str]:
+    found: list[str] = []
+    for child in ast.iter_child_nodes(node):
+        if isinstance(child, ast.Call):
+            func = child.func
+            if isinstance(func, ast.Name):
+                found.append(func.id)
+            elif isinstance(func, ast.Attribute):
+                found.append(func.attr)
+        found.extend(_call_names(child))
+    return found
+
+
 def _resident_kb(pid: int) -> int:
     try:
         status = Path(f"/proc/{pid}/status").read_text(encoding="ascii")
@@ -80,6 +93,9 @@ def test_entry_source_calls_the_agent_and_launch_keeps_other_images(monkeypatch)
     assert "LLM" in name_calls
     assert "execute_command" in attribute_calls
     assert "mkdtemp" in attribute_calls
+    main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
+    ordered = _call_names(main)
+    assert ordered.index("_run_agent") < ordered.index("restore_baseline_tests") < ordered.index("execute_command")
     assert "/tmp" not in source
     assert "_install_workspace_import_boundary" not in source
     assert not any(name == "importlib" or name.startswith("importlib.") for name in imported)
@@ -235,6 +251,57 @@ def test_a_finish_call_leaves_the_candidate_file_unchanged(tmp_path: Path) -> No
     assert "return 42" not in (job / "app.py").read_text(encoding="utf-8")
 
 
+def test_rewritten_tests_cannot_pass(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    fake = _SocketModel(rewrite_tests=True)
+    fake.start()
+    protocol = Path("services/worker/aether_worker/coding_protocol.py")
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    work.mkdir()
+    baseline = "import app\n\ndef test_value():\n    assert app.value() == 42\n"
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    (work / "test_app.py").write_text(baseline, encoding="utf-8")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    try:
+        completed = subprocess.run(
+            [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
+            cwd=tmp_path,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    graded = (job / "test_app.py").read_text(encoding="utf-8")
+    assert completed.returncode != 0
+    assert body["passed"] == 0
+    assert body["failed"] >= 1
+    assert body["edit_calls"] >= 1
+    assert "assert True" in body["patch"]
+    assert graded == baseline
+    assert "assert True" not in graded
+    assert any(case["name"] == "test_app.test_value" and case["verdict"] == "FAIL" for case in body["cases"])
+
+
 def test_runner_builds_the_openhands_image_when_docker_is_enabled(monkeypatch) -> None:
     calls: list[str] = []
     monkeypatch.setattr("aether_worker.runner_process.coding_runtime_image", lambda: None)
@@ -263,8 +330,9 @@ def test_runner_stays_up_when_the_openhands_image_build_fails(monkeypatch) -> No
 
 
 class _SocketModel:
-    def __init__(self, *, finish_only: bool = False) -> None:
+    def __init__(self, *, finish_only: bool = False, rewrite_tests: bool = False) -> None:
         self.finish_only = finish_only
+        self.rewrite_tests = rewrite_tests
         self.path = Path(os.environ.get("TMPDIR", "/tmp")) / f"aether-model-test-{os.getpid()}.sock"
         self.authorizations: list[str] = []
         self.bodies: list[bytes] = []
@@ -296,8 +364,16 @@ class _SocketModel:
             name = function.get("name") if isinstance(function, dict) else None
             if isinstance(name, str):
                 self.tool_names.add(name)
-        if self._calls == 1 and not self.finish_only:
-            target = _app_path(raw.decode("utf-8", "replace"))
+        text = raw.decode("utf-8", "replace")
+        if self._calls == 1 and self.rewrite_tests:
+            target = str(Path(_app_path(text)).with_name("test_app.py"))
+            arguments = json.dumps(
+                {"command": "str_replace", "path": target, "old_str": "assert app.value() == 42", "new_str": "assert True"}
+            )
+            name = "file_editor"
+            call_id = "call_edit"
+        elif self._calls == 1 and not self.finish_only:
+            target = _app_path(text)
             arguments = json.dumps({"command": "str_replace", "path": target, "old_str": "return 0", "new_str": "return 42"})
             name = "file_editor"
             call_id = "call_edit"

@@ -12,6 +12,7 @@ from typing import Any
 
 import litellm
 from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
@@ -24,6 +25,9 @@ COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
 SCRIPTED_PROMPT_TOKENS = 8
 SCRIPTED_COMPLETION_TOKENS = 4
+CODING_CALL_OUTPUT_CAP = 256
+CODING_MAX_MODEL_CALLS = 4
+_CHAT_FIELDS = ("model", "messages", "tools", "tool_choice")
 
 
 def _is_timeout(exc: BaseException) -> bool:
@@ -53,6 +57,12 @@ def _redact(value: str, secret: str) -> str:
     return value.replace(secret, "[REDACTED]")
 
 
+def _count(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        return 0
+    return value
+
+
 def _alias_matches(model: str, aliases: list[str]) -> bool:
     if model in aliases:
         return True
@@ -65,6 +75,18 @@ def _chat_url(base: str) -> str:
     if root.endswith("/v1"):
         return root + "/chat/completions"
     return root + "/v1/chat/completions"
+
+
+def accepted_chat_body(body: dict[str, Any], *, max_tokens: int | None = None) -> dict[str, Any]:
+    """Fields the coding relay may forward. timeout and any other key are dropped."""
+    cleaned = {key: body[key] for key in _CHAT_FIELDS if key in body}
+    if max_tokens is not None:
+        cleaned["max_tokens"] = max_tokens
+    return cleaned
+
+
+def chat_prompt(body: dict[str, Any]) -> str:
+    return json.dumps(accepted_chat_body(body), sort_keys=True, ensure_ascii=False, separators=(",", ":"))
 
 
 def scripted_chat_completion(model: str) -> dict[str, Any]:
@@ -150,13 +172,19 @@ class ModelGateway:
         aliases: list[str],
         egress: list[str] | None = None,
     ) -> str:
-        """A token for one booked request of one task attempt. It is spent by the first admitted call."""
+        """A token for one booked request of one task attempt.
+
+        complete() spends this token on the first admitted call. relay_chat keeps
+        the session token and spends a new child token per call. owner_id stays in
+        the stored scope so the gateway can open that child without reading projects.
+        """
         token = secrets.token_urlsafe(32)
         scope = {
             "project_id": project_id,
             "task_id": task_id,
             "request_key": request_key,
             "attempt_id": attempt_id,
+            "owner_id": owner_id,
             "capabilities": capabilities,
             "aliases": aliases,
             "egress": egress or [],
@@ -257,10 +285,11 @@ class ModelGateway:
         return result
 
     def relay_chat(self, job_token: str, body: dict[str, Any]) -> dict[str, Any]:
-        """Forward one OpenAI chat completion for a coding job.
+        """Forward one coding chat completion through the same admission as complete().
 
-        The grant stays valid for every call in the attempt. This does not revoke
-        the token and does not require the task to be RUNNING.
+        The session token stays valid for the attempt. Each call spends a new
+        one-time grant: _admit revokes it, a repeat of that prompt is rejected,
+        and another call past the reservation is rejected before the provider.
         """
         grant = self._scope(job_token)
         scope = grant["scope"]
@@ -271,15 +300,221 @@ class ModelGateway:
         aliases = [str(item) for item in scope.get("aliases") or []]
         if not _alias_matches(model, aliases):
             raise GatewayDenied("alias_denied")
+        alias = model.removeprefix("openai/") or model
+        prompt = chat_prompt(body)
+        max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
         self.audit.append(f"relay project={grant['project_id']} model={model}")
-        result = scripted_chat_completion(model or "coder") if not self.upstream_base else self._post_upstream(body)
+        payload = accepted_chat_body(body, max_tokens=max_tokens)
+        result = scripted_chat_completion(model or "coder") if not self.upstream_base else self._post_upstream(payload)
+        self._add_measured_usage(grant, result)
         encoded = json.dumps(result)
         if self.provider_key and (self.provider_key in encoded or any(self.provider_key in line for line in self.audit)):
             raise GatewayDenied("secret_leak", sent=True)
         return result
 
+    def _spend_coding_ticket(self, session: dict[str, Any], *, alias: str, prompt: str) -> int:
+        """Open one child reservation and pass it through _admit. Replay and overrun stop here."""
+        scope = session["scope"]
+        project_id = str(session["project_id"])
+        task_id = str(session["task_id"])
+        parent_key = str(scope["request_key"])
+        attempt_id = str(scope["attempt_id"])
+        prompt_sha = sha256_text(prompt)
+        child_key = f"{parent_key}:call:{prompt_sha}"
+        owner_id = scope.get("owner_id")
+        if not isinstance(owner_id, str) or not owner_id:
+            raise GatewayDenied("budget_exceeded")
+        self._open_coding_ticket(
+            project_id=project_id,
+            task_id=task_id,
+            parent_key=parent_key,
+            child_key=child_key,
+            attempt_id=attempt_id,
+            alias=alias,
+            prompt_sha=prompt_sha,
+        )
+        child_token = self.issue_token(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=child_key,
+            attempt_id=attempt_id,
+            capabilities=["coding:model"],
+            aliases=[alias],
+        )
+        try:
+            max_tokens = self._admit(self._scope(child_token), alias=alias, prompt=prompt, requested=None)
+        except GatewayDenied:
+            self._close_coding_ticket(project_id, task_id, child_key)
+            raise
+        self._close_coding_ticket(project_id, task_id, child_key)
+        return max_tokens
+
+    def _open_coding_ticket(
+        self,
+        *,
+        project_id: str,
+        task_id: str,
+        parent_key: str,
+        child_key: str,
+        attempt_id: str,
+        alias: str,
+        prompt_sha: str,
+    ) -> None:
+        with self.database.transaction(project_id=project_id) as conn:
+            parent = conn.execute(
+                text(
+                    "SELECT usage_status, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
+            ).mappings().first()
+            existing = conn.execute(
+                text(
+                    "SELECT 1 FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": child_key},
+            ).first()
+            if existing is not None:
+                raise GatewayDenied("token_rejected")
+            if parent is None or parent["usage_status"] != "reserved":
+                raise GatewayDenied("budget_exceeded")
+            detail = parent["usage_detail"]
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            detail = dict(detail or {})
+            reserved_tokens = _count(detail.get("reserved_tokens"))
+            measured = _count(detail.get("measured_input_tokens")) + _count(detail.get("measured_output_tokens"))
+            pending = _count(detail.get("pending_tokens"))
+            if reserved_tokens < 1 or measured + pending + CODING_CALL_OUTPUT_CAP > reserved_tokens:
+                raise GatewayDenied("budget_exceeded")
+            detail["pending_tokens"] = pending + CODING_CALL_OUTPUT_CAP
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": parent_key,
+                },
+            )
+            used = conn.execute(
+                text(
+                    "SELECT count(*) FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key LIKE :prefix"
+                ),
+                {"project_id": project_id, "task_id": task_id, "prefix": parent_key + ":call:%"},
+            ).scalar()
+            if int(used or 0) >= CODING_MAX_MODEL_CALLS:
+                raise GatewayDenied("budget_exceeded")
+            child_detail = {
+                "reserved_tokens": CODING_CALL_OUTPUT_CAP,
+                "dispatch_state": "sending",
+                "dispatch_holder": attempt_id,
+                "prompt_sha256": prompt_sha,
+                "output_cap": CODING_CALL_OUTPUT_CAP,
+            }
+            try:
+                conn.execute(
+                    text(
+                        "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
+                        "VALUES (:project_id, :task_id, :request_key, :digest, 'coding_call', :alias, 0, 'reserved', CAST(:detail AS jsonb))"
+                    ),
+                    {
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "request_key": child_key,
+                        "digest": prompt_sha,
+                        "alias": alias,
+                        "detail": json.dumps(child_detail),
+                    },
+                )
+            except IntegrityError as exc:
+                raise GatewayDenied("token_rejected") from exc
+
+    def _close_coding_ticket(self, project_id: str, task_id: str, child_key: str) -> None:
+        """The one-time row is spent. It no longer admits, and it does not add a second hold."""
+        with self.database.transaction(project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": child_key},
+            ).mappings().first()
+            if row is None:
+                return
+            detail = row["usage_detail"]
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            detail = dict(detail or {})
+            detail["dispatch_state"] = "response_recorded"
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = 0, input_tokens = 0, output_tokens = 0, "
+                    "usage_detail = CAST(:detail AS jsonb), completed_at = now() "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": child_key,
+                },
+            )
+
+    def _add_measured_usage(self, session: dict[str, Any], result: dict[str, Any]) -> None:
+        usage = result.get("usage")
+        if not isinstance(usage, dict):
+            return
+        try:
+            incoming = int(usage.get("prompt_tokens"))
+            outgoing = int(usage.get("completion_tokens"))
+        except (TypeError, ValueError):
+            return
+        if isinstance(usage.get("prompt_tokens"), bool) or isinstance(usage.get("completion_tokens"), bool):
+            return
+        if incoming < 0 or outgoing < 0:
+            return
+        project_id = str(session["project_id"])
+        with self.database.transaction(project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                    "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {
+                    "project_id": project_id,
+                    "task_id": str(session["task_id"]),
+                    "request_key": str(session["scope"]["request_key"]),
+                },
+            ).mappings().first()
+            if row is None:
+                return
+            detail = row["usage_detail"]
+            if isinstance(detail, str):
+                detail = json.loads(detail)
+            detail = dict(detail or {})
+            detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
+            detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
+            detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": str(session["task_id"]),
+                    "request_key": str(session["scope"]["request_key"]),
+                },
+            )
+
     def _post_upstream(self, body: dict[str, Any]) -> dict[str, Any]:
-        payload = {key: value for key, value in body.items() if key != "aether_job_token"}
+        payload = accepted_chat_body(body, max_tokens=body.get("max_tokens") if isinstance(body.get("max_tokens"), int) else None)
         request = urllib.request.Request(
             _chat_url(self.upstream_base),
             data=json.dumps(payload).encode(),

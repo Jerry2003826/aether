@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import hashlib
 import json
 import os
 import socket
@@ -276,6 +277,27 @@ def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
     return report
 
 
+def restore_baseline_tests(work: Path, job: Path) -> None:
+    """Put the job-creation tests back and check their hashes before the protocol runs.
+
+    An edit to a test, or an added test file, is removed. The protocol then grades
+    the candidate against the read-only baseline suite.
+    """
+    baseline: dict[str, bytes] = {}
+    for path in work.glob("test_*.py"):
+        if path.is_symlink() or not path.is_file():
+            continue
+        baseline[path.name] = path.read_bytes()
+    for path in list(job.glob("test_*.py")):
+        if path.name not in baseline or path.is_symlink():
+            path.unlink()
+    for name, data in baseline.items():
+        target = job / name
+        target.write_bytes(data)
+        if hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(data).hexdigest():
+            raise RuntimeError("test_hash_mismatch")
+
+
 def main() -> None:
     started = time.monotonic()
     try:
@@ -283,6 +305,7 @@ def main() -> None:
         copy_tree(WORK, job)
         before = _snapshot(job)
         agent_report = _run_agent(job, before)
+        restore_baseline_tests(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
             f"{sys.executable} -I {PROTOCOL}",

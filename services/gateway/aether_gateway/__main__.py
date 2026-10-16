@@ -10,6 +10,8 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.db import Database
 from aether_worker.role_http import serve_role
 
+GATEWAY_CHAT_TIMEOUT_SECONDS = 30.0
+
 
 def main() -> None:
     handed = _handoff()
@@ -25,8 +27,7 @@ def main() -> None:
         return {"role": "gateway", "configured": True}
 
     def post(path: str, body: dict) -> tuple[int, dict]:
-        timeout = _timeout(body.get("timeout"))
-        gateway = ModelGateway(database, upstream_base=base, provider_key=key, timeout=timeout)
+        gateway = ModelGateway(database, upstream_base=base, provider_key=key, timeout=gateway_timeout(path, body))
         if path == "/v1/chat/completions":
             try:
                 result = gateway.relay_chat(str(body.get("aether_job_token") or ""), body)
@@ -57,6 +58,13 @@ def _handoff() -> dict:
     if not isinstance(loaded, dict):
         raise SystemExit("gateway 交接无效")
     return loaded
+
+
+def gateway_timeout(path: str, body: dict) -> float:
+    """Coding chat uses the server timeout. The request body cannot stretch it."""
+    if path == "/v1/chat/completions":
+        return GATEWAY_CHAT_TIMEOUT_SECONDS
+    return _timeout(body.get("timeout"))
 
 
 def _timeout(value: object) -> float:

@@ -68,7 +68,7 @@ Actor 的可选决定是 `call_tools`、`submit_candidate`、`request_clarificat
 
 ## 6. OpenHands job 生命周期
 
-`QUEUED -> STARTING -> ACTIVE -> EXPORTING -> FINISHED`，失败/取消分支。每 job 一个隔离仓库副本与工作目录；使用已批准的 base_commit 导出，不把 host git worktree 的 `.git` 指针和主机仓库挂入沙箱。产品编码作业在既有断网只读沙箱里由 OpenHands 1.54.0 的 `Agent` 和 `Conversation` 使用 `file_editor` 与 `terminal` 生成补丁。模型请求只经过宿主机上的作业代理，再进入已有的预算/模型网关，按返回的 token 结算。容器保持 `--network none`，供应商 key 不进容器。模型套接字只对属主和 uid 65534 开放。测试协议仍由 `LocalWorkspace.execute_command` 执行。SDK 事件不作为可信证据。内存与 swap 上限是 805306368 字节。
+`QUEUED -> STARTING -> ACTIVE -> EXPORTING -> FINISHED`，失败/取消分支。每 job 一个隔离仓库副本与工作目录；使用已批准的 base_commit 导出，不把 host git worktree 的 `.git` 指针和主机仓库挂入沙箱。产品编码作业在既有断网只读沙箱里由 OpenHands 1.54.0 的 `Agent` 和 `Conversation` 使用 `file_editor` 与 `terminal` 生成补丁。模型请求只经过宿主机上的作业代理，再进入已有的预算/模型网关，按返回的 token 结算。容器保持 `--network none`，供应商 key 不进容器。模型套接字只对属主和 uid 65534 开放。测试协议仍由 `LocalWorkspace.execute_command` 执行，但判定前会用作业创建时的只读基线覆盖 `test_*.py` 并核对 sha256，Agent 改测试不能判通过。每次模型调用单独过与 `complete()` 相同的预算准入，重放票或超预算在到达供应商之前拒绝。聊天补全忽略请求体 timeout，只转发白名单字段。SDK 事件不作为可信证据。内存与 swap 上限是 805306368 字节。
 
 模型走 job-scoped gateway token；任务自身只能在这个预算里调用指定模型。token 即使被该 job 的 shell 看到也不能调用管理/审批/其他项目接口。SDK 内部事件不直接作为 trusted evidence。
 
