@@ -42,7 +42,15 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 
 剩余边界：没有预批准模板，低风险自动批准未实现。已被终止且任务尚未终态的 workflow 不会被重新启动。本机 Temporal 是 1.29.1，CI 镜像是 1.9.1；回放在本机通过，以 CI 为准。`live_ready` 仍是 pending。
 
-下一步：提交并推送，PR 标为 ready。等 CI（pack-and-unit、integration、SonarCloud）全绿后再向所有者报告。
+提交 `771499e`。PR #28 已标为 ready：https://github.com/Jerry2003826/aether/pull/28
+
+CI 在 `771499e` 上全绿：
+
+- pack-and-unit：run 38900608296（48s）、run 38900641351（46s）
+- integration：run 38900608296（7m46s）、run 38900641351（8m36s）
+- SonarCloud Code Analysis：PR #28，pass
+
+`live_ready` 仍是 pending。低风险自动批准未实现。已被终止且任务尚未终态的 workflow 不会被重新启动。
 
 ## P2-09 公开采集、工具账本、检索可见性与只读推荐（分支 `cursor/r7-ingest-tools-search-4ea5`）
 

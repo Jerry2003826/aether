@@ -14,14 +14,14 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. This lane (ADR-F35, base 6f223f7) is implemented locally and waiting on CI. Local integration was 320 passed and 38 failed: this VM has no docker, Playwright Chromium, or Hermes. Those failures were not skipped. CI must cover them. Do not treat the local integration run as fully passed.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. ADR-F35 is on PR #28 at 771499e; pack-and-unit, integration, and SonarCloud passed there. Local integration was 320 passed and 38 failed because this VM has no docker, Playwright Chromium, or Hermes. Those failures were not skipped. CI covered them.",
   "last_executed_commands": [
     "uv run --locked --no-build python scripts/verify_freeze.py",
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit",
     "AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration"
   ],
-  "last_test_result": "Local, base 6f223f7, before CI: verify_freeze exit 0; unittest 76 OK; unit 231 passed in 16.99s; integration 320 passed, 38 failed, 1 warning in 250.78s. The 38 failures are docker FileNotFoundError, missing Playwright Chromium, and hermes_cli_missing. Targeted lane tests passed: tests/integration/test_r7_review_budget.py with order, retry, and dispatcher workflow tests 16 passed; worker process, p0 approval, and history replay 13 passed. live_ready stays pending. CI not yet run.",
+  "last_test_result": "Local, base 6f223f7, commit 771499e: verify_freeze exit 0; unittest 76 OK; unit 231 passed in 16.99s; integration 320 passed, 38 failed, 1 warning in 250.78s. The 38 failures are docker FileNotFoundError, missing Playwright Chromium, and hermes_cli_missing. Targeted lane tests passed: tests/integration/test_r7_review_budget.py with order, retry, and dispatcher workflow tests 16 passed; worker process, p0 approval, and history replay 13 passed. CI on 771499e is green: pack-and-unit and integration on runs 38900608296 and 38900641351, SonarCloud pass on PR #28. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
