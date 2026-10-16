@@ -7,7 +7,7 @@
 - **潜在风险**：代码证据充分，但本轮没有构造出触发条件，或组件还没接到产品路径。
 - **需要真实环境**：结论取决于真实模型、真实供应商账单、生产 Temporal 等本轮没有的条件。
 
-共 **52 条**：守住 12 条，已证实违反 31 条，潜在风险 7 条，需要真实环境 2 条。
+共 **52 条**：守住 12 条，已证实违反 31 条，潜在风险 7 条，需要真实环境 2 条。状态列写的是这条不变量的总体结论；如果某条总体守住、但故障矩阵里另有潜在风险或需要真实环境的场景，会在同一格里注明场景编号。
 
 ## 一、不重复
 
@@ -28,7 +28,7 @@
 | INV-STOP-02 | 暂停/取消被 API 接受后，不再发出新的模型调用（已发出的允许收回执） | `_block_execution`，`acquire/consume_dispatch_permit`，API 写 `resume_state`，dispatcher 顺序 | `goal_effect.py:1041-1050,1269-1293`；`budget.py:212-279`；`control.py:154-174`；`dispatcher.py:84-116` | 已证实违反（P1-03） |
 | INV-STOP-03 | 取消编码作业要停止容器进程树并撤销作业令牌 | `LinuxRunner.cancel` | `services/worker/aether_worker/runner.py:339-344` | 已证实违反（P2-07；组件未接产品路径） |
 | INV-ORDER-01 | 同一任务的命令按 API 接收顺序送达并生效 | `dispatcher._claim` / `deliver_pending` | `dispatcher.py:30-56,84-116` | 已证实违反（P1-03） |
-| INV-AUTH-01 | 跨项目访问一律拒绝（API 所有权检查 + RLS + 业务校验） | `control._owned`，schema RLS，`_source_snapshot` | `control.py:301-309`；`contracts/schema.sql:419-609`；`migrations/sql/0002_privileges.sql`；`goal_effect.py:789-801` | 守住（`test_c00_controls.py` 2 项，`test_rls.py`） |
+| INV-AUTH-01 | 跨项目访问一律拒绝（API 所有权检查 + RLS + 业务校验） | `control._owned`，schema RLS，`_source_snapshot` | `control.py:301-309`；`contracts/schema.sql:419-609`；`migrations/sql/0002_privileges.sql`；`goal_effect.py:789-801` | 守住（`test_c00_controls.py` 2 项，`test_rls.py`）；另有潜在风险：跟踪的 `source_ids` 不校验归属（S-069） |
 | INV-AUTH-02 | API 角色不能写验收证据、预算账本，也不能把任务推进到运行/终态 | `0003_grants.sql`，`task_status_guard` | `migrations/sql/0003_grants.sql:26-47`；`task_status_guard.sql:13-17` | 守住（`test_c00_controls.py`，`test_privileges.py`） |
 | INV-AUTH-03 | 模型令牌只服务于一个任务的已记账调用，任务结束或取消即失效 | `ModelGateway.issue_token` / `_scope` | `services/gateway/aether_gateway/model.py:60-77,148-164` | 已证实违反（P2-05） |
 | INV-AUTH-04 | 技能晋升只能使用为这次晋升签发、尚未消费的 owner 审批，以及针对该候选版本、已通过的评测 | `console_commands._skill_deploy` | `services/worker/aether_worker/console_commands.py:297-352` | 已证实违反（P2-04） |
@@ -49,12 +49,12 @@
 
 | ID | 不变量 | 负责组件 | 代码位置 | 状态 |
 |---|---|---|---|---|
-| INV-MONEY-01 | 已收到的响应（含空正文、超额）里的已知 token 与费用全部入账 | `record_model_response` | `budget.py:461-573` | 守住（`test_audit_round5.py::test_r502_*`） |
+| INV-MONEY-01 | 已收到的响应（含空正文、超额）里的已知 token 与费用全部入账 | `record_model_response` | `budget.py:461-573` | 守住（`test_audit_round5.py::test_r502_*`）；另有潜在风险：`secret_leak` 分支丢弃已知用量（S-031） |
 | INV-MONEY-02 | 确定没有离开进程的预留必须释放或复用；只有进入 `sending` 之后才允许记 unknown | `prepare_model_call` | `budget.py:372-419` | 已证实违反（P1-04） |
-| INV-MONEY-03 | 派发前的预留覆盖本次最坏费用与 token，且不超过上限 | `_live_dispatch_plan`，`prepare_model_call` | `goal_effect.py:871-887`；`budget.py:420-428` | 需要真实环境：本地 cl100k 与供应商 tokenizer 的差距（基线本地测试守住） |
+| INV-MONEY-03 | 派发前的预留覆盖本次最坏费用与 token，且不超过上限 | `_live_dispatch_plan`，`prepare_model_call` | `goal_effect.py:871-887`；`budget.py:420-428` | 需要真实环境：本地 cl100k 与供应商 tokenizer 的差距（S-027；基线本地测试守住）；另有潜在风险：墙钟期限包含暂停，与规格冲突（S-032） |
 | INV-MONEY-04 | 费用与用量来源如实：本地价目表估算不是供应商回执；缺失用量记 unknown，不记"超额" | `model._cost_micro_usd`，`record_model_response` | `model.py:24-37,116-141`；`budget.py:496-524` | 已证实违反（P2-01） |
 | INV-MONEY-05 | 经过网关的每次供应商调用都进入预算账本 | `ModelGateway.complete` | `model.py:78-146` | 已证实违反（P2-05） |
-| INV-MONEY-06 | 未决账单（unknown / observed）保持冻结，并在任务与费用接口可见 | 预算账本 + API 投影 | `control.py:395-449`；`console_routes.py:330-372` | 守住（R4/R5 回归） |
+| INV-MONEY-06 | 未决账单（unknown / observed）保持冻结，并在任务与费用接口可见 | 预算账本 + API 投影 | `control.py:395-449`；`console_routes.py:330-372` | 守住（R4/R5 回归）；另有潜在风险：overrun 之后没有对账入口，冻结金额无法释放（S-033） |
 
 ## 五、不坏数据、删除不复活
 
@@ -89,7 +89,7 @@
 | INV-UNTRUST-02 | 抓取只连公网地址 | `ingest.assert_public_target` / `_blocked` | `services/worker/aether_worker/ingest.py:58-115` | 已证实违反（P2-06；采集未接产品路径） |
 | INV-UNTRUST-03 | 工具权限来自本地注册表，不信 MCP annotations；schema 漂移进入隔离 | `registry.permissions_for_remote_tool`，`mcp_client.admit` | `services/gateway/aether_gateway/registry.py:22-53`；`mcp_client.py:43-52` | 守住（`tests/unit/test_mcp.py`；未接产品路径） |
 | INV-UNTRUST-04 | MCP stdio 只接受固定 argv，不能借解释器的 `-c` / `-e` 执行一段 shell 文本 | `mcp_client._validate_argv` | `mcp_client.py:25-30` | 已证实违反（P2-06） |
-| INV-UNTRUST-05 | 沙箱里的代码拿不到宿主文件、DB 凭证、供应商 key，也不能联网 | 评分器、技能脚本、runner 的 docker 参数 | `verification.py:157-187`；`skills.py:117-152`；`runner.py:197-269` | 守住（基线 Docker 用例：`test_verification.py`、`test_skill_sandbox.py`、`test_runner.py`） |
+| INV-UNTRUST-05 | 沙箱里的代码拿不到宿主文件、DB 凭证、供应商 key，也不能联网 | 评分器、技能脚本、runner 的 docker 参数 | `verification.py:157-187`；`skills.py:117-152`；`runner.py:197-269` | 守住（基线 Docker 用例：`test_verification.py`、`test_skill_sandbox.py`、`test_runner.py`）；另有潜在风险：镜像未固定摘要（S-064）；接上真实网关后的令牌外泄需要真实环境（S-078） |
 | INV-EGRESS-01 | 高敏资料未经批准不送云端模型 | `_source_snapshot` / `research_prompt`（无出口检查）；`memory._exportable`（未被调用） | `goal_effect.py:768-821,999`；`memory.py:166-175` | 已证实违反（P0-01） |
 
 ## 八、经验积累可回滚
