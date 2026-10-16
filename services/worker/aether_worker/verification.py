@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import shutil
 import subprocess
 import tempfile
 from pathlib import Path
@@ -16,6 +15,7 @@ from aether_storage.db import Database
 from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
 from aether_worker.grader_runner import GRADER_PROGRAM as _GRADER_PROGRAM
 from aether_worker.runner import JOB_IMAGE, _docker
+from aether_worker.snapshot import SnapshotRejected, copy_tree, ensure_real_directory, read_tree
 
 GRADER_IMAGE = "aether-grader:local"
 _SKIP_NAMES = {"conftest.py", "pytest.ini", "conftest.pyc"}
@@ -32,13 +32,18 @@ def _sha256_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _sha256_file(path: Path) -> str:
-    return _sha256_bytes(path.read_bytes())
+def _export_skip(parts: tuple[str, ...], is_dir: bool) -> bool:
+    if is_dir:
+        return parts[-1] in {".git", "__pycache__"}
+    return ".git" in parts or "__pycache__" in parts
 
 
 def export_candidate(source: Path) -> dict[str, Any]:
-    files = sorted(path for path in source.rglob("*") if path.is_file() and ".git" not in path.parts and "__pycache__" not in path.parts)
-    manifest = [{"path": str(path.relative_to(source)), "sha256": _sha256_file(path)} for path in files]
+    try:
+        files = read_tree(source, skip=_export_skip)
+    except SnapshotRejected as exc:
+        raise VerificationError(exc.code) from exc
+    manifest = [{"path": path, "sha256": _sha256_bytes(data)} for path, data in files]
     digest = hashlib.sha256("\n".join(f"{item['sha256']} {item['path']}" for item in manifest).encode()).hexdigest()
     return {"files": manifest, "candidate_sha256": digest}
 
@@ -47,10 +52,17 @@ def text_sha256(value: str) -> str:
     return _sha256_bytes(value.encode())
 
 
+def _prepare_skip(parts: tuple[str, ...], is_dir: bool) -> bool:
+    if is_dir:
+        return parts[-1] in {".git", "__pycache__", "conftest.py"}
+    return ".git" in parts or "__pycache__" in parts or parts[-1] == "conftest.py"
+
+
 def prepare_workspace(source: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    shutil.copytree(source, destination, ignore=shutil.ignore_patterns(".git", "__pycache__", "conftest.py"))
+    try:
+        copy_tree(source, destination, skip=_prepare_skip, file_mode=None)
+    except SnapshotRejected as exc:
+        raise VerificationError(exc.code) from exc
 
 
 def _is_candidate_test(path: Path) -> bool:
@@ -65,31 +77,27 @@ def _shadowed_import(candidate: Path) -> str | None:
     return None
 
 
+def _stage_candidate_skip(parts: tuple[str, ...], is_dir: bool) -> bool:
+    if parts[0] in _SHADOW_ROOTS:
+        return True
+    if is_dir:
+        return False
+    return _is_candidate_test(Path(parts[-1]))
+
+
+def _stage_suite_skip(parts: tuple[str, ...], is_dir: bool) -> bool:
+    if is_dir and parts[-1] != "conftest.py":
+        return False
+    return parts[-1] == "conftest.py"
+
+
 def _stage(candidate: Path, suite: Path, destination: Path) -> None:
-    if destination.exists():
-        shutil.rmtree(destination)
-    source_root = destination / "src"
-    suite_root = destination / "suite"
-    source_root.mkdir(parents=True)
-    suite_root.mkdir()
-    for path in candidate.rglob("*"):
-        if not path.is_file() or _is_candidate_test(path):
-            continue
-        relative = path.relative_to(candidate)
-        if relative.parts[0] in _SHADOW_ROOTS:
-            continue
-        target = source_root / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-    for path in suite.rglob("*"):
-        if not path.is_file() or path.name == "conftest.py":
-            continue
-        target = suite_root / path.relative_to(suite)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, target)
-    # The suite runs as nobody inside the sandbox and only needs to read.
-    for path in [destination, *destination.rglob("*")]:
-        path.chmod(0o755 if path.is_dir() else 0o644)
+    try:
+        ensure_real_directory(destination, replace=True)
+        copy_tree(candidate, destination / "src", skip=_stage_candidate_skip, file_mode=0o644)
+        copy_tree(suite, destination / "suite", skip=_stage_suite_skip, file_mode=0o644)
+    except SnapshotRejected as exc:
+        raise VerificationError(exc.code) from exc
 
 
 def _ensure_grader_image() -> bool:

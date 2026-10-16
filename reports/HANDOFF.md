@@ -1,5 +1,17 @@
 # 交接
 
+## SYS-08 验收报告与 SYS-03 快照边界（分支 `cursor/r6-report-sys08-sys03-e789`）
+
+基线已变基到 `76fd71c`（PR #22，ADR-F31 归 SYS-06/04）。本分支只关闭 SYS-08 与 SYS-03，决定编号是 ADR-F32。没有改 `contracts/`、`reference/`，没有改 F26 的 `100` 判定，没有改 `reports/f26_acceptance_result.json` 的字节。协议断言仍留在父进程，记忆降级与验收条款冻结没有回退，`runner.cancel` 的撤销确认没有动。本机没有 live key。
+
+SYS-08：`build_report` 读完整棵 JUnit。suite 计数必须和实际用例一致，至少有一条真正执行过的用例，必需用例都要出现在通过集里。`pass`、`fail`、`not_run`、`blocked` 分开。空套件和全跳过是 `not_run`，失败是 `fail`，计数对不上是 `blocked`。`live_ready` 还要当前 commit、环境、模式、配置哈希、JUnit 与验收结果哈希互相一致，并且引用的结果文件自己的 `live_ready` 为 true。旧 STATUS 不能把失败或缺失证据写成 live。`STATUS.json` 的 `readiness.live_ready` 现在是 `pending`，`f26.live_ready` 是 false：引用的结果仍是 `d694f89`，文件内 `live_ready` 为 false。文件 sha256 仍是 `52ffd4b2da3a463ddea421db53098b4aaa441d0e7d87d3fc9f900af1d325db38`。
+
+SYS-03：`export_candidate`、`prepare_workspace`、`_stage` 只通过 `O_NOFOLLOW` 和目录描述符读取授权根里的普通文件。指向外部、指向内部、目录链接、fifo、以及根目录本身是符号链接，都会拒绝。合法项目树仍能导出和复制。评分器的协议发布和套件收紧仍在 `_publish_protocol`。
+
+失败用例在变基后的第一笔提交，当时相对 `8b90363` 是 23 失败、1 个合法对照通过。决定见 ADR-F32。变基到 `76fd71c` 之后的全量结果待重跑。
+
+下一步：全量套件重跑，PR 保持 ready，不合并。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
+
 ## SYS-06 记忆来源与 SYS-04 验收条款（分支 `cursor/r6-memory-provenance-110a`）
 
 基线现为 `85d27d3`（PR #21 已合入，ADR-F30 归 SYS-02/07）。实现提交 `9b80aa5`。本决定改记 ADR-F31。只改 SYS-06 与 SYS-04。没有改 `verification.py`、技能评审、工作区导出、`acceptance_report`、搜索路由或 `skill.evaluate`。没有改 `contracts/`、`reference/`、`STATUS.json`。没有放宽断言，没有 skip 或 xfail。不改变 `live_ready`。
@@ -22,7 +34,7 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 uv run --locked --no-build python scripts/doctor.py --require-services                                   # exit 0
 ```
 
-没有加 Sonar 抑制。PR #22 已标为 ready，不合并。下一步：等变基后的 CI（含 SonarCloud，不加抑制）绿。
+没有加 Sonar 抑制。PR #22 已合入 main。
 
 ## SYS-02 协议评分与 SYS-07 指标校验（分支 `cursor/r6-grader-isolation-f31b`）
 
