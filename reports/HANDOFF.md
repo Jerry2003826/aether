@@ -1,5 +1,21 @@
 # 交接
 
+## R8-C 变基到 13bc096，威胁情报浏览器记为 ADR-F43
+
+PR #30 已把采集解析记为 ADR-F41。未合并的 PR #31 已使用 ADR-F42。本分支的威胁情报浏览器改记为 ADR-F43。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
+
+采集侧的 `assert_public_target` 改从 `net_guard` 再导出，多个公网地址时仍优先 IPv4。`playwright` 仍钉在 `1.64.0`。
+
+这次补上三条原先延后的审查：
+
+- 访问记录写入 `audit_events`，按项目 sequence 接哈希链。调用方清空内存列表后行还在。证明：`test_visit_audit_remains_after_the_caller_drops_the_list`。本机没有 PostgreSQL，这条没有在这里执行。
+- 子 frame 的 document 请求直接中止，不抓取。证明：`test_child_frame_documents_are_not_fetched`、`test_child_frame_document_is_not_fetched`。
+- Tor 打开后，浏览器容器启动前探测容器内 9050 的 SOCKS 握手；夹具模式探测 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
+
+本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 在 0.03 秒失败，失败信息是 Docker is required，不是 skip。变基前的 `b57c71f` 曾在 CI run 38955390710 里得到 `390 passed, 1 warning in 765.22s`。那次结果不能当作这次提交的证据。这次提交的 CI 还没有记录。`live_ready` 仍是 pending。
+
+本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。`pytest tests/unit` 324 passed。
+
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 
 `b40ce32` 的 CI 已绿：`pack-and-unit`、`integration`、SonarCloud（workflow `38937123243` 与 `38937117126`）。随后按 PR #30 的 Codex P1 收紧，没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。

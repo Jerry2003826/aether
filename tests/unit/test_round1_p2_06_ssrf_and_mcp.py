@@ -35,6 +35,11 @@ def test_fetch_still_allows_a_public_address() -> None:
     assert assert_public_target("https://example.test/", resolve=lambda _host: [ip]) == "1.1.1.1"
 
 
+def test_fetch_dials_ipv4_when_every_address_is_public() -> None:
+    addresses = [ipaddress.ip_address("2606:4700:4700::1111"), ipaddress.ip_address("1.1.1.1")]
+    assert assert_public_target("https://example.test/", resolve=lambda _host: addresses) == "1.1.1.1"
+
+
 @pytest.mark.parametrize(
     "argv",
     [
