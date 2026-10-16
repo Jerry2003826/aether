@@ -7,7 +7,7 @@ import os
 import resource
 import sys
 
-import defusedxml.ElementTree as ET
+import feedparser
 
 
 def main() -> None:
@@ -21,56 +21,63 @@ def main() -> None:
             pass
     payload = sys.stdin.buffer.read()
     try:
-        root = ET.fromstring(payload)
-    except Exception as exc:
-        sys.stdout.write(json.dumps({"ok": False, "error": type(exc).__name__}))
+        texts = parse_feed(payload, mode=os.environ.get("AETHER_FEED_MODE") or "rss")
+    except ValueError as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": exc.args[0] if exc.args else type(exc).__name__}))
         return
-    texts = _arxiv_texts(root) if os.environ.get("AETHER_FEED_MODE") == "arxiv" else _rss_texts(root)
     sys.stdout.write(json.dumps({"ok": True, "texts": texts, "pid": os.getpid()}))
 
 
-def _local(tag: str) -> str:
-    return tag.rsplit("}", 1)[-1]
-
-
-def _plain(node: ET.Element) -> str:
-    if node.text and node.text.strip():
-        return node.text.strip()
-    return ""
-
-
-def _rss_texts(root: ET.Element) -> list[str]:
-    texts: list[str] = []
-    for node in root.iter():
-        if node.tag.endswith("title") or node.tag.endswith("description"):
-            plain = _plain(node)
-            if plain:
-                texts.append(plain)
+def parse_feed(payload: bytes, *, mode: str) -> list[str]:
+    """Parse with feedparser. Custom entities are refused before the library expands them."""
+    lowered = payload.lower()
+    if b"<!doctype" in lowered or b"<!entity" in lowered:
+        raise ValueError("entity_rejected")
+    parsed = feedparser.parse(payload)
+    texts = _arxiv_texts(parsed) if mode == "arxiv" else _rss_texts(parsed)
+    if parsed.get("bozo") and not texts:
+        raise ValueError("parse_rejected")
     return texts
 
 
-def _arxiv_texts(root: ET.Element) -> list[str]:
+def _clean(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _rss_texts(parsed: feedparser.FeedParserDict) -> list[str]:
     texts: list[str] = []
-    for entry in root.iter():
-        if _local(entry.tag) != "entry":
-            continue
-        title = ""
-        summary = ""
-        authors: list[str] = []
-        for child in list(entry):
-            name = _local(child.tag)
-            if name == "title":
-                title = _plain(child)
-            elif name == "summary":
-                summary = _plain(child)
-            elif name == "author":
-                authors.extend(_plain(part) for part in list(child) if _local(part.tag) == "name" and _plain(part))
+    feed = parsed.get("feed") or {}
+    for key in ("title", "subtitle", "description"):
+        _append(texts, feed.get(key))
+    for entry in parsed.get("entries") or []:
+        _append(texts, entry.get("title"))
+        summary = _clean(entry.get("summary"))
+        description = _clean(entry.get("description"))
+        _append(texts, summary or description)
+        if description and description != summary:
+            _append(texts, description)
+    return texts
+
+
+def _arxiv_texts(parsed: feedparser.FeedParserDict) -> list[str]:
+    texts: list[str] = []
+    for entry in parsed.get("entries") or []:
+        title = _clean(entry.get("title"))
         if title:
             texts.append(title)
-        if summary:
-            texts.append(summary)
-        texts.extend(authors)
+        _append(texts, entry.get("summary"))
+        for author in entry.get("authors") or []:
+            if isinstance(author, dict):
+                _append(texts, author.get("name"))
     return texts
+
+
+def _append(texts: list[str], value: object) -> None:
+    plain = _clean(value)
+    if plain:
+        texts.append(plain)
 
 
 if __name__ == "__main__":

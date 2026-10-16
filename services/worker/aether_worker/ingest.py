@@ -16,7 +16,9 @@ from urllib.parse import urlsplit
 
 import httpcore
 import httpx
+import tenacity
 from httpx._config import create_ssl_context
+from langchain_text_splitters import CharacterTextSplitter
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -28,6 +30,9 @@ CHUNKER_VERSION = "codepoint-1"
 MAX_HTTP_BYTES = 10 * 1024 * 1024
 FIXTURE_ENV = "AETHER_INGEST_ALLOW_FIXTURES"
 _REDIRECTS = {301, 302, 303, 307, 308}
+_RETRY_STATUSES = {429, 503}
+_MAX_FETCH_ATTEMPTS = 3
+_MAX_RETRY_AFTER = 8.0
 
 
 class IngestError(Exception):
@@ -41,19 +46,35 @@ def canonical_text(raw: str) -> str:
 
 
 def chunk_text(raw: str, *, width: int = 32) -> list[dict[str, int | str]]:
+    """Code-point windows. langchain measures length with ``len``, which is code points."""
     text_value = canonical_text(raw)
     if text_value.strip() == "":
         raise IngestError("empty_body")
     if width < 1:
         raise IngestError("invalid_chunk_width")
-    points = list(text_value)
+    parts = _split_code_points(text_value, width)
     chunks: list[dict[str, int | str]] = []
-    start = 0
-    while start < len(points):
-        end = min(start + width, len(points))
-        chunks.append({"ordinal": len(chunks), "text": "".join(points[start:end]), "start_offset": start, "end_offset": end})
-        start = end
+    cursor = 0
+    for piece in parts:
+        start = text_value.find(piece, cursor)
+        if start < 0:
+            raise IngestError("invalid_chunk_width")
+        end = start + len(piece)
+        chunks.append({"ordinal": len(chunks), "text": piece, "start_offset": start, "end_offset": end})
+        cursor = end
+    if not chunks or cursor != len(text_value):
+        raise IngestError("invalid_chunk_width")
     return chunks
+
+
+def _split_code_points(text_value: str, width: int) -> list[str]:
+    splitter = CharacterTextSplitter(
+        separator="",
+        chunk_size=width,
+        chunk_overlap=0,
+        strip_whitespace=False,
+    )
+    return splitter.split_text(text_value)
 
 
 _NAT64 = ipaddress.ip_network("64:ff9b::/96")
@@ -188,6 +209,30 @@ def _connect_hosts(allow_hosts: set[str] | None, allowed_domains: set[str] | Non
     return {item.strip().rstrip(".").lower() for item in allowed_domains if item.strip()}
 
 
+class _RetryableFetch(Exception):
+    def __init__(self, retry_after: float | None) -> None:
+        super().__init__("retryable_fetch")
+        self.retry_after = retry_after
+
+
+def _retry_wait(retry_state: tenacity.RetryCallState) -> float:
+    outcome = retry_state.outcome
+    exc = None if outcome is None else outcome.exception()
+    if isinstance(exc, _RetryableFetch) and exc.retry_after is not None:
+        return min(max(exc.retry_after, 0.0), _MAX_RETRY_AFTER)
+    return tenacity.wait_exponential(multiplier=0.2, min=0.2, max=2.0)(retry_state)
+
+
+def _retry_after(headers: Any) -> float | None:
+    raw = headers.get("retry-after")
+    if raw is None:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None
+
+
 def fetch_url(
     url: str,
     *,
@@ -204,29 +249,58 @@ def fetch_url(
         raise IngestError("redirect_rejected")
     if allowed_domains is not None:
         _require_domain(url, allowed_domains)
+    try:
+        return _fetch_attempt(
+            url,
+            resolve=resolve,
+            allow_hosts=allow_hosts,
+            allowed_domains=allowed_domains,
+            opener=opener,
+            redirects_left=redirects_left,
+            max_bytes=max_bytes,
+            verify=verify,
+            extra_headers=extra_headers,
+        )
+    except _RetryableFetch as exc:
+        raise IngestError("fetch_failed") from exc
+
+
+@tenacity.retry(
+    retry=tenacity.retry_if_exception_type((_RetryableFetch, httpx.TransportError)),
+    stop=tenacity.stop_after_attempt(_MAX_FETCH_ATTEMPTS),
+    wait=_retry_wait,
+    reraise=True,
+)
+def _fetch_attempt(
+    url: str,
+    *,
+    resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]],
+    allow_hosts: set[str] | None,
+    allowed_domains: set[str] | None,
+    opener: Callable[..., httpx.Response] | None,
+    redirects_left: int,
+    max_bytes: int,
+    verify: ssl.SSLContext | str | bool,
+    extra_headers: dict[str, str] | None,
+) -> bytes:
     pinned = assert_public_target(url, resolve=resolve, allow_hosts=_connect_hosts(allow_hosts, allowed_domains))
     parsed = urlsplit(url)
     host = parsed.hostname or ""
     headers = dict(extra_headers or {})
     headers["Host"] = host
     if opener is not None:
-        response = opener(url, headers=headers)
-        if response.status_code in _REDIRECTS:
-            return _follow(
-                response,
-                url,
-                resolve=resolve,
-                allow_hosts=allow_hosts,
-                allowed_domains=allowed_domains,
-                opener=opener,
-                redirects_left=redirects_left,
-                max_bytes=max_bytes,
-                verify=verify,
-                extra_headers=extra_headers,
-            )
-        if len(response.content) > max_bytes:
-            raise IngestError("size_rejected")
-        return response.content
+        return _opener_body(
+            opener,
+            url,
+            headers=headers,
+            resolve=resolve,
+            allow_hosts=allow_hosts,
+            allowed_domains=allowed_domains,
+            redirects_left=redirects_left,
+            max_bytes=max_bytes,
+            verify=verify,
+            extra_headers=extra_headers,
+        )
     transport = _PinnedTransport(pinned, verify=verify)
     with httpx.Client(transport=transport, verify=verify, follow_redirects=False, trust_env=False, timeout=5.0) as client:
         with client.stream("GET", url, headers=headers) as response:
@@ -242,7 +316,43 @@ def fetch_url(
                     verify=verify,
                     extra_headers=extra_headers,
                 )
+            if response.status_code in _RETRY_STATUSES:
+                raise _RetryableFetch(_retry_after(response.headers))
             return _read_limited(response, max_bytes)
+
+
+def _opener_body(
+    opener: Callable[..., httpx.Response],
+    url: str,
+    *,
+    headers: dict[str, str],
+    resolve: Callable[[str], list[ipaddress.IPv4Address | ipaddress.IPv6Address]],
+    allow_hosts: set[str] | None,
+    allowed_domains: set[str] | None,
+    redirects_left: int,
+    max_bytes: int,
+    verify: ssl.SSLContext | str | bool,
+    extra_headers: dict[str, str] | None,
+) -> bytes:
+    response = opener(url, headers=headers)
+    if response.status_code in _REDIRECTS:
+        return _follow(
+            response,
+            url,
+            resolve=resolve,
+            allow_hosts=allow_hosts,
+            allowed_domains=allowed_domains,
+            opener=opener,
+            redirects_left=redirects_left,
+            max_bytes=max_bytes,
+            verify=verify,
+            extra_headers=extra_headers,
+        )
+    if response.status_code in _RETRY_STATUSES:
+        raise _RetryableFetch(_retry_after(response.headers))
+    if len(response.content) > max_bytes:
+        raise IngestError("size_rejected")
+    return response.content
 
 
 def _location(response: httpx.Response, url: str) -> str:

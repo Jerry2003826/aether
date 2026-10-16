@@ -1,8 +1,8 @@
-"""Frozen jieba 0.42.1 dictionary plus English and code tokens.
+"""jieba 0.42.1 ``cut``, with English words and code operators kept intact.
 
-The dictionary is jieba's own file. CI installs with ``uv sync --locked --no-build``,
-which cannot build jieba's source distribution, so a missing package copy is downloaded
-and checked against the sha256 in ``config/tokenizer/jieba-0.42.1.json``.
+The dictionary is the ``dict.txt`` shipped in the pinned wheel. CI installs with
+``uv sync --locked --no-build`` and cannot build jieba's source distribution, so the
+wheel lives at ``third_party/wheels``. Its sha256 is ``config/tokenizer/jieba-0.42.1.json``.
 """
 
 from __future__ import annotations
@@ -10,31 +10,22 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import json
+import logging
 import re
-import urllib.error
-import urllib.request
+import warnings
 from functools import lru_cache
 from pathlib import Path
 
-TOKENIZER_VERSION = "jieba-0.42.1-dict-forward-max+code-symbols"
+warnings.filterwarnings("ignore", category=SyntaxWarning, module=r"jieba(\.|$)")
+import jieba
+
+TOKENIZER_VERSION = "jieba-0.42.1-cut+code-symbols"
 _ROOT = Path(__file__).resolve().parents[3]
 _MANIFEST = json.loads((_ROOT / "config" / "tokenizer" / "jieba-0.42.1.json").read_text(encoding="utf-8"))
 _DICT_SHA256 = str(_MANIFEST["dict_sha256"])
-_CACHE = _ROOT / ".cache" / "tokenizer" / "jieba-0.42.1.dict.txt"
-_LATIN = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
-_OPERATORS = ("!=", "==", "<=", ">=", "&&", "||", "->", "::")
+_CODE = re.compile(r"!=|==|<=|>=|&&|\|\||->|::|[A-Za-z_][A-Za-z0-9_]*")
 
-
-def _download_dictionary() -> None:
-    last: Exception | None = None
-    for _ in range(3):
-        try:
-            urllib.request.urlretrieve(str(_MANIFEST["dict_url"]), _CACHE)
-            return
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            last = exc
-            _CACHE.unlink(missing_ok=True)
-    raise RuntimeError("jieba dictionary download failed") from last
+jieba.setLogLevel(logging.ERROR)
 
 
 def _sha256(path: Path) -> str:
@@ -45,71 +36,39 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _package_dict() -> Path | None:
+def _package_dict() -> Path:
     spec = importlib.util.find_spec("jieba")
     if spec is None or not spec.origin:
-        return None
+        raise RuntimeError("jieba dictionary missing")
     path = Path(spec.origin).resolve().parent / "dict.txt"
-    return path if path.is_file() else None
-
-
-def _dictionary_path() -> Path:
-    for candidate in (_package_dict(), _CACHE):
-        if candidate is not None and candidate.is_file() and _sha256(candidate) == _DICT_SHA256:
-            return candidate
-    _CACHE.parent.mkdir(parents=True, exist_ok=True)
-    _download_dictionary()
-    if _sha256(_CACHE) != _DICT_SHA256:
-        _CACHE.unlink(missing_ok=True)
+    if not path.is_file() or _sha256(path) != _DICT_SHA256:
         raise RuntimeError("jieba dictionary hash mismatch")
-    return _CACHE
+    return path
 
 
 @lru_cache(maxsize=1)
-def _dictionary() -> tuple[frozenset[str], int]:
-    words: set[str] = set()
-    longest = 1
-    for line in _dictionary_path().read_text(encoding="utf-8").splitlines():
-        word = line.split(" ", 1)[0].strip()
-        if not word:
-            continue
-        words.add(word)
-        longest = max(longest, len(word))
-    return frozenset(words), longest
+def _ready() -> None:
+    cache = _ROOT / ".cache" / "tokenizer"
+    cache.mkdir(parents=True, exist_ok=True)
+    jieba.dt.tmp_dir = str(cache)
+    jieba.set_dictionary(str(_package_dict()))
+    jieba.initialize()
 
 
 def tokenize(value: str) -> list[str]:
-    """Longest dictionary match. Negation words and code operators stay tokens."""
-    words, longest = _dictionary()
+    """jieba.cut on Chinese spans. Negation words and code operators stay tokens."""
+    _ready()
     tokens: list[str] = []
     index = 0
-    length = len(value)
-    while index < length:
-        if value[index].isspace():
-            index += 1
-            continue
-        operator = next((item for item in _OPERATORS if value.startswith(item, index)), None)
-        if operator is not None:
-            tokens.append(operator)
-            index += len(operator)
-            continue
-        if value[index].isascii() and (value[index].isalnum() or value[index] == "_"):
-            match = _LATIN.match(value, index)
-            if match is not None:
-                tokens.append(match.group())
-                index = match.end()
-                continue
-        limit = min(longest, length - index)
-        matched = ""
-        for size in range(limit, 0, -1):
-            piece = value[index : index + size]
-            if piece in words:
-                matched = piece
-                break
-        if matched:
-            tokens.append(matched)
-            index += len(matched)
-            continue
-        tokens.append(value[index])
-        index += 1
+    for match in _CODE.finditer(value):
+        tokens.extend(_chinese(value[index : match.start()]))
+        tokens.append(match.group())
+        index = match.end()
+    tokens.extend(_chinese(value[index:]))
     return tokens
+
+
+def _chinese(segment: str) -> list[str]:
+    if segment.strip() == "":
+        return []
+    return [piece for piece in jieba.lcut(segment) if piece.strip()]

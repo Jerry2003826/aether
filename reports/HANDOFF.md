@@ -1,5 +1,30 @@
 # 交接
 
+## R8-A 采集解析换成固定版本的开源库（分支 `cursor/r8-a-ingest-libraries-47e9`）
+
+基线是 `origin/main` 的 `a2b9313`。ADR-F40 仍是已合并的最后一条，本决定记为 ADR-F41。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed。SSRF、钉住 IP、产物账本、outbox、幂等和 fencing 仍是手写。
+
+替换：feedparser 6.0.14、trafilatura 2.3.1、docling-slim 2.140.0（`format-pdf` 与 `format-office`，不用完整 docling）、jieba 0.42.1、python-frontmatter 1.3.0、httpx（采集传输原本已是 httpx）、langchain-text-splitters 1.1.3 的 `CharacterTextSplitter`、tenacity 9.2.1。jieba 只有 sdist，wheel 在 `third_party/wheels/jieba-0.42.1-py3-none-any.whl`。`CHUNKER_VERSION` 仍是 `codepoint-1`，`PARSER_VERSION` 仍是 `text-1`。`TOKENIZER_VERSION` 改为 `jieba-0.42.1-cut+code-symbols`。
+
+本机没有 PostgreSQL、Temporal 和 Docker。`tests/integration` 全套没有跑。`test_fixture_download_is_real_and_parser_stays_static` 因没有数据库被 skip。直接对本地 `/slow` 调用 `fetch_url`：`ReadTimeout`，3 次尝试，15.65 秒。抓取失败集成测试的等待改为 45 秒，断言仍是 `FAILED` 与 `fetch_failed`。这次提交的 CI 还没有记入。
+
+```text
+uv lock
+uv sync --locked --no-build
+uv run --locked --no-build python scripts/rebuild_spec.py
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0，api_operations 50
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests in 0.797s, OK
+uv run --locked --no-build pytest -q tests/unit tests/integration/test_ingest.py
+# 294 passed，1 skipped，1 failed
+# skipped: test_fixture_download_is_real_and_parser_stays_static（没有 AETHER_ADMIN_DATABASE_URL）
+# failed: test_playwright_profile_renders_javascript（当时没有 Chromium）
+uv run --locked --no-build playwright install chromium
+uv run --locked --no-build pytest -q tests/integration/test_ingest.py::test_playwright_profile_renders_javascript tests/integration/test_ingest.py::test_rss_parser_is_isolated_and_rejects_entities tests/integration/test_ingest.py::test_offsets_cover_cjk_emoji_and_newlines tests/unit/test_r8a_libraries.py
+# 13 passed
+```
+
 ## R7 凭证分离、镜像摘要、产物恢复与崩溃演练（分支 `cursor/r7-cred-sandbox-recover-0956`）
 
 基线已变基到 `origin/main` 的 `b75fb36`（PR #25 已合入）。ADR-F34 是公开采集，ADR-F35 是复核出口，ADR-F36、ADR-F37、ADR-F38 是编码作业、取消回收和审查收紧，ADR-F39 是采集域名、抓取终态和跟踪批准。本路凭证、镜像、产物和崩溃演练改记 ADR-F40。没有改 `contracts/`、`reference/`，没有改 F26 结果文件字节，没有把 `readiness.live_ready` 改成 passed。`f26.live_ready` 仍是 false。`service.py` 同时保留 `dispatch_approved_tools`、`execute_queued_coding_jobs`、`execute_queued_ingestions` 和 `launch_privileged_roles`。`goal_effect.py` 同时保留所有者批准和凭证拆分。编码作业的 `JOB_IMAGE` 改为与沙箱相同的 digest，取代 ADR-F36 正文里的 `python:3.12-alpine`。显式传入 `python:3.12-alpine` 的编码测试参数没有改。

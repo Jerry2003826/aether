@@ -45,6 +45,11 @@ async def read_bounded_upload(upload, limit: int, chunk_size: int = 65536) -> by
 MAX_SNAPSHOT_FILES = 1000
 MAX_SNAPSHOT_BYTES = 25 * 1024 * 1024
 MAX_COMPRESSION_RATIO = 100
+_OOXML_MEDIA = {
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
 ALLOWED_MEDIA_TYPES = {
     "text/plain",
     "text/markdown",
@@ -53,6 +58,7 @@ ALLOWED_MEDIA_TYPES = {
     "application/pdf",
     "application/zip",
     "application/x-tar",
+    *_OOXML_MEDIA,
 }
 _TERMINAL_STATES = {"resolved", "rolled_back", "reconciled"}
 
@@ -570,6 +576,8 @@ class ArtifactStore:
             raise ArtifactError("media_mismatch", "内容不是 PDF")
         elif media_type == "application/zip" and not data.startswith(b"PK"):
             raise ArtifactError("media_mismatch", "内容不是 ZIP")
+        elif media_type in _OOXML_MEDIA and not data.startswith(b"PK"):
+            raise ArtifactError("media_mismatch", "内容不是 Office 文档")
         elif media_type == "application/x-tar":
             try:
                 tarfile.open(fileobj=BytesIO(data), mode="r:")
