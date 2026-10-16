@@ -15,6 +15,7 @@ from aether_worker.console_commands import apply_verifier_commands
 from aether_worker.goal_effect import WorkerEndpoints, _ensure_verification
 from aether_worker.role_http import BODY_REJECTED, ERROR_KEY, serve_role
 from aether_worker.skill_execute import execute_pending_skill_evaluations
+from aether_worker.threat_grant import GrantError, confirm_threat_approval
 
 _OWNER_ID = "owner_id"
 _PROJECT_ID = "project_id"
@@ -51,6 +52,8 @@ def main() -> None:
             return _commands(database, body)
         if path == "/v1/skill-evaluations":
             return _evaluations(database, body)
+        if path == "/v1/threat-browser/permit":
+            return _threat_permit(database, body)
         return 404, {ERROR_KEY: "not_found"}
 
     serve_role(token, health, post)
@@ -103,6 +106,23 @@ def _commands(database: Database, body: dict) -> tuple[int, dict]:
         return 400, {ERROR_KEY: BODY_REJECTED}
     applied = apply_verifier_commands(database, owner_id=owner_id, project_id=project_id)
     return 200, {"applied": applied}
+
+
+def _threat_permit(database: Database, body: dict) -> tuple[int, dict]:
+    fields = {name: _text(body, name) for name in ("project_id", "task_id", "approval_id", "intent_digest")}
+    if any(value is None for value in fields.values()):
+        return 400, {ERROR_KEY: BODY_REJECTED}
+    try:
+        owner_id = confirm_threat_approval(
+            database,
+            project_id=str(fields["project_id"]),
+            task_id=str(fields["task_id"]),
+            approval_id=str(fields["approval_id"]),
+            intent_digest=str(fields["intent_digest"]),
+        )
+    except GrantError as exc:
+        return 200, {"error": exc.code}
+    return 200, {"owner_id": owner_id, "digest": fields["intent_digest"]}
 
 
 def _evaluations(database: Database, body: dict) -> tuple[int, dict]:

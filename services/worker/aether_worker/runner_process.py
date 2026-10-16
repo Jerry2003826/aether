@@ -6,8 +6,10 @@ import os
 import subprocess
 
 from aether_worker.coding_sandbox import LOG_CAPTURE_LIMIT, _bounded_logs, container_arguments, container_name
+from aether_worker.net_guard import fixtures_enabled
 from aether_worker.role_http import serve_role
 from aether_worker.runner import JOB_IMAGE, _docker, probe_docker_daemon
+from aether_worker.threat_launch import ThreatLaunchError, docker_cleanup, docker_runner, execute_container
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
     accepted_grace,
@@ -32,9 +34,39 @@ def main() -> None:
             return 200, probe_docker_daemon()
         if path == "/v1/sandbox":
             return _sandbox(body)
+        if path == "/v1/threat-browser":
+            return _threat_browser(body)
         return 404, {"error": "not_found"}
 
     serve_role(token, health, post)
+
+
+def _threat_browser(body: dict) -> tuple[int, dict]:
+    payload = body.get("payload")
+    browser_image = body.get("browser_image")
+    tor_image = body.get("tor_image")
+    if not isinstance(payload, dict) or not isinstance(browser_image, str) or not isinstance(tor_image, str):
+        return 400, {"error": "rejected"}
+    allowed = {"url", "browser_enabled", "tor_enabled", "onion_enabled", "owner_confirmed", "allow_hosts", "proxy"}
+    if any(key not in allowed for key in payload):
+        return 400, {"error": "rejected"}
+    if browser_image != os.environ.get("AETHER_THREAT_BROWSER_IMAGE", "") or tor_image != os.environ.get("AETHER_TOR_IMAGE", ""):
+        return 200, {"error": "image_unpinned"}
+    fixture = body.get("fixture") is True
+    if fixture and not fixtures_enabled():
+        return 200, {"error": "fixture_hosts_rejected"}
+    try:
+        result = execute_container(
+            payload,
+            runner=docker_runner,
+            cleanup=docker_cleanup,
+            browser_image=browser_image,
+            tor_image=tor_image,
+            fixture=fixture,
+        )
+    except ThreatLaunchError as exc:
+        return 200, {"error": exc.code}
+    return 200, result
 
 
 def _sandbox(body: dict) -> tuple[int, dict]:

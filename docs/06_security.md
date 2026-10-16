@@ -75,6 +75,18 @@ V1单owner启动：仅loopback绑定，通过本机一次性enrollment建立登�
 
 至少包含prompt注入、跨项目检索、审批重放/参数漂移/过期、SSRF与DNSrebinding、路径逃逸、伪造工具分类、unknown effect、预算竞态、secret输出脱敏、恶意测试修改、公共skill自动加载、MCP schema漂移和sandbox网络连通探针。安全失败阻止发布和技能promotion；不能通过给提示词加一句“请安全”来代替修复。
 
+## 10. 威胁情报浏览器与 Tor
+
+浏览器抓取使用 Playwright `1.64.0` 和 Chromium 修订 `1248`（`156.0.8078.4`）。浏览器镜像按摘要固定为 `mcr.microsoft.com/playwright@sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f`。派生镜像带上 `aether_worker`、`aether_domain` 和 `config/threat_browser.yaml`。这份配置里的浏览器、Tor 和 `.onion` 默认关闭。开关以部署的配置文件为准，请求里的开关不能超过它。打开 Tor 必须同时把 `owner_confirmed` 设为 true。
+
+所有者审批来自账本里已有的 `approvals` 行。verifier 角色只核对，不写审批，也不持有 worker 能写的账本权限。worker 核对通过后写入 `operations`，并把 `consumed_by_operation_id` 填上，同一条审批不能第二次使用。调用方自己构造的许可对象会被拒绝。worker 进程不持有 verifier 的数据库地址，也不调用 Docker。Docker 只由 runner 进程执行。
+
+明文访问只把浏览器容器接到出口网络，不创建 Tor 容器。Tor 打开时，浏览器容器只接入 `--internal` 网络，这条网络里只有 Tor 容器；Tor 容器再单独接入出口网络。SOCKS 只绑定这次访问在内部网络上分配的地址，策略只接受该 /28，并拒绝其他来源。出口网卡不监听 9050。夹具页也只绑在这个内部地址上。浏览器容器不挂 Docker socket，不发布端口，关闭 JavaScript 和下载。经 Tor 时只通过 `socks5://aether-tor:9050` 出去。进程环境里的 `HTTP_PROXY` 不传给浏览器，调用方也不能把代理改成别的地址。Tor 镜像由 `infra/tor.Dockerfile` 从 `debian@sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f` 构建，安装 `deb.torproject.org` 上的 `0.4.9.14-1~d13.trixie+1`。构建时核对官方签名密钥指纹 `A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89`，进程用户是 `debian-tor`。原先的 `osminogin/tor-simple` 不再使用。构建文件放在 `/var/lib/aether-tor-build`，安装结束后删除。
+
+网页目标仍交给既有的 `assert_public_target`。每次文档请求连到这次校验返回的地址，有 IPv4 时用 IPv4。HTTP 的 Host 和 TLS 的 SNI 仍用原来的主机名，Chromium 不再自己解析或拨号。重定向每一跳重新授权。子资源和子 frame 的 document 请求直接中止，不发起抓取。附件和可执行内容在交给页面前拒绝，不写入下载目录。每次访问把脱敏记录写入 `audit_events`，按项目内的 sequence 接上一条哈希；调用方丢掉内存列表也不会丢掉这条记录。Tor 容器启动后，浏览器要等这个内部地址上的 9050 完成 SOCKS 握手。夹具模式因为 `DisableNetwork` 不接受 SOCKS，改为等同一地址的 8080 接受连接。`.onion` 不走明文 DNS，而且要另开 `.onion` 开关。经 Tor 或 `.onion` 得到的正文标成 `tor` 或 `onion`，不能作为 verifier 的可信证据。正文去掉双向控制符后放进不可信引用，页面文字不会变成工具调用。用途只有 `threat_intelligence`。交易、非法下载和联系卖家在代码里拒绝。进程内 Playwright 只在夹具开关 `AETHER_INGEST_ALLOW_FIXTURES=1` 打开时可用。
+
+攻击回归使用本地恶意页面和本地假服务，不连接真实暗网。需要 Docker 的集成测试会构建并启动浏览器容器和 Tor 容器；Tor 在该测试里设置 `DisableNetwork 1`，因此不接受 SOCKS 连接，测试确认主进程是 `tor`。夹具页只在 Tor 容器内通过 TLS 提供。监听套接字保持明文，每个已接受的连接再握手，明文探测不会拆掉监听。证书在夹具容器启动时生成，私钥只出现在 `debian-tor` 的 0700 目录，不写入镜像层。浏览器把 `AETHER_FIXTURE_CA` 的 base64 解码成 PEM 文本再交给 `load_verify_locations`；该参数的字节形式是 DER，不能直接传入 PEM 字节。runner 只运行本进程环境 `AETHER_THREAT_BROWSER_IMAGE` 与 `AETHER_TOR_IMAGE` 里的镜像，并且只有 runner 自己打开 `AETHER_INGEST_ALLOW_FIXTURES` 时才接受夹具。`AETHER_REQUIRE_SERVICES=1` 且没有 Docker 时，这个测试失败，不跳过。进程内攻击回归仍直接调用同一个 Playwright 读页函数。
+
 
 ## 增补：CodeGraph MCP/CLI 不能获得主机级权限
 

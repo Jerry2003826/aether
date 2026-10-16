@@ -1,0 +1,4 @@
+DataDirectory /var/lib/tor
+ClientOnly 1
+Log notice stdout
+AvoidDiskWrites 1

@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-16",
   "artifact_type": "core_done_live_pending",
-  "current_task": "R8-A ingest libraries ADR-F41",
+  "current_task": "R8-C threat browser ADR-F43",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,22 +14,13 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing, splitting, and fetch retry are ADR-F41. The Codex P1 corrections (invalid markdown YAML, non-finite Retry-After, tokenizer mismatch, shared redirect retry budget, UTF-16 entity rejection) are in d215ebc. That commit's pack-and-unit, integration, and SonarCloud checks passed. A fresh @codex review was refused because the connector requires a connected Codex account, so the previous review of 716af7c is still the latest and its findings are still marked unresolved. Local Postgres, Temporal, and Docker were absent, so the full integration suite ran only in CI.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. Commit 6a44eb5 writes measured vectors and skips live encode only for unmeasured text on the worker path. Push run 38971544094 and PR run 38971552108 both passed integration with 392 passed, 4 warnings. Sonar new_security_rating is 1. Approval Agent did not approve. Do not merge.",
   "last_executed_commands": [
-    "uv lock",
-    "uv sync --locked --no-build",
     "uv run --locked --no-build python scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
-    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
-    "uv run --locked --no-build pytest -q tests/unit tests/integration/test_ingest.py",
-    "uv run --locked --no-build playwright install chromium",
-    "uv run --locked --no-build pytest -q tests/integration/test_ingest.py::test_playwright_profile_renders_javascript tests/integration/test_ingest.py::test_rss_parser_is_isolated_and_rejects_entities tests/integration/test_ingest.py::test_offsets_cover_cjk_emoji_and_newlines tests/unit/test_r8a_libraries.py",
-    "uv run --locked --no-build python scripts/rebuild_spec.py",
-    "uv run --locked --no-build python scripts/verify_freeze.py",
-    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
-    "uv run --locked --no-build pytest -q tests/unit"
+    "uv run --locked --no-build pytest -q tests/unit/test_retrieval.py"
   ],
-  "last_test_result": "Local on 2026-10-16 from a2b9313 on cursor/r8-a-ingest-libraries-47e9 after the Codex P1 corrections. verify_freeze passed with api_operations 50. unittest 76 OK. pytest tests/unit: 297 passed. Earlier on the same branch, pytest tests/unit plus tests/integration/test_ingest.py was 294 passed, 1 skipped, 1 failed. The skip is test_fixture_download_is_real_and_parser_stays_static because AETHER_ADMIN_DATABASE_URL is unset. The failure was test_playwright_profile_renders_javascript before Chromium was installed; after playwright install chromium that test passed. The full integration suite was not run locally. d215ebc CI passed pack-and-unit, integration, and SonarCloud (runs 38939914317 and 38939904243). Sonar quality gate passed with 4 new issues. Codex did not review d215ebc. live_ready stays pending.",
+  "last_test_result": "6a44eb5 push run 38971544094 integration: 392 passed, 4 warnings in 708.88s. PR run 38971552108 integration: 392 passed, 4 warnings in 762.14s. Both pack-and-unit jobs passed. Sonar quality gate OK, new_security_rating actualValue 1. Local before that commit: verify_freeze passed, tests/unit/test_retrieval.py 17 passed. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

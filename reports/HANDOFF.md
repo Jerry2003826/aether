@@ -1,5 +1,36 @@
 # 交接
 
+## R8-C 变基到 13bc096，威胁情报浏览器记为 ADR-F43
+
+PR #30 已把采集解析记为 ADR-F41。未合并的 PR #31 已使用 ADR-F42。本分支的威胁情报浏览器改记为 ADR-F43。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
+
+采集侧的 `assert_public_target` 改从 `net_guard` 再导出，多个公网地址时仍优先 IPv4。`playwright` 仍钉在 `1.64.0`。
+
+这次补上三条原先延后的审查：
+
+- 访问记录写入 `audit_events`，按项目 sequence 接哈希链。调用方清空内存列表后行还在。证明：`test_visit_audit_remains_after_the_caller_drops_the_list`。本机没有 PostgreSQL，这条没有在这里执行。
+- 子 frame 的 document 请求直接中止，不抓取。证明：`test_child_frame_documents_are_not_fetched`、`test_child_frame_document_is_not_fetched`。
+- Tor 打开后，浏览器容器启动前在内部链路地址上探测 9050 的 SOCKS 握手；夹具模式探测同一地址的 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
+
+Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所有接口，策略接受任意来源，容器同时又接入出口网。现在 SOCKS 只绑定这次访问的内部 /28 地址，策略拒绝其他来源；夹具页也只听这个地址。证明：`test_socks_binds_only_on_the_internal_address`。容器测试还会核对生成的 torrc、`/proc/net/tcp` 里没有通配地址上的 8080/9050，并且出口网上的诱饵连不上 Tor 容器的出口地址。
+
+本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 失败，失败信息是 Docker is required，不是 skip。
+
+`0c19274` 的 push integration（https://github.com/Jerry2003826/aether/actions/runs/38964656426）在 `test_text_pdf_is_indexed_as_extracted_text` 上失败：90 秒时作业仍是 `RUNNING`，`source_version_id` 已经写上，`error_code` 为空，worker 进程还在，日志只有 `aether-worker-ready`。本机对 `tests/fixtures/r8a/bake.pdf` 的抽取结果是 `苹果派烘烤说明`，不在测量表里。版本写入发生在 `_publish_index` 之前，所以卡点不是 docling，也不是未领任务，没有吞掉的异常。卡在未测量正文调用 `encode_texts.py`：它会 `HfApi().model_info` 再加载 BGE-M3，子进程超时 900 秒，测试只等 90 秒。
+
+`6cdfa0e` 把整批向量都跳过，并且让编码进程强制离线。push run https://github.com/Jerry2003826/aether/actions/runs/38968650893 和 PR run https://github.com/Jerry2003826/aether/actions/runs/38968658047 的 integration 都失败：`test_measured_revision_and_grouped_channels`、`test_github_and_arxiv_are_fetched_indexed_and_searchable`、`test_source_filter_keeps_chunks_outside_the_global_window`。日志是 `aether-embedding-skipped reason=weights_absent`，已测量的苹果派和铁路短语也被丢掉。
+
+`6a44eb5` 只在采集作业里对未测量正文跳过实时编码（`allow_download=False`，且本机没有该修订快照或不能离线导入）。测量表里的向量照常写入。显式 `build_generation` 仍默认允许编码进程访问 Hub。90 秒轮询没有加长。失败时测试仍打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。
+
+`6a44eb5` 的 push 与 pull_request 都通过。两次 integration 都是 `392 passed, 4 warnings`，没有 skipped，也没有 xfail：
+
+- push https://github.com/Jerry2003826/aether/actions/runs/38971544094 ：`392 passed, 4 warnings in 708.88s (0:11:48)`
+- pull_request https://github.com/Jerry2003826/aether/actions/runs/38971552108 ：`392 passed, 4 warnings in 762.14s (0:12:42)`
+
+SonarCloud 质量门通过，`new_security_rating` 的 actualValue 是 1。Security Reviewer（https://cursor.com/agents/bc-f764c355-fe6e-434b-9dcd-7f0b3c0f2b83）对这个 head 没有新的 MEDIUM 及以上问题。Approval Agent 仍是未批准。`live_ready` 仍是 pending。没有合并。
+
+本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
+
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 
 `b40ce32` 的 CI 已绿：`pack-and-unit`、`integration`、SonarCloud（workflow `38937123243` 与 `38937117126`）。随后按 PR #30 的 Codex P1 收紧，没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import io
+import json
 import sys
 import threading
 import time
@@ -172,14 +173,64 @@ class _Running:
                 return None
             return item
 
-        return _poll(
-            self.http,
-            f"/v1/projects/{self.project_id}/ingestions?limit=100",
-            finished,
-            self.worker,
-            self.worker_logs,
-            timeout,
-        )
+        try:
+            return _poll(
+                self.http,
+                f"/v1/projects/{self.project_id}/ingestions?limit=100",
+                finished,
+                self.worker,
+                self.worker_logs,
+                timeout,
+            )
+        except AssertionError as exc:
+            raise AssertionError(f"{exc}\n{self._ingestion_state(source_id)}") from exc
+
+    def _ingestion_state(self, source_id: str) -> str:
+        """Database rows and child processes for a stuck ingestion. The assertion stays the same."""
+        lines = [f"worker_pid={self.worker.pid} returncode={self.worker.poll()}", _descendant_cmds(self.worker.pid)]
+        try:
+            database = Database(self.role_urls["aether_worker"])
+            with database.transaction(owner_id=self.owner_id, project_id=self.project_id) as conn:
+                jobs = conn.execute(
+                    text(
+                        "SELECT id::text, status, error_code, source_version_id::text, command_id::text, "
+                        "created_at::text, finished_at::text FROM ingestion_jobs "
+                        "WHERE project_id = :project_id AND source_id = :source_id"
+                    ),
+                    {"project_id": self.project_id, "source_id": source_id},
+                ).mappings().all()
+                lines.append("ingestion_jobs=" + json.dumps([dict(row) for row in jobs], ensure_ascii=False))
+                command_ids = [str(row["command_id"]) for row in jobs]
+                if command_ids:
+                    commands = conn.execute(
+                        text(
+                            "SELECT id::text, kind, status, attempts, delivered_at::text FROM command_outbox "
+                            "WHERE project_id = :project_id AND id::text = ANY(:ids)"
+                        ),
+                        {"project_id": self.project_id, "ids": command_ids},
+                    ).mappings().all()
+                    lines.append("command_outbox=" + json.dumps([dict(row) for row in commands], ensure_ascii=False))
+                version_ids = [str(row["source_version_id"]) for row in jobs if row["source_version_id"]]
+                if version_ids:
+                    chunks = conn.execute(
+                        text(
+                            "SELECT ordinal, embedding_revision, left(text_content, 80) AS text_content FROM chunks "
+                            "WHERE project_id = :project_id AND source_version_id::text = ANY(:ids) ORDER BY ordinal"
+                        ),
+                        {"project_id": self.project_id, "ids": version_ids},
+                    ).mappings().all()
+                    lines.append("chunks=" + json.dumps([dict(row) for row in chunks], ensure_ascii=False))
+                generations = conn.execute(
+                    text(
+                        "SELECT generation_key, state, created_at::text FROM index_generations "
+                        "WHERE project_id = :project_id ORDER BY created_at"
+                    ),
+                    {"project_id": self.project_id},
+                ).mappings().all()
+                lines.append("index_generations=" + json.dumps([dict(row) for row in generations], ensure_ascii=False))
+        except Exception as exc:
+            lines.append(f"ingestion_state_failed={type(exc).__name__}: {exc}")
+        return "\n".join(lines)
 
     def search(self, key: str, query: str) -> httpx.Response:
         return self.http.post(
@@ -187,6 +238,30 @@ class _Running:
             headers=_headers(self.csrf, key),
             json={"project_id": self.project_id, "query": query, "mode": "hybrid"},
         )
+
+
+def _descendant_cmds(pid: int) -> str:
+    found: list[str] = []
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            stat = (entry / "stat").read_text(encoding="utf-8")
+            command = (entry / "cmdline").read_bytes().replace(b"\x00", b" ").decode(errors="replace")
+        except OSError:
+            continue
+        end = stat.rfind(")")
+        if end < 0:
+            continue
+        fields = stat[end + 2 :].split()
+        if len(fields) < 2 or fields[1] != str(pid):
+            continue
+        child = int(entry.name)
+        found.append(command.strip())
+        nested = _descendant_cmds(child)
+        if nested:
+            found.append(nested)
+    return "\n".join(found)
 
 
 @contextmanager

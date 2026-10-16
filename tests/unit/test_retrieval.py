@@ -5,6 +5,7 @@ from contextlib import nullcontext
 import bm25s
 import pytest
 
+from aether_worker.pending_jobs import _publish_index
 from aether_worker.retrieval import (
     DIMENSION,
     EMBEDDING_REVISION,
@@ -12,11 +13,14 @@ from aether_worker.retrieval import (
     _bounded_lexical,
     _index_bm25,
     _lexical_ids,
+    _measured,
+    _sha,
     encode_texts,
     group_metrics,
     require_tokenizer_version,
     rrf,
     search,
+    vectors_for_index,
 )
 from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
@@ -83,6 +87,65 @@ def test_wrong_embedding_revision_is_rejected(tmp_path, monkeypatch) -> None:
     with pytest.raises(RetrievalError) as rejected:
         encode_texts(["苹果派"])
     assert rejected.value.code == "revision_mismatch"
+
+
+def test_baked_pdf_phrase_is_not_measured() -> None:
+    assert _sha("苹果派烘烤说明") not in _measured()["vectors"]
+
+
+def test_unmeasured_text_does_not_start_a_download(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aether_worker.retrieval.embedding_runtime_ready", lambda: False)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("live encode started")
+
+    monkeypatch.setattr("aether_worker.retrieval.subprocess.run", boom)
+    assert vectors_for_index(["苹果派烘烤说明"], allow_download=False) == [None]
+
+
+def test_measured_text_is_kept_when_download_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    apple = "苹果派的烘烤温度是一百八十度"
+    phrase = "苹果派烘烤说明"
+    monkeypatch.setattr("aether_worker.retrieval.embedding_runtime_ready", lambda: False)
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("live encode started")
+
+    monkeypatch.setattr("aether_worker.retrieval.subprocess.run", boom)
+    apple_vector, skipped = vectors_for_index([apple, phrase], allow_download=False)
+    assert skipped is None
+    assert apple_vector is not None
+    assert len(apple_vector) == DIMENSION
+    assert _sha(apple) in _measured()["vectors"]
+
+
+def test_ingestion_publish_refuses_embedding_download(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    seen: dict[str, object] = {}
+
+    def fake_build(*_args: object, **kwargs: object) -> str:
+        seen.update(kwargs)
+        return "gen-1"
+
+    monkeypatch.setattr("aether_worker.pending_jobs.build_generation", fake_build)
+    monkeypatch.setattr("aether_worker.pending_jobs._activate", lambda *_args, **_kwargs: None)
+    _publish_index(object(), object(), owner_id="owner", project_id="project", index_root=tmp_path, job_id="abc")
+    assert seen["allow_download"] is False
+    assert seen["force"] is True
+
+
+def test_explicit_index_build_still_encodes_unmeasured_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("aether_worker.retrieval.embedding_runtime_ready", lambda: False)
+    seen: list[list[str]] = []
+
+    def fake(texts: list[str]) -> list[list[float]]:
+        seen.append(list(texts))
+        return [[0.1] * DIMENSION for _item in texts]
+
+    monkeypatch.setattr("aether_worker.retrieval._encode_live", fake)
+    vectors = vectors_for_index(["苹果派烘烤说明"], allow_download=True)
+    assert seen == [["苹果派烘烤说明"]]
+    assert vectors[0] is not None
+    assert len(vectors[0]) == DIMENSION
 
 
 def test_cache_miss_does_not_invent_a_vector(monkeypatch) -> None:

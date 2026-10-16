@@ -45,6 +45,34 @@
         "python": "3.12.15",
         "hashed_pytest_build": "passed"
       }
+    },
+    {
+      "repository": "mcr.microsoft.com/playwright",
+      "tag": "v1.64.0-noble",
+      "digest": "sha256:06a9939e57531807f8d5fd76ce44b53165ffb7d7501d87ab10e285c20b1e971f",
+      "digest_source": "mcr.microsoft.com manifest list docker-content-digest",
+      "linux_amd64_manifest": "sha256:bc72a8df40831ded821e3cbc79c318c21b44d6e51dff9fd89ace7a8249c5b462",
+      "linux_arm64_manifest": "sha256:4109b399f6d3de22a133ab935df0d7614ed0de9195d529f0ebc6255655cdb495",
+      "playwright": "1.64.0",
+      "chromium_revision": "1248",
+      "chromium_version": "156.0.8078.4",
+      "pulled": false,
+      "note": "Digest read from the registry on 2026-10-16. This workspace has no Docker daemon, so the image was not started."
+    },
+    {
+      "repository": "library/debian",
+      "tag": "trixie-slim",
+      "digest": "sha256:a29215f6a35e51e22adffa17f89e9d2ef06214e64a2bad10d765c46aea49f11f",
+      "digest_source": "registry-1.docker.io manifest index docker-content-digest",
+      "linux_amd64_manifest": "sha256:918311b7b6c4c6f68b232ba516584925f6c78ad82b6fd534b98979df6438e483",
+      "tor_distribution": "trixie",
+      "tor_version": "0.4.9.14-1~d13.trixie+1",
+      "tor_key_fingerprint": "A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89",
+      "tor_archive": "https://deb.torproject.org/torproject.org",
+      "observed_amd64_deb_sha256": "ce850c12da1feef6036417ebf0bd83ae39558bf5357bf3dd14a7d91218f58d24",
+      "user": "debian-tor",
+      "pulled": false,
+      "note": "Debian index digest and the signed tor package were read on 2026-10-16. The image is built from infra/tor.Dockerfile. This workspace has no Docker daemon, so the image was not built here."
     }
   ]
 }

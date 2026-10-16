@@ -1,25 +1,14 @@
-# R8-A 采集、文档与切分
+# R8-C 威胁情报浏览器，变基到 13bc096
 
-任务：在 `a2b9313` 上把采集链路的手写解析换成固定版本的开源库。ADR-F41。不改 `contracts/`、`reference/` 和 `readiness.live_ready`。
+任务：把 Playwright / Tor 路径接到已合并的 R8-A（`13bc096`，ADR-F41）上。ADR-F42 已被未合并的 PR #31 占用，本决定记为 ADR-F43。不改 `contracts/`、`reference/` 和 `readiness.live_ready`。
 
 已改：
 
-- RSS/Atom：`feedparser`，隔离子进程保留；调用前拒绝 `<!DOCTYPE` 与 `<!ENTITY`
-- 网页正文：`trafilatura`；script src 用 lxml
-- PDF/DOCX/PPTX/XLSX：`docling-slim` 的无模型 PDF 管线
-- 分词：jieba `lcut`，wheel 在 `third_party/wheels`
-- frontmatter：`python-frontmatter`
-- 切分：`CharacterTextSplitter`，版本号仍是 `codepoint-1`
-- 重试：`tenacity`，只包采集 HTTP
-- 产物：只增加三种 OOXML 媒体类型
+- 采集与浏览器共用 `net_guard.assert_public_target`，有 IPv4 时用 IPv4
+- 子 frame 的 document 请求中止
+- 访问审计写入 `audit_events`
+- Tor 代理在内部链路地址上就绪后才启动浏览器；夹具模式等同一地址的 8080
+- SOCKS 只绑定该内部地址，出口网卡不提供代理
+- `playwright==1.64.0`
 
-结果：冻结检查通过，参考套件 76 OK，单元测试 297 passed。全套集成测试没有在本机跑，因为没有 PostgreSQL、Temporal 和 Docker。`d215ebc` 的 `pack-and-unit`、`integration` 和 SonarCloud 已通过。Codex 没有复审这个提交。`live_ready` 保持 pending。
-
-审查收紧（仍是 ADR-F41）：
-
-- 非法 YAML frontmatter → `IngestError("parse_rejected")`
-- Retry-After 拒绝 NaN 和非有限值
-- ACTIVE 索引的分词版本不符 → `tokenizer_mismatch`，不在 search 里重建
-- 重定向链共用 3 次 tenacity 预算
-- RSS 先按 UTF-8/UTF-16/UTF-32 解码再拒绝实体声明
-- 网页跳过 XML 声明和已闭合注释；技能 metadata 只读到第二个 `---`
+结果：冻结检查通过。威胁浏览器单元测试 27 passed。本机没有 Docker。`0c19274` 的 pull_request integration 是 `392 passed, 4 warnings in 656.17s`。同一次提交的 push integration 有 1 个失败：PDF 作业在正文版本写入后仍是 RUNNING，因为未测量文本启动了 Hub 嵌入下载。`6cdfa0e` 整批跳过向量，两次 integration 都失败。`6a44eb5` 只跳过未测量正文，测量向量照常写入，90 秒没有加长。该提交的 push 与 pull_request integration 都是 `392 passed, 4 warnings`。Sonar `new_security_rating` 是 1。`live_ready` 保持 pending。

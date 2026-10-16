@@ -41,7 +41,7 @@ def _poll(http: httpx.Client, url: str, ready: Callable[[dict[str, Any]], Any], 
     last = ""
     while time.time() < deadline:
         if proc.poll() is not None:
-            raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-40:])}")
+            raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs)}")
         response = http.get(url)
         last = response.text
         if response.status_code == 200:
@@ -49,7 +49,7 @@ def _poll(http: httpx.Client, url: str, ready: Callable[[dict[str, Any]], Any], 
             if found is not None:
                 return found
         time.sleep(0.3)
-    raise AssertionError(last + "".join(logs[-40:]))
+    raise AssertionError(last + "\n" + "".join(logs))
 
 
 def _command_status(database: Database, owner_id: str, project_id: str, command_id: str) -> str | None:
