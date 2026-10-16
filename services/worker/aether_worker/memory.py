@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any
@@ -16,8 +17,13 @@ from aether_worker.retention import invalidate_derived
 STATUSES = {"proposed", "source_claim", "user_confirmed", "observed_test", "inference", "superseded"}
 KINDS = {"episodic", "semantic", "procedural"}
 CATEGORIES = {"fact", "preference", "procedure", "episode", "project_decision"}
-ACTIONS = {"confirm", "correct", "supersede"}
+ACTIONS = {"confirm", "correct", "supersede", "declassify"}
 CLAIM_CLASSIFICATION = "memory_claim"
+TEST_RUN_CRITERION = "test_run"
+TRUSTED_TEST_ISSUER = "aether_verifier"
+DECLASSIFY_CAPABILITY = "memory_declassify"
+_SENSITIVITY_RANK = {"standard": 0, "high": 1}
+_FAILED_RUN_STATUS = {"failed", "fail", "error"}
 
 
 class MemoryError(Exception):
@@ -50,25 +56,70 @@ def classify_memory(
 
 
 def _is_project_test_run(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, artifact_id: object) -> bool:
+    """A user-supplied kind label is not a test run.
+
+    The artifact must already be committed, and a verifier ledger row must bind
+    its PASS conclusion to the hash of the bytes we read now.
+    """
     if not artifact_id:
         return False
+    identity = str(artifact_id)
     row = conn.execute(
-        text("SELECT media_type FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
-        {"project_id": project_id, "id": str(artifact_id)},
+        text("SELECT media_type, sha256 FROM artifacts WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+        {"project_id": project_id, "id": identity},
     ).mappings().first()
     if row is None or row["media_type"] != "application/json":
         return False
     try:
-        data, media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(artifact_id))
+        data, media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=identity)
     except ArtifactError:
         return False
     if media != "application/json":
         return False
+    digest = hashlib.sha256(data).hexdigest()
+    if digest != str(row["sha256"]):
+        return False
+    if _result_records_failure(data):
+        return False
+    verdicts = _trusted_test_verdicts(conn, project_id=project_id, artifact_id=identity, digest=digest)
+    return bool(verdicts) and all(item == "PASS" for item in verdicts)
+
+
+def _result_records_failure(data: bytes) -> bool:
     try:
         body = json.loads(data.decode())
     except (UnicodeError, json.JSONDecodeError):
         return False
-    return isinstance(body, dict) and body.get("kind") == "test_run"
+    if not isinstance(body, dict):
+        return False
+    status = body.get("status")
+    if isinstance(status, str) and status.casefold() in _FAILED_RUN_STATUS:
+        return True
+    exit_code = body.get("exit_code")
+    if type(exit_code) is int and exit_code != 0:
+        return True
+    return body.get("passed") is False
+
+
+def _trusted_test_verdicts(conn: Any, *, project_id: str, artifact_id: str, digest: str) -> list[str]:
+    rows = conn.execute(
+        text(
+            "SELECT verdict, artifact_sha256, observed_sha256, verifier_identity FROM verification_results "
+            "WHERE project_id = :project_id AND artifact_id = :artifact_id AND criterion_id = :criterion_id"
+        ),
+        {"project_id": project_id, "artifact_id": artifact_id, "criterion_id": TEST_RUN_CRITERION},
+    ).mappings().all()
+    verdicts: list[str] = []
+    for row in rows:
+        if str(row["verifier_identity"]) != TRUSTED_TEST_ISSUER:
+            continue
+        if str(row["artifact_sha256"]) != digest:
+            continue
+        observed = row["observed_sha256"]
+        if observed is not None and str(observed) != digest:
+            continue
+        verdicts.append(str(row["verdict"]))
+    return verdicts
 
 
 def _blocked_claim(claim: str) -> bool:
@@ -209,6 +260,44 @@ def remember(
     return memory_id
 
 
+def authorize_declassification(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    memory_id: str,
+    from_sensitivity: str,
+    to_sensitivity: str,
+) -> str:
+    """Record a one-time grant. Confirmation and correction never call this."""
+    if not _lowers_sensitivity(from_sensitivity, to_sensitivity):
+        raise MemoryError("declassification_rejected")
+    grant_id = str(uuid.uuid4())
+    token_hash = hashlib.sha256(f"{grant_id}:{memory_id}:{to_sensitivity}".encode()).hexdigest()
+    scope = json.dumps({"memory_id": memory_id, "from_sensitivity": from_sensitivity, "to_sensitivity": to_sensitivity})
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        current = conn.execute(
+            text("SELECT provenance FROM memories WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"),
+            {"project_id": project_id, "id": memory_id},
+        ).scalar()
+        if current is None or _sensitivity(_provenance_map(current).get("sensitivity")) != from_sensitivity:
+            raise MemoryError("declassification_rejected")
+        conn.execute(
+            text(
+                "INSERT INTO capability_grants (id, project_id, grantee_service, token_hash, capability_type, scope, expires_at, policy_version) "
+                "VALUES (:id, :project_id, 'aether_worker', :token_hash, :capability, CAST(:scope AS jsonb), now() + interval '1 day', 'memory-declassify-1')"
+            ),
+            {
+                "id": grant_id,
+                "project_id": project_id,
+                "token_hash": token_hash,
+                "capability": DECLASSIFY_CAPABILITY,
+                "scope": scope,
+            },
+        )
+    return grant_id
+
+
 def apply_memory_commands(database: Database, store: ArtifactStore, *, owner_id: str, project_id: str) -> list[str]:
     """Apply accepted memory commands. A repeated command does not insert a second row."""
     applied: list[str] = []
@@ -331,13 +420,92 @@ def _create(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, 
     )
 
 
+def _provenance_map(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str) and value:
+        try:
+            loaded = json.loads(value)
+        except json.JSONDecodeError:
+            return {}
+        return loaded if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _source_ids(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item) for item in value]
+
+
+def _sensitivity(value: object) -> str:
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return "standard"
+
+
+def _lowers_sensitivity(current: str, requested: str) -> bool:
+    if requested == current:
+        return False
+    current_rank = _SENSITIVITY_RANK.get(current)
+    requested_rank = _SENSITIVITY_RANK.get(requested)
+    if current_rank is None or requested_rank is None:
+        return True
+    return requested_rank < current_rank
+
+
+def _revision_provenance(current: object, *, command_id: str, action: str, sensitivity: str) -> dict[str, Any]:
+    previous = _provenance_map(current)
+    return {
+        "command_id": command_id,
+        "action": action,
+        "sensitivity": sensitivity,
+        "source_artifact_ids": _source_ids(previous.get("source_artifact_ids")),
+    }
+
+
+def _consume_declassification(
+    conn: Any,
+    *,
+    project_id: str,
+    memory_id: str,
+    current: str,
+    requested: str,
+    authorization_id: object,
+) -> None:
+    if not isinstance(authorization_id, str) or not authorization_id:
+        raise MemoryError("declassification_unauthorized")
+    row = conn.execute(
+        text(
+            "SELECT scope FROM capability_grants "
+            "WHERE project_id = :project_id AND id = :id AND capability_type = :capability "
+            "AND revoked_at IS NULL AND expires_at > now() FOR UPDATE"
+        ),
+        {"project_id": project_id, "id": authorization_id, "capability": DECLASSIFY_CAPABILITY},
+    ).mappings().first()
+    if row is None:
+        raise MemoryError("declassification_unauthorized")
+    scope = row["scope"] if isinstance(row["scope"], dict) else _provenance_map(row["scope"])
+    if scope.get("memory_id") != memory_id or scope.get("from_sensitivity") != current or scope.get("to_sensitivity") != requested:
+        raise MemoryError("declassification_unauthorized")
+    updated = conn.execute(
+        text(
+            "UPDATE capability_grants SET revoked_at = now() "
+            "WHERE project_id = :project_id AND id = :id AND revoked_at IS NULL"
+        ),
+        {"project_id": project_id, "id": authorization_id},
+    ).rowcount
+    if updated != 1:
+        raise MemoryError("declassification_unauthorized")
+
+
 def _patch(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, payload: dict[str, Any]) -> None:
     action = str(payload["action"])
     if action not in ACTIONS:
         raise MemoryError("action_rejected")
     current = conn.execute(
         text(
-            "SELECT id::text AS id, memory_key, revision, kind, claim, category, epistemic_status FROM memories "
+            "SELECT id::text AS id, memory_key, revision, kind, claim, category, epistemic_status, provenance FROM memories "
             "WHERE project_id = :project_id AND id = :id AND deleted_at IS NULL"
         ),
         {"project_id": project_id, "id": payload["memory_id"]},
@@ -347,9 +515,26 @@ def _patch(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, p
     claim = str(payload["claim"]) if payload.get("claim") else str(current["claim"])
     if _blocked_claim(claim):
         raise MemoryError("secret_claim_rejected")
-    status = "user_confirmed" if action == "confirm" else "proposed"
-    if action == "confirm" and claim != current["claim"]:
+    if action in {"confirm", "declassify"} and claim != current["claim"]:
         raise MemoryError("confirmation_rejected")
+    inherited = _sensitivity(_provenance_map(current["provenance"]).get("sensitivity"))
+    if action == "declassify":
+        requested = payload.get("sensitivity")
+        if not isinstance(requested, str) or not _lowers_sensitivity(inherited, requested.strip()):
+            raise MemoryError("declassification_rejected")
+        sensitivity = requested.strip()
+        _consume_declassification(
+            conn,
+            project_id=project_id,
+            memory_id=str(current["id"]),
+            current=inherited,
+            requested=sensitivity,
+            authorization_id=payload.get("authorization_id"),
+        )
+        status = str(current["epistemic_status"])
+    else:
+        sensitivity = inherited
+        status = "user_confirmed" if action == "confirm" else "proposed"
     stored = store.put(
         owner_id=owner_id,
         project_id=project_id,
@@ -378,7 +563,9 @@ def _patch(conn: Any, store: ArtifactStore, *, owner_id: str, project_id: str, p
             "claim": claim,
             "category": current["category"],
             "artifact_id": stored["artifact_id"],
-            "provenance": json.dumps({"command_id": payload["command_id"], "action": action, "sensitivity": "standard"}),
+            "provenance": json.dumps(
+                _revision_provenance(current["provenance"], command_id=str(payload["command_id"]), action=action, sensitivity=sensitivity)
+            ),
             "status": status,
             "supersedes": current["id"],
         },

@@ -72,20 +72,27 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
         match = request.headers.get("if-match")
         if match is None or not match.isdigit():
             raise ApiError(409, "version_conflict", "缺少记忆版本")
-        action, claim = _patch_body(body)
+        parsed = _patch_body(body)
         command_id = str(uuid.uuid4())
         result_id = str(uuid.uuid4())
         command = {
             "command_id": command_id,
             "memory_id": memory_id,
             "result_id": result_id,
-            "action": action,
-            "claim": claim,
+            "action": parsed["action"],
+            "claim": parsed["claim"],
             "expected_revision": int(match),
             "owner_id": owner,
         }
+        if parsed["action"] == "declassify":
+            command["sensitivity"] = parsed["sensitivity"]
+            command["authorization_id"] = parsed["authorization_id"]
         route = f"PATCH /v1/projects/{project_id}/memories/{memory_id}"
-        digest = sha256_text(json.dumps({"action": action, "claim": claim, "revision": int(match)}, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
+        digest_body = {"action": parsed["action"], "claim": parsed["claim"], "revision": int(match)}
+        if parsed["action"] == "declassify":
+            digest_body["sensitivity"] = parsed["sensitivity"]
+            digest_body["authorization_id"] = parsed["authorization_id"]
+        digest = sha256_text(json.dumps(digest_body, sort_keys=True, ensure_ascii=False, separators=(",", ":")))
         with _db(app).transaction(owner_id=owner, project_id=project_id) as conn:
             existing = _claim_idempotency(conn, owner=owner, project_id=project_id, route=route, key=key, payload_hash=digest)
             if existing is not None:
@@ -148,15 +155,34 @@ def _create_body(body: dict[str, Any]) -> dict[str, Any]:
     return {"claim": claim.strip(), "kind": kind, "category": category, "source_artifact_ids": [str(item) for item in sources]}
 
 
-def _patch_body(body: dict[str, Any]) -> tuple[str, str | None]:
-    if not isinstance(body, dict) or set(body) - {"claim", "action"} or body.get("action") not in ACTIONS:
+def _patch_body(body: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(body, dict) or body.get("action") not in ACTIONS:
+        raise ApiError(422, "invalid_memory", "记忆修正不合法")
+    action = str(body["action"])
+    if action == "declassify":
+        return _declassify_body(body)
+    if set(body) - {"claim", "action"}:
         raise ApiError(422, "invalid_memory", "记忆修正不合法")
     claim = body.get("claim")
     if claim is not None and (not isinstance(claim, str) or not claim.strip()):
         raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    if body["action"] in {"correct", "supersede"} and not isinstance(claim, str):
+    if action in {"correct", "supersede"} and not isinstance(claim, str):
         raise ApiError(422, "invalid_memory", "修正必须带新的说法")
-    return str(body["action"]), None if claim is None else claim.strip()
+    return {"action": action, "claim": None if claim is None else claim.strip(), "sensitivity": None, "authorization_id": None}
+
+
+def _declassify_body(body: dict[str, Any]) -> dict[str, Any]:
+    if set(body) - {"action", "sensitivity", "authorization_id"}:
+        raise ApiError(422, "invalid_memory", "记忆修正不合法")
+    sensitivity = body.get("sensitivity")
+    authorization_id = body.get("authorization_id")
+    if sensitivity not in {"standard", "high"}:
+        raise ApiError(422, "invalid_memory", "记忆修正不合法")
+    try:
+        uuid.UUID(str(authorization_id))
+    except (TypeError, ValueError) as exc:
+        raise ApiError(422, "invalid_memory", "记忆修正不合法") from exc
+    return {"action": "declassify", "claim": None, "sensitivity": str(sensitivity), "authorization_id": str(authorization_id)}
 
 
 def _enqueue(conn: Any, *, project_id: str, command_key: str, kind: str, payload: dict[str, Any]) -> None:
