@@ -67,7 +67,11 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 
 变基前的本机数字不再沿用。变基后的命令和结果在重跑后写入本节。
 
-下一步：PR 保持 ready，不合并。等 CI（含 SonarCloud）绿，并处理新 PR 上的 P0/P1。
+变基前的头 `517cd74` 上，`pack-and-unit`、`integration` 与 SonarCloud 质量门曾通过。Cursor Security Reviewer 没有安全发现。Approval Agent 判定高风险、需要人工评审，没有代码级 P0/P1。PR #23 的八条线程已回复并附上该提交。那一轮 CI 不覆盖这次变基。
+
+Codex 在变基前另留了三条 P2，未改代码：过滤检索时 BM25 先对全量清单取 k；`local_document` 未按媒体类型解析 PDF；暂停或删除后的跟踪每次轮询仍向 Temporal 查询已删除的 schedule。按本次范围只修 P0/P1。
+
+下一步：PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。变基后重跑本机测试，再等新的 `pack-and-unit`、`integration` 与 SonarCloud。三条 P2 留给后续。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
 
 ## P2-09 复核出口、所有者批准、活动时间与工作流投递（分支 `cursor/r7-workflow-review-budget-f3e3`）
 
