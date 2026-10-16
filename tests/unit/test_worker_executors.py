@@ -73,4 +73,5 @@ def test_apply_task_control_uses_the_control_pool_when_activity_threads_are_full
         set_control_executor(None)
         activity.shutdown(wait=False, cancel_futures=True)
         control.shutdown(wait=False, cancel_futures=True)
-    assert seen and seen[0].startswith("aether-control")
+    assert seen
+    assert seen[0].startswith("aether-control")

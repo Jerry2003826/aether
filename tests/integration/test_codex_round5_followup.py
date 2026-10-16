@@ -7,26 +7,17 @@ import uuid
 from types import SimpleNamespace
 
 import litellm
-import pytest
 from sqlalchemy import text
-from temporalio.client import Client
-from temporalio.worker import Worker
-
 from aether_storage.budget import BudgetLedger
-from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import (
     INPUT_MICRO_USD_PER_TOKEN,
     OUTPUT_MICRO_USD_PER_TOKEN,
-    apply_task_control,
     apply_task_control_effect,
-    configure,
-    execute_task,
     materialize_goal_effect,
-    prepare_task,
 )
 from aether_worker.outbox import insert_followup_command
 from aether_worker.research import estimate_provider_request_tokens, research_prompt
-from tests.integration.test_audit_round4 import FACT, GOAL, setup_case
+from tests.integration.test_audit_round4 import FACT, GOAL, setup_case, signal_after_the_provider_starts
 from tests.integration.test_worker_process import _temporal_address
 
 SOURCE = "甲接口每分钟最多接受60次请求。\n乙接口每分钟最多接受90次请求。"
@@ -75,44 +66,22 @@ def test_pause_behind_a_non_control_command_still_stops_the_call(client, role_ur
             command_key=command_key,
             kind="pause",
         )
-    configure(endpoints)
-    queue = f"followup-control-{uuid.uuid4()}"
-
-    async def run() -> None:
-        temporal = await Client.connect(address)
-        async with Worker(
-            temporal,
-            task_queue=queue,
-            workflows=[DurableTaskWorkflow],
-            activities=[prepare_task, execute_task, apply_task_control],
-        ):
-            handle = await temporal.start_workflow(
-                DurableTaskWorkflow.run,
-                {"task_id": payload["task_id"], "intake_pause_seconds": 0},
-                id=str(workflow_id),
-                task_queue=queue,
-            )
-            await handle.signal(
-                DurableTaskWorkflow.command,
-                {"command_id": payload["command_id"], "project_id": project, "kind": "start"},
-            )
-            for _ in range(80):
-                if state["calls"] >= 1:
-                    break
-                await asyncio.sleep(0.05)
-            assert state["calls"] >= 1
-            await handle.signal(
-                DurableTaskWorkflow.command,
+    asyncio.run(
+        signal_after_the_provider_starts(
+            address=address,
+            endpoints=endpoints,
+            project=project,
+            workflow_id=workflow_id,
+            payload=payload,
+            state=state,
+            queue=f"followup-control-{uuid.uuid4()}",
+            signals=[
                 {"command_id": "approve-before-pause", "project_id": project, "kind": "approve_goal"},
-            )
-            await handle.signal(
-                DurableTaskWorkflow.command,
                 {"command_id": command_key, "project_id": project, "kind": "pause"},
-            )
-            await handle.signal(DurableTaskWorkflow.close)
-            await asyncio.wait_for(handle.result(), timeout=20)
-
-    asyncio.run(run())
+            ],
+            timeout=20,
+        )
+    )
     with database.transaction(owner_id=owner, project_id=project) as conn:
         status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": payload["task_id"]}).scalar_one()
     assert state["calls"] == 1
