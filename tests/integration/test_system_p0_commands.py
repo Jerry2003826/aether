@@ -139,9 +139,21 @@ def test_documented_worker_survives_a_duplicate_source_and_keeps_running_tasks(c
     status = None
     try:
         deadline = time.time() + 40
+        approved = False
         while time.time() < deadline:
             with worker.transaction(owner_id=owner, project_id=other) as conn:
                 status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id}).scalar_one()
+            if status == "WAITING_APPROVAL" and not approved:
+                shown = client.get(f"/v1/projects/{other}/tasks/{task_id}")
+                digest = shown.json().get("contract_sha256") if shown.status_code == 200 else None
+                if isinstance(digest, str) and len(digest) == 64:
+                    sent = client.post(
+                        f"/v1/projects/{other}/tasks/{task_id}/commands",
+                        headers={**headers, "Idempotency-Key": key()},
+                        json={"command_id": str(uuid.uuid4()), "kind": "approve_goal", "expected_contract_sha256": digest},
+                    )
+                    assert sent.status_code == 202, sent.text
+                    approved = True
             if status == "SUCCEEDED" or proc.poll() is not None:
                 break
             time.sleep(0.5)

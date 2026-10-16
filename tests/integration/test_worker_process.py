@@ -232,6 +232,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             )
             assert created.status_code == 202, created.text
             task_id = created.json()["resource_id"]
+            _approve_waiting(http, csrf, project_id, task_id, worker, worker_logs)
             _wait_status(http, project_id, task_id, "RUNNING", worker, worker_logs)
             _stop(worker)
             worker = None
@@ -317,6 +318,7 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
             created = http.post(f"/v1/projects/{project_id}/tasks", headers=_headers(csrf, "ctrl-task"), json={"goal": goal})
             assert created.status_code == 202, created.text
             task_id = created.json()["resource_id"]
+            _approve_waiting(http, csrf, project_id, task_id, worker, worker_logs)
             _wait_status(http, project_id, task_id, "RUNNING", worker, worker_logs)
             paused = http.post(
                 f"/v1/projects/{project_id}/tasks/{task_id}/commands",
@@ -348,6 +350,7 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
             )
             assert cancelled_task.status_code == 202, cancelled_task.text
             cancel_id = cancelled_task.json()["resource_id"]
+            _approve_waiting(http, csrf, project_id, cancel_id, worker, worker_logs)
             _wait_status(http, project_id, cancel_id, "RUNNING", worker, worker_logs)
             cancelled = http.post(
                 f"/v1/projects/{project_id}/tasks/{cancel_id}/commands",
@@ -373,6 +376,18 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
         _stop(worker)
         _stop(api)
         secret_path.unlink(missing_ok=True)
+
+
+def _approve_waiting(http: httpx.Client, csrf: str, project_id: str, task_id: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> None:
+    body = _wait_status(http, project_id, task_id, "WAITING_APPROVAL", worker, logs)
+    digest = body.get("contract_sha256")
+    assert isinstance(digest, str) and len(digest) == 64, body
+    approved = http.post(
+        f"/v1/projects/{project_id}/tasks/{task_id}/commands",
+        headers=_headers(csrf, f"approve-{uuid.uuid4().hex}"),
+        json={"command_id": str(uuid.uuid4()), "kind": "approve_goal", "expected_contract_sha256": digest},
+    )
+    assert approved.status_code == 202, approved.text
 
 
 def _wait_status(http: httpx.Client, project_id: str, task_id: str, status: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> dict:

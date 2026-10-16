@@ -12,6 +12,7 @@ from sqlalchemy import text
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.goal_effect import WorkerEndpoints, materialize_goal_effect
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 KEY = "synthetic-audit-key"
@@ -101,6 +102,7 @@ def answered_task(client, role_urls: dict[str, str], *, delete_answer: bool) -> 
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": FACT_GOAL})
     assert created.status_code == 202, created.text
     payload = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(worker_db(role_urls), owner_id=owner, project_id=project_id, task_id=payload["task_id"])
     assert materialize_goal_effect(scripted, payload)["status"] == "SUCCEEDED"
     answer = rows(
         worker_db(role_urls),
@@ -111,5 +113,9 @@ def answered_task(client, role_urls: dict[str, str], *, delete_answer: bool) -> 
     )[0]["id"]
     if delete_answer:
         deleted = client.delete(f"/v1/projects/{project_id}/artifacts/{answer}", headers={**headers, "Idempotency-Key": key()})
-        assert deleted.status_code == 204, deleted.text
+        assert deleted.status_code == 409, deleted.text
+        assert deleted.json()["code"] == "evidence_retained"
+        still = client.get(f"/v1/projects/{project_id}/tasks/{payload['task_id']}")
+        assert still.status_code == 200, still.text
+        assert still.json()["status"] == "SUCCEEDED"
     return owner, project_id, headers, answer, scripted

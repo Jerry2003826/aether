@@ -28,8 +28,11 @@ with workflow.unsafe.imports_passed_through():
     from aether_worker.goal_effect import apply_task_control, execute_task, prepare_task
 
 _CONTROL = {"pause", "resume", "cancel"}
+_TERMINAL = {"SUCCEEDED", "FAILED", "CANCELLED"}
 _VERSIONED = "task-command-versions"
+_BOUNDED = "task-run-bounded"
 _LEGACY_POINT = "task-command-legacy-"
+_DEFAULT_HISTORY_LIMIT = 5000
 
 
 @workflow.defn
@@ -42,6 +45,8 @@ class DurableTaskWorkflow:
         self._applied: list[str] = []
         self._closed = False
         self._current = False
+        self._bounded = False
+        self._history_limit = _DEFAULT_HISTORY_LIMIT
         self._legacy_points = 0
 
     @workflow.signal
@@ -97,16 +102,49 @@ class DurableTaskWorkflow:
                 _activity_input(task_id, item),
                 **self._activity_kwargs(),
             )
+            self._note_terminal(controlled.get("status"))
             if kind in {"pause", "cancel"} and controlled.get("status") in {"PAUSED", "CANCELLED"}:
                 blocked = True
             elif kind == "resume" and controlled.get("resumed") is True:
                 blocked = False
         return blocked
 
+    def _note_terminal(self, status: object) -> None:
+        if self._bounded and str(status or "") in _TERMINAL:
+            self._closed = True
+
+    def _should_continue(self) -> bool:
+        if self._closed:
+            return False
+        info = workflow.info()
+        if info.is_continue_as_new_suggested():
+            return True
+        return info.get_current_history_length() >= self._history_limit
+
+    def _cursor(self, task_id: str) -> dict[str, object]:
+        return {
+            "task_id": task_id,
+            "intake_pause_seconds": 0,
+            "intake_done": True,
+            "history_event_limit": self._history_limit,
+            "seen": list(self._seen),
+            "applied": list(self._applied),
+            "pending": list(self._pending),
+        }
+
     @workflow.run
     async def run(self, task: str | dict) -> list[str]:
-        task_id, pause = _start(task)
+        task_id, pause, limit = _start(task)
+        self._history_limit = limit
         self._current = workflow.patched(_VERSIONED)
+        self._bounded = workflow.patched(_BOUNDED)
+        if self._bounded and isinstance(task, dict):
+            if task.get("intake_done"):
+                pause = timedelta(0)
+            if "seen" in task:
+                self._seen = {str(item) for item in task.get("seen") or []}
+                self._applied = [str(item) for item in task.get("applied") or []]
+                self._pending = [dict(item) for item in task.get("pending") or []]
         while self._pending or not self._closed:
             await workflow.wait_condition(lambda: bool(self._pending) or self._closed)
             while self._pending:
@@ -120,10 +158,15 @@ class DurableTaskWorkflow:
                     legacy = not self._handles_controls()
                     if not legacy:
                         controlled = await workflow.execute_activity(apply_task_control, activity_input, **self._activity_kwargs())
+                        self._note_terminal(controlled.get("status"))
                         if kind == "resume" and controlled.get("resumed") is True:
-                            await self._execute_task(activity_input)
+                            executed = await self._execute_task(activity_input)
+                            self._note_terminal(executed.get("status"))
+                        if self._bounded and self._should_continue():
+                            workflow.continue_as_new(self._cursor(task_id))
                         continue
                 prepared = await workflow.execute_activity(prepare_task, activity_input, **self._activity_kwargs())
+                self._note_terminal(prepared.get("status"))
                 if prepared.get("status") != "prepared":
                     if legacy is None:
                         legacy = not self._handles_controls()
@@ -131,6 +174,8 @@ class DurableTaskWorkflow:
                         if pause > timedelta(0):
                             await workflow.sleep(pause)
                         await self._execute_task(activity_input)
+                    if self._bounded and self._should_continue():
+                        workflow.continue_as_new(self._cursor(task_id))
                     continue
                 if pause > timedelta(0):
                     if workflow.patched("intake-pause-interruptible"):
@@ -148,12 +193,15 @@ class DurableTaskWorkflow:
                     if not legacy:
                         blocked = await self._drain_controls(task_id)
                 if not blocked:
-                    await self._execute_task(activity_input)
+                    executed = await self._execute_task(activity_input)
+                    self._note_terminal(executed.get("status"))
+                if self._bounded and self._should_continue():
+                    workflow.continue_as_new(self._cursor(task_id))
             if self._closed:
                 break
         return list(self._applied)
 
-    async def _execute_task(self, activity_input: dict[str, str]) -> None:
+    async def _execute_task(self, activity_input: dict[str, str]) -> dict:
         """Let a queued pause or cancel reach the database while execute is running."""
         if workflow.patched("execute-interruptible"):
             self._current = True
@@ -168,9 +216,10 @@ class DurableTaskWorkflow:
                 if not self._has_control():
                     break
                 await self._drain_controls(activity_input["task_id"])
-            await handle
-            return
-        await workflow.execute_activity(execute_task, activity_input, **self._activity_kwargs())
+            result = await handle
+            return result if isinstance(result, dict) else {}
+        result = await workflow.execute_activity(execute_task, activity_input, **self._activity_kwargs())
+        return result if isinstance(result, dict) else {}
 
 
 def extract_pending_controls(pending: list[dict]) -> list[dict]:
@@ -194,10 +243,17 @@ def _activity_input(task_id: str, item: dict) -> dict[str, str]:
     }
 
 
-def _start(task: str | dict) -> tuple[str, timedelta]:
+def _start(task: str | dict) -> tuple[str, timedelta, int]:
     if isinstance(task, str):
-        return task, timedelta(0)
+        return task, timedelta(0), _DEFAULT_HISTORY_LIMIT
     seconds = float(task.get("intake_pause_seconds") or 0)
     if seconds < 0:
         seconds = 0
-    return str(task["task_id"]), timedelta(seconds=seconds)
+    raw_limit = task.get("history_event_limit") or _DEFAULT_HISTORY_LIMIT
+    try:
+        limit = int(raw_limit)
+    except (TypeError, ValueError):
+        limit = _DEFAULT_HISTORY_LIMIT
+    if limit < 1:
+        limit = _DEFAULT_HISTORY_LIMIT
+    return str(task["task_id"]), timedelta(seconds=seconds), limit

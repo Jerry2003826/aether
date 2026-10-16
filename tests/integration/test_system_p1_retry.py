@@ -10,10 +10,12 @@ import uuid
 import pytest
 from sqlalchemy import text
 from temporalio.client import Client
+from temporalio.service import RPCError
 from temporalio.worker import Worker
 
 from aether_storage.artifacts import ArtifactError
 from aether_storage.db import Database
+from tests.integration.goal_approval import record_owner_approval
 from aether_worker.durable_workflow import DurableTaskWorkflow
 from aether_worker.goal_effect import apply_task_control, configure, execute_task, prepare_task
 from tests.integration.system_audit import FACT, FACT_GOAL, answered_task, endpoints, key, project, store_for
@@ -46,13 +48,21 @@ async def _run_until(address: str, queue: str, task_id: str, project_id: str, co
             with worker.transaction(owner_id=owner, project_id=project_id) as conn:
                 status = str(conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id}).scalar_one())
             if status not in {"QUEUED", "RUNNING", "VERIFYING"}:
-                await handle.terminate("audit cleanup")
+                await _stop_workflow(handle)
                 return attempt, status
             await asyncio.sleep(1)
         with worker.transaction(owner_id=owner, project_id=project_id) as conn:
             status = str(conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id}).scalar_one())
-        await handle.terminate("audit cleanup")
+        await _stop_workflow(handle)
         return attempt, status
+
+
+async def _stop_workflow(handle) -> None:
+    """A terminal task now ends its workflow. Cleanup must accept that completion."""
+    try:
+        await handle.terminate("audit cleanup")
+    except RPCError:
+        return
 
 
 def test_poisoned_execute_activity_is_not_retried_forever(client, role_urls) -> None:
@@ -68,6 +78,7 @@ def test_poisoned_execute_activity_is_not_retried_forever(client, role_urls) -> 
     task_id = created.json()["resource_id"]
     configure(scripted)
     worker = Database(role_urls["aether_worker"])
+    record_owner_approval(worker, owner_id=owner, project_id=project_id, task_id=task_id)
     attempt, status = asyncio.run(
         _run_until(address, f"audit-poison-activity-{uuid.uuid4()}", task_id, project_id, created.json()["command_id"], worker, owner)
     )
@@ -89,6 +100,7 @@ def test_artifact_error_is_not_retried_forever(client, role_urls, monkeypatch) -
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json={"goal": FACT_GOAL})
     assert created.status_code == 202, created.text
     task_id = created.json()["resource_id"]
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner, project_id=project_id, task_id=task_id)
 
     def _rejected(*_args, **_kwargs):
         raise ArtifactError("tombstone_retained", "已删除的产物仍占用内容地址")

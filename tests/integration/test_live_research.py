@@ -14,8 +14,9 @@ from sqlalchemy import text
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
-from aether_worker.goal_effect import WorkerEndpoints, materialize_goal_effect
+from aether_worker.goal_effect import WorkerEndpoints, execute_task_effect, materialize_goal_effect, prepare_task_effect
 from aether_worker.outbox import enqueue_task
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.test_artifacts import _project
 
 FACT = "事实：水在标准大气压下于一百摄氏度沸腾"
@@ -110,16 +111,22 @@ def _run(client, role_urls, *, budget=None, allowed=None, key: str = KEY, timeou
             budget=budget,
             allowed_source_ids=allowed if allowed is not None else [str(visible["artifact_id"])],
         )
+        record_owner_approval(worker, owner_id=owner, project_id=project, task_id=created["task_id"], workflow_id=created["workflow_id"])
+        payload = {"project_id": project, "task_id": created["task_id"], "command_id": created["command_key"]}
+        endpoints = _endpoints(role_urls, root, base, key=key, timeout=timeout)
         if backdate:
+            prepared = prepare_task_effect(endpoints, payload)
             with worker.transaction(owner_id=owner, project_id=project) as conn:
                 conn.execute(
-                    text("UPDATE tasks SET created_at = :created WHERE project_id = :project AND id = :id"),
+                    text(
+                        "UPDATE task_events SET created_at = :created "
+                        "WHERE project_id = :project AND task_id = :id AND event_type = 'task.active' AND payload->>'phase' = 'start'"
+                    ),
                     {"created": datetime.now(UTC) - timedelta(hours=2), "project": project, "id": created["task_id"]},
                 )
-        result = materialize_goal_effect(
-            _endpoints(role_urls, root, base, key=key, timeout=timeout),
-            {"project_id": project, "task_id": created["task_id"], "command_id": created["command_key"]},
-        )
+            result = execute_task_effect(endpoints, payload) if prepared.get("status") == "prepared" else prepared
+        else:
+            result = materialize_goal_effect(endpoints, payload)
         with worker.transaction(owner_id=owner, project_id=project) as conn:
             status = conn.execute(text("SELECT status, resume_state FROM tasks WHERE id = :id"), {"id": created["task_id"]}).mappings().one()
             events = conn.execute(
@@ -222,6 +229,7 @@ def test_cost_and_call_and_wall_budgets_do_not_call_upstream(client, api_db, rol
             budget={"max_cost_micro_usd": 0, "max_tokens": 1000, "max_model_requests": 4, "active_seconds": 1800, "verification_reserve_fraction": 0},
             allowed_source_ids=[str(visible["artifact_id"])],
         )
+        record_owner_approval(worker, owner_id=owner, project_id=project, task_id=cost_task["task_id"], workflow_id=cost_task["workflow_id"])
         cost = materialize_goal_effect(
             _endpoints(role_urls, store.root, base),
             {"project_id": project, "task_id": cost_task["task_id"], "command_id": cost_task["command_key"]},
@@ -236,6 +244,7 @@ def test_cost_and_call_and_wall_budgets_do_not_call_upstream(client, api_db, rol
             budget={"max_cost_micro_usd": 2_000_000, "max_tokens": 1000, "max_model_requests": 1, "active_seconds": 1800, "verification_reserve_fraction": 0},
             allowed_source_ids=[str(visible["artifact_id"])],
         )
+        record_owner_approval(worker, owner_id=owner, project_id=project, task_id=call_task["task_id"], workflow_id=call_task["workflow_id"])
         BudgetLedger(worker).open_account(
             owner_id=owner,
             project_id=project,
@@ -262,15 +271,21 @@ def test_cost_and_call_and_wall_budgets_do_not_call_upstream(client, api_db, rol
             budget={"max_cost_micro_usd": 2_000_000, "max_tokens": 1000, "max_model_requests": 4, "active_seconds": 1, "verification_reserve_fraction": 0},
             allowed_source_ids=[str(visible["artifact_id"])],
         )
+        record_owner_approval(worker, owner_id=owner, project_id=project, task_id=wall_task["task_id"], workflow_id=wall_task["workflow_id"])
+        endpoints = _endpoints(role_urls, store.root, base)
+        wall_payload = {"project_id": project, "task_id": wall_task["task_id"], "command_id": wall_task["command_key"]}
+        prepared = prepare_task_effect(endpoints, wall_payload)
+        assert prepared["status"] == "prepared", prepared
         with worker.transaction(owner_id=owner, project_id=project) as conn:
-            conn.execute(
-                text("UPDATE tasks SET created_at = :created WHERE id = :id"),
+            updated = conn.execute(
+                text(
+                    "UPDATE task_events SET created_at = :created "
+                    "WHERE task_id = :id AND event_type = 'task.active' AND payload->>'phase' = 'start'"
+                ),
                 {"created": datetime.now(UTC) - timedelta(seconds=5), "id": wall_task["task_id"]},
-            )
-        wall = materialize_goal_effect(
-            _endpoints(role_urls, store.root, base),
-            {"project_id": project, "task_id": wall_task["task_id"], "command_id": wall_task["command_key"]},
-        )
+            ).rowcount
+        assert updated == 1
+        wall = execute_task_effect(endpoints, wall_payload)
         assert wall["stop_reason"] == "budget_exhausted"
         assert Upstream.seen == []
     finally:

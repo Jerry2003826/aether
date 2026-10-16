@@ -1,5 +1,57 @@
 # 交接
 
+## P2-09 复核出口、所有者批准、活动时间与工作流投递（分支 `cursor/r7-workflow-review-budget-f3e3`）
+
+基线已变基到 `6f223f7`（PR #24 已合入，ADR-F34 归公开采集）。本决定记为 ADR-F35。没有改 `contracts/`、`reference/`。没有把 `live_ready` 改成 passed。没有新增 OpenAPI 操作，公开命令仍是 approve_goal、pause、resume、cancel。编码作业、技能评测、采集/MCP/检索、安全隔离和备份产品代码没有改。没有低风险自动批准：仓库里没有预批准模板登记。
+
+- NEEDS_REVIEW 记下原阶段。所有者用现有审批接口批准后回到 QUEUED、RUNNING 或 VERIFYING；拒绝则取消并撤销未发出的预留。`budget_unreconciled` 批准时确认账单，拒绝时释放冻结。内部 outbox kind 是 `resolve_review`，不是公开命令。
+- worker 不再把 start 命令的 owner_id 写成 `goal_contracts.approved_by`。执行前必须有所有者的 `approve_goal`。`scripts/run_live_task_check.py` 在看到合同哈希后显式提交批准。
+- active elapsed 只累计 RUNNING 与 VERIFYING。排队、审批、暂停和复核不计入。已开始的调用在 worker 离线时继续计时。continue-as-new 不重置这笔账。ADR-F21 的墙钟那一句保留，并注明由 ADR-F35 取代。
+- 终态结束本次 workflow run，并在历史达到 5000 或服务端建议时 continue-as-new。工作流 ID 复用改为 `REJECT_DUPLICATE`。已结束的 run 不再启动成新 run。投递器领取时写租约，退避 1、2、4…秒，上限 60 秒，最多 8 次。
+- 审批决定失败后，幂等键写成真实的 409，不再停在 `response_status=0`。同一键、同一载荷可以继续；不同载荷仍是冲突。超额账单可以确认或释放，且不能改成相反决定。
+- 已成功任务的答案和验收报告拒绝删除，HTTP 409 `evidence_retained`。任务保持 SUCCEEDED。`project_private` 上传仍可删除。
+
+有意改动的既有断言和准备步骤：
+
+- `answered_task(delete_answer=True)` 期望从 204 改为 409 `evidence_retained`，任务仍是 SUCCEEDED。
+- `test_audit_round3` 去掉 delete_answer 参数，新增 `test_round3_succeeded_answer_deletion_is_refused`；corrupt_answer 与 delete_source 仍要求 verdict 不是 PASS。
+- 截止时间断言仍在，计时起点从 `tasks.created_at` 改为未闭合的 `task.active` start（round4 剩余时间为 0、round5 验证重试与终态提交、live 墙钟路径）。
+- 需要执行过 WAITING_APPROVAL 的用例插入真实 `approve_goal`（`tests/integration/goal_approval.py` 或 HTTP）。成功断言没有放宽。
+- 创建合同的 `_ensure_contract` 调用传入 `approved_by`（r6 草案不符、round3 错误事实）。
+- 顺序测试在第二次投递前把租约过期；送达顺序仍是 start、pause、resume。
+- 终态会自己结束 workflow，`_stop_workflow` 接住已经完成时的 `RPCError`。状态和尝试次数断言不变。
+- `_FlakyHandle` 增加 `describe()`，取消后重试的断言不变。
+
+本机回归（PostgreSQL 17.11 pgvector 0.8.7，Temporal CLI 1.5.1 开发服务器 1.29.1；本机没有 Docker、Playwright Chromium、Hermes）：
+
+```text
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests, OK
+uv run --locked --no-build pytest -q tests/unit
+# 231 passed in 16.99s
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 \
+  uv run --locked --no-build pytest -q tests/integration
+# 320 passed, 38 failed, 1 warning in 250.78s
+# 38 条都是环境：docker 不存在、Playwright Chromium 缺失、hermes_cli_missing
+# 没有 skip，没有 xfail
+```
+
+本路定向：`tests/integration/test_r7_review_budget.py` 加上顺序、重试和两条投递器用例 16 passed。worker 进程、p0 批准和历史回放 13 passed。
+
+剩余边界：没有预批准模板，低风险自动批准未实现。已被终止且任务尚未终态的 workflow 不会被重新启动。本机 Temporal 是 1.29.1，CI 镜像是 1.9.1；回放在本机通过，以 CI 为准。`live_ready` 仍是 pending。
+
+提交 `771499e`。PR #28 已标为 ready：https://github.com/Jerry2003826/aether/pull/28
+
+CI 在 `771499e` 上全绿：
+
+- pack-and-unit：run 38900608296（48s）、run 38900641351（46s）
+- integration：run 38900608296（7m46s）、run 38900641351（8m36s）
+- SonarCloud Code Analysis：PR #28，pass
+
+`live_ready` 仍是 pending。低风险自动批准未实现。已被终止且任务尚未终态的 workflow 不会被重新启动。
+
 ## P2-09 公开采集、工具账本、检索可见性与只读推荐（分支 `cursor/r7-ingest-tools-search-4ea5`）
 
 基线 `cc471e3`（PR #20/#21/#22/#23 已合入，ADR 用到 F33）。本路只做四项。没有改 `contracts/`、`reference/`、`STATUS.json`。没有把 `live_ready` 改成 passed。没有新增 OpenAPI 操作。编码作业、技能评测、目标工作流和安全隔离没有改。决定见 ADR-F34。

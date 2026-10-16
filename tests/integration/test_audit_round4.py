@@ -35,6 +35,7 @@ from aether_worker.goal_effect import (
 )
 from aether_worker.research import estimate_tokens, research_prompt
 from aether_worker.outbox import enqueue_task, insert_followup_command
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.test_artifacts import _project
 from tests.integration.test_worker_process import _temporal_address
 
@@ -89,6 +90,13 @@ def setup_case(client, role_urls, monkeypatch, *, sources=(FACT,), goal=GOAL, bu
         command_key=str(uuid.uuid4()),
         budget=budget,
         allowed_source_ids=[str(ref["artifact_id"]) for ref in refs],
+    )
+    record_owner_approval(
+        database,
+        owner_id=owner,
+        project_id=project,
+        task_id=created["task_id"],
+        workflow_id=created["workflow_id"],
     )
     endpoints = _endpoints(role_urls, store.root)
     payload = {"project_id": project, "task_id": created["task_id"], "command_id": created["command_key"]}
@@ -311,6 +319,8 @@ def test_round4_slow_call_does_not_block_another_temporal_task(client, role_urls
         command_key=str(uuid.uuid4()),
         allowed_source_ids=[str(fast_ref["artifact_id"])],
     )
+    record_owner_approval(database, owner_id=owner, project_id=project, task_id=slow["task_id"], workflow_id=slow["workflow_id"])
+    record_owner_approval(database, owner_id=owner, project_id=project, task_id=fast["task_id"], workflow_id=fast["workflow_id"])
     state = {"calls": 0}
 
     def completion(**kwargs):
@@ -457,7 +467,13 @@ def test_codex_zero_remaining_time_does_not_dispatch(client, role_urls, monkeypa
     def backdate(self, **kwargs):
         prepared = original(self, **kwargs)
         with database.transaction(owner_id=owner, project_id=project) as conn:
-            conn.execute(text("UPDATE tasks SET created_at = now() - interval '3 hours' WHERE id = :id"), {"id": payload["task_id"]})
+            conn.execute(
+            text(
+                "UPDATE task_events SET created_at = now() - interval '3 hours' "
+                "WHERE task_id = :id AND event_type = 'task.active' AND payload->>'phase' = 'start'"
+            ),
+            {"id": payload["task_id"]},
+        )
         return prepared
 
     monkeypatch.setattr(BudgetLedger, "prepare_model_call", backdate)

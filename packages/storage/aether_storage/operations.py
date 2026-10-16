@@ -72,8 +72,18 @@ class OperationLedger:
                 ),
                 {"decision": decision, "id": approval_id, "task_id": task_id, "owner_id": owner_id, "digest": expected_intent_hash},
             ).rowcount
-        if updated != 1:
-            raise OperationError("approval_rejected")
+            if updated == 1:
+                return
+            current = conn.execute(
+                text(
+                    "SELECT decision, intent_digest FROM approvals "
+                    "WHERE id = :id AND task_id = :task_id AND owner_id = :owner_id"
+                ),
+                {"id": approval_id, "task_id": task_id, "owner_id": owner_id},
+            ).mappings().first()
+        if current is not None and current["decision"] == decision and current["intent_digest"] == expected_intent_hash:
+            return
+        raise OperationError("approval_rejected")
 
     def dispatch(self, *, owner_id: str, project_id: str, task_id: str, approval_id: str, intent: dict, capability_id: str, idempotency: str, sender) -> dict:
         digest = sha256_text(json.dumps(intent, sort_keys=True, separators=(",", ":")))

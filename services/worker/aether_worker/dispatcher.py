@@ -6,14 +6,16 @@ import json
 from typing import Any
 
 from sqlalchemy import text
-from temporalio.client import Client
+from temporalio.client import Client, WorkflowExecutionStatus
+from temporalio.common import WorkflowIDReusePolicy
 from temporalio.exceptions import WorkflowAlreadyStartedError
 
 from aether_storage.db import Database
 from aether_worker.workflows import TaskWorkflow
 
 # Task workflow commands only. Console, memory, and verifier rows stay on their own appliers.
-TEMPORAL_COMMAND_KINDS = ("start", "approve_goal", "pause", "resume", "cancel")
+TEMPORAL_COMMAND_KINDS = ("start", "approve_goal", "pause", "resume", "cancel", "resolve_review")
+MAX_DELIVERY_ATTEMPTS = 8
 
 
 def _payload(value: Any) -> dict[str, Any]:
@@ -34,29 +36,43 @@ def _claim(database: Database, limit: int) -> list[dict[str, Any]]:
             text(
                 f"""
                 WITH claimed AS (
-                  SELECT project_id, id
-                  FROM command_outbox
-                  WHERE status IN ('PENDING', 'DELIVERING')
-                    AND kind IN ({kind_list})
-                  ORDER BY created_at, command_key
-                  FOR UPDATE SKIP LOCKED
+                  SELECT candidate.project_id, candidate.id
+                  FROM command_outbox AS candidate
+                  WHERE candidate.kind IN ({kind_list})
+                    AND candidate.attempts < :max_attempts
+                    AND (
+                      (candidate.status = 'PENDING' AND (candidate.lease_until IS NULL OR candidate.lease_until <= now()))
+                      OR (candidate.status = 'DELIVERING' AND candidate.lease_until IS NOT NULL AND candidate.lease_until <= now())
+                    )
+                    AND NOT EXISTS (
+                      SELECT 1 FROM command_outbox AS earlier
+                      WHERE earlier.project_id = candidate.project_id
+                        AND earlier.task_id IS NOT DISTINCT FROM candidate.task_id
+                        AND earlier.status = 'DELIVERING'
+                        AND earlier.lease_until > now()
+                        AND (earlier.created_at, earlier.command_key) < (candidate.created_at, candidate.command_key)
+                    )
+                  ORDER BY candidate.created_at, candidate.command_key
+                  FOR UPDATE OF candidate SKIP LOCKED
                   LIMIT :limit
                 ),
                 updated AS (
                   UPDATE command_outbox AS outbox
-                  SET status = 'DELIVERING', attempts = attempts + 1
+                  SET status = 'DELIVERING',
+                      attempts = attempts + 1,
+                      lease_until = now() + (LEAST(60, POWER(2, outbox.attempts)::int) * interval '1 second')
                   FROM claimed
                   WHERE outbox.project_id = claimed.project_id AND outbox.id = claimed.id
                   RETURNING outbox.project_id::text AS project_id, outbox.id::text AS id,
                             outbox.task_id::text AS task_id, outbox.command_key, outbox.kind,
-                            outbox.payload, outbox.created_at
+                            outbox.payload, outbox.created_at, outbox.attempts
                 )
-                SELECT project_id, id, task_id, command_key, kind, payload, created_at
+                SELECT project_id, id, task_id, command_key, kind, payload, created_at, attempts
                 FROM updated
                 ORDER BY created_at, command_key
                 """
             ),
-            {"limit": limit},
+            {"limit": limit, "max_attempts": MAX_DELIVERY_ATTEMPTS},
         ).mappings().all()
     return [dict(row) for row in rows]
 
@@ -69,6 +85,7 @@ def _mark(database: Database, project_id: str, command_id: str, status: str) -> 
                 """
                 UPDATE command_outbox
                 SET status = :status,
+                    lease_until = NULL,
                     delivered_at = CASE WHEN :status = 'DELIVERED' THEN now() ELSE delivered_at END
                 WHERE project_id = :project_id AND id = :id AND status = 'DELIVERING'
                 """
@@ -82,9 +99,18 @@ async def _signal(client: Client, *, workflow: type[TaskWorkflow], workflow_id: 
     if intake_pause_seconds > 0 and getattr(workflow, "accepts_intake_pause", False):
         argument = {"task_id": task_id, "intake_pause_seconds": intake_pause_seconds}
     try:
-        handle = await client.start_workflow(workflow.run, argument, id=workflow_id, task_queue=task_queue)
+        handle = await client.start_workflow(
+            workflow.run,
+            argument,
+            id=workflow_id,
+            task_queue=task_queue,
+            id_reuse_policy=WorkflowIDReusePolicy.REJECT_DUPLICATE,
+        )
     except WorkflowAlreadyStartedError:
         handle = client.get_workflow_handle(workflow_id)
+        description = await handle.describe()
+        if description.status != WorkflowExecutionStatus.RUNNING:
+            return
     await handle.signal(workflow.command, {"command_id": command_id, "project_id": project_id, "kind": kind})
 
 
@@ -92,7 +118,7 @@ def _reset_pending(database: Database, project_id: str, command_id: str) -> None
     with database.transaction(project_id=project_id) as conn:
         conn.execute(
             text(
-                "UPDATE command_outbox SET status = 'PENDING' "
+                "UPDATE command_outbox SET status = 'PENDING', lease_until = NULL "
                 "WHERE project_id = :project_id AND id = :id AND status = 'DELIVERING'"
             ),
             {"project_id": project_id, "id": command_id},
@@ -132,6 +158,8 @@ async def deliver_pending(database: Database, client: Client, *, task_queue: str
                 )
             except Exception:
                 failed.append(command_key)
+                if int(row["attempts"]) >= MAX_DELIVERY_ATTEMPTS:
+                    _mark(database, project_id, str(row["id"]), "FAILED")
                 for later in commands[index + 1 :]:
                     _reset_pending(database, str(later["project_id"]), str(later["id"]))
                 break

@@ -232,6 +232,30 @@ def _run_task(env: dict[str, str]) -> dict[str, object]:
             if created.status_code != 202:
                 return _report("failed", reason="task_failed", step=step, http_status=created.status_code)
             task_id = created.json()["resource_id"]
+            step = "wait_for_contract"
+            deadline = time.time() + 60
+            contract_sha = ""
+            while time.time() < deadline:
+                task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
+                if task.status_code == 200:
+                    body = task.json()
+                    digest = body.get("contract_sha256")
+                    if body.get("status") == "WAITING_APPROVAL" and isinstance(digest, str) and len(digest) == 64:
+                        contract_sha = digest
+                        break
+                    if body.get("status") in {"SUCCEEDED", "FAILED", "NEEDS_REVIEW", "CANCELLED"}:
+                        return _report("failed", reason="task_finished_before_owner_approval", step=step, task_status=body.get("status"))
+                time.sleep(0.5)
+            if not contract_sha:
+                return _report("failed", reason="task_did_not_reach_waiting_approval", step=step)
+            step = "approve_goal"
+            approved = http.post(
+                f"/v1/projects/{project_id}/tasks/{task_id}/commands",
+                headers=headers("live-approve"),
+                json={"command_id": str(uuid.uuid4()), "kind": "approve_goal", "expected_contract_sha256": contract_sha},
+            )
+            if approved.status_code != 202:
+                return _report("failed", reason="approve_goal_failed", step=step, http_status=approved.status_code)
             step = "poll_task"
             deadline = time.time() + 120
             last: dict[str, object] = {}

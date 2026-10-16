@@ -9,6 +9,7 @@ import pytest
 
 import aether_worker.goal_effect as ge
 from aether_storage.db import Database
+from tests.integration.goal_approval import record_owner_approval
 from tests.integration.sysfix_b_helpers import endpoints, fake_transport, key, project, rows, store_for
 
 A = "甲接口每分钟最多接受60次请求。"
@@ -27,10 +28,12 @@ def _upload(client, project_id: str, headers: dict[str, str], name: str, body: s
     return str(uploaded.json()["artifact_id"])
 
 
-def _start(client, project_id: str, headers: dict[str, str], body: dict) -> dict[str, str]:
+def _start(client, role_urls, owner: str, project_id: str, headers: dict[str, str], body: dict) -> dict[str, str]:
     created = client.post(f"/v1/projects/{project_id}/tasks", headers={**headers, "Idempotency-Key": key()}, json=body)
     assert created.status_code == 202, created.text
-    return {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    payload = {"project_id": project_id, "task_id": created.json()["resource_id"], "command_id": created.json()["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner, project_id=project_id, task_id=payload["task_id"])
+    return payload
 
 
 def test_verification_uses_the_snapshot_the_model_saw(client, role_urls, monkeypatch) -> None:
@@ -44,7 +47,7 @@ def test_verification_uses_the_snapshot_the_model_saw(client, role_urls, monkeyp
         return original(*args, **kwargs)
 
     monkeypatch.setattr(ge, "_ensure_verification", upload_between_answer_and_verification)
-    payload = _start(client, project_id, headers, {"goal": GOAL})
+    payload = _start(client, role_urls, owner, project_id, headers, {"goal": GOAL})
     result = ge.materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     sent = rows(Database(role_urls["aether_worker"]), owner, project_id, "SELECT usage_detail->>'source_snapshot_sha256' AS s FROM model_requests WHERE task_id = :t", t=payload["task_id"])[0]["s"]
     checked = rows(Database(role_urls["aether_verifier"]), owner, project_id, VERIFICATION_SQL, t=payload["task_id"])[0]
@@ -59,7 +62,7 @@ def test_contradictory_sources_are_not_verified_as_success(client, role_urls, mo
     owner, project_id, headers = project(client)
     ids = [_upload(client, project_id, headers, name, body) for name, body in (("a.txt", A), ("b.txt", B))]
     fake_transport(monkeypatch, output=A + B)
-    payload = _start(client, project_id, headers, {"goal": GOAL, "allowed_source_ids": ids})
+    payload = _start(client, role_urls, owner, project_id, headers, {"goal": GOAL, "allowed_source_ids": ids})
     result = ge.materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     verdict = rows(Database(role_urls["aether_verifier"]), owner, project_id, "SELECT verdict, reason FROM verification_results WHERE task_id = :t", t=payload["task_id"])
     detail = f"两份资料一个说 60 一个说 90，答案两个都写：任务 {result['status']}，验收 {verdict}"
@@ -79,7 +82,7 @@ def test_other_contradictions_are_not_verified_as_success(client, role_urls, mon
     owner, project_id, headers = project(client)
     ids = [_upload(client, project_id, headers, name, body) for name, body in (("x.txt", first), ("y.txt", second))]
     fake_transport(monkeypatch, output=answer)
-    payload = _start(client, project_id, headers, {"goal": goal, "allowed_source_ids": ids})
+    payload = _start(client, role_urls, owner, project_id, headers, {"goal": goal, "allowed_source_ids": ids})
     result = ge.materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     verdict = rows(Database(role_urls["aether_verifier"]), owner, project_id, "SELECT verdict, reason FROM verification_results WHERE task_id = :t", t=payload["task_id"])
     assert result["status"] != "SUCCEEDED", f"{first} / {second}：任务 {result['status']}，验收 {verdict}"
@@ -92,7 +95,7 @@ def test_the_same_value_written_two_ways_is_not_a_contradiction(client, role_url
     same = "甲接口每分钟最多接受六十次请求。"
     ids = [_upload(client, project_id, headers, name, body) for name, body in (("a.txt", A), ("b.txt", same))]
     fake_transport(monkeypatch, output=f"资料记载：{A}{same}")
-    payload = _start(client, project_id, headers, {"goal": GOAL, "allowed_source_ids": ids})
+    payload = _start(client, role_urls, owner, project_id, headers, {"goal": GOAL, "allowed_source_ids": ids})
     result = ge.materialize_goal_effect(endpoints(role_urls, store_for(client, role_urls).root), payload)
     verdict = rows(Database(role_urls["aether_verifier"]), owner, project_id, "SELECT verdict, reason FROM verification_results WHERE task_id = :t", t=payload["task_id"])
     assert result["status"] == "SUCCEEDED", f"任务 {result}，验收 {verdict}"
@@ -110,7 +113,7 @@ def test_a_source_deleted_before_the_verification_retry_is_not_a_pass(client, ro
         raise OSError("verifier unavailable")
 
     monkeypatch.setattr(ge, "_ensure_verification", unavailable)
-    payload = _start(client, project_id, headers, {"goal": GOAL})
+    payload = _start(client, role_urls, owner, project_id, headers, {"goal": GOAL})
     live = endpoints(role_urls, store_for(client, role_urls).root)
     with pytest.raises(OSError):
         ge.materialize_goal_effect(live, payload)

@@ -64,6 +64,43 @@ class ArtifactError(Exception):
         self.message = message
 
 
+_RETAINED_CLASSIFICATIONS = ("task_answer", "task_verification_report")
+
+
+def _succeeded_evidence(conn, project_id: str, artifact_id: str, classification: str, task_id: str | None) -> bool:
+    """A succeeded task keeps its answer and verification report."""
+    if classification in _RETAINED_CLASSIFICATIONS and task_id:
+        status = conn.execute(
+            text("SELECT status FROM tasks WHERE project_id = :project_id AND id = :task_id"),
+            {"project_id": project_id, "task_id": task_id},
+        ).scalar()
+        if status == "SUCCEEDED":
+            return True
+    linked = conn.execute(
+        text(
+            "SELECT 1 FROM verification_results AS evidence "
+            "JOIN tasks AS task ON task.project_id = evidence.project_id AND task.id = evidence.task_id "
+            "WHERE evidence.project_id = :project_id AND task.status = 'SUCCEEDED' "
+            "AND (evidence.artifact_id = :artifact_id OR evidence.report_artifact_id = :artifact_id) "
+            "LIMIT 1"
+        ),
+        {"project_id": project_id, "artifact_id": artifact_id},
+    ).first()
+    if linked is not None:
+        return True
+    bound = conn.execute(
+        text(
+            "SELECT 1 FROM task_artifacts AS link "
+            "JOIN tasks AS task ON task.project_id = link.project_id AND task.id = link.task_id "
+            "WHERE link.project_id = :project_id AND link.artifact_id = :artifact_id AND link.deleted_at IS NULL "
+            "AND link.classification IN ('task_answer', 'task_verification_report') AND task.status = 'SUCCEEDED' "
+            "LIMIT 1"
+        ),
+        {"project_id": project_id, "artifact_id": artifact_id},
+    ).first()
+    return bound is not None
+
+
 def assert_storage_root(root: Path) -> Path:
     resolved = root.resolve()
     home = Path.home().resolve()
@@ -181,6 +218,17 @@ class ArtifactStore:
 
     def tombstone(self, *, owner_id: str, project_id: str, artifact_id: str) -> None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            row = conn.execute(
+                text(
+                    "SELECT classification, task_id::text AS task_id FROM artifacts "
+                    "WHERE id = :id AND project_id = :project_id AND deleted_at IS NULL"
+                ),
+                {"id": artifact_id, "project_id": project_id},
+            ).mappings().first()
+            if row is None:
+                raise ArtifactError("not_found", "产物不存在")
+            if _succeeded_evidence(conn, project_id, artifact_id, str(row["classification"]), row["task_id"]):
+                raise ArtifactError("evidence_retained", "已成功任务的答案或验收报告不能删除")
             updated = conn.execute(
                 text("UPDATE artifacts SET deleted_at = now() WHERE id = :id AND project_id = :project_id AND deleted_at IS NULL"),
                 {"id": artifact_id, "project_id": project_id},

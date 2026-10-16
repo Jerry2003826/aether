@@ -15,6 +15,7 @@ from sqlalchemy import text
 
 from aether_storage.db import Database
 from aether_worker.goal_effect import _ensure_contract, materialize_goal_effect
+from tests.integration.goal_approval import record_owner_approval
 from aether_worker.memory import (
     MemoryError,
     _is_project_test_run,
@@ -455,7 +456,7 @@ def _put_draft(client, project_id: str, task_id: str, headers: dict, draft: dict
     assert revised.status_code == 200, revised.text
 
 
-def _start(client, project_id: str, headers: dict, goal: str) -> dict:
+def _start(client, role_urls, owner_id: str, project_id: str, headers: dict, goal: str) -> dict:
     created = client.post(
         f"/v1/projects/{project_id}/tasks",
         headers={**headers, "Idempotency-Key": key()},
@@ -463,7 +464,9 @@ def _start(client, project_id: str, headers: dict, goal: str) -> dict:
     )
     assert created.status_code == 202, created.text
     body = created.json()
-    return {"project_id": project_id, "task_id": body["resource_id"], "command_id": body["command_id"]}
+    payload = {"project_id": project_id, "task_id": body["resource_id"], "command_id": body["command_id"]}
+    record_owner_approval(Database(role_urls["aether_worker"]), owner_id=owner_id, project_id=project_id, task_id=payload["task_id"])
+    return payload
 
 
 def _contract_content(worker: Database, owner_id: str, project_id: str, task_id: str):
@@ -483,7 +486,7 @@ def test_approved_draft_is_frozen_and_not_replaced(client, role_urls) -> None:
     store = store_for(client, role_urls)
     store.put(owner_id=owner_id, project_id=project_id, data=f"{FACT}\n".encode(), media_type="text/plain")
     goal = "请根据已上传资料回答沸点"
-    strict = _start(client, project_id, headers, goal)
+    strict = _start(client, role_urls, owner_id, project_id, headers, goal)
     review = {
         "criterion_id": "owner_review",
         "template": "human_review",
@@ -507,7 +510,7 @@ def test_approved_draft_is_frozen_and_not_replaced(client, role_urls) -> None:
     )
     assert verdict == "UNVERIFIABLE"
 
-    sized = _start(client, project_id, headers, goal)
+    sized = _start(client, role_urls, owner_id, project_id, headers, goal)
     exists = {
         "criterion_id": "answer_bytes",
         "template": "artifact_exists",
@@ -521,7 +524,7 @@ def test_approved_draft_is_frozen_and_not_replaced(client, role_urls) -> None:
     assert sized_contract["criteria"] == [exists]
     assert sized_result["status"] == "SUCCEEDED"
 
-    plain = _start(client, project_id, headers, goal)
+    plain = _start(client, role_urls, owner_id, project_id, headers, goal)
     plain_result = materialize_goal_effect(endpoints(role_urls, store.root, provider="scripted"), plain)
     assert plain_result["status"] == "SUCCEEDED"
     assert _contract_content(worker, owner_id, project_id, plain["task_id"]) == {"criterion_id": "goal_artifact", "goal": goal}
@@ -531,7 +534,7 @@ def test_draft_mismatch_does_not_fall_back_to_the_automatic_contract(client, rol
     owner_id, project_id, headers = project(client)
     worker = _worker(role_urls)
     goal = "请根据已上传资料回答沸点"
-    started = _start(client, project_id, headers, goal)
+    started = _start(client, role_urls, owner_id, project_id, headers, goal)
     weaker = {
         "criterion_id": "goal_artifact",
         "template": "artifact_exists",
@@ -541,7 +544,7 @@ def test_draft_mismatch_does_not_fall_back_to_the_automatic_contract(client, rol
     draft = _draft(project_id, started["task_id"], "另一份更弱的目标", [weaker])
     _put_draft(client, project_id, started["task_id"], headers, draft)
     with pytest.raises(RuntimeError, match="draft goal"):
-        _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=started["task_id"], goal=goal)
+        _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=started["task_id"], goal=goal, approved_by=owner_id)
     stored = scalar(worker, owner_id, project_id, "SELECT count(*) FROM goal_contracts WHERE task_id = :task_id", task_id=started["task_id"])
     assert stored == 0
 
@@ -550,7 +553,7 @@ def test_later_draft_does_not_rewrite_a_frozen_contract(client, role_urls) -> No
     owner_id, project_id, headers = project(client)
     worker = _worker(role_urls)
     goal = "保持已冻结的条款"
-    started = _start(client, project_id, headers, goal)
+    started = _start(client, role_urls, owner_id, project_id, headers, goal)
     original = {
         "criterion_id": "keep",
         "template": "human_review",
@@ -559,7 +562,7 @@ def test_later_draft_does_not_rewrite_a_frozen_contract(client, role_urls) -> No
         "parameters": {"rubric": "不能被事后草案换掉"},
     }
     _put_draft(client, project_id, started["task_id"], headers, _draft(project_id, started["task_id"], goal, [original]))
-    contract_id, digest = _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=started["task_id"], goal=goal)
+    contract_id, digest = _ensure_contract(worker, owner_id=owner_id, project_id=project_id, task_id=started["task_id"], goal=goal, approved_by=owner_id)
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         conn.execute(
             text("UPDATE tasks SET draft_contract = CAST(:draft AS jsonb) WHERE project_id = :project_id AND id = :task_id"),
