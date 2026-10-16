@@ -20,4 +20,4 @@
 
 测试：不 skip、不 xfail、不删断言、不放宽断言。变基后重跑 `verify_freeze`、参考套件、单元测试，以及 `AETHER_REQUIRE_SERVICES=1` 的集成测试。
 
-进度：冲突已按两边行为合并，决定是 ADR-F39。三条 P2 已接上：PDF 按媒体类型抽正文，停止的 schedule 确认删除后不再轮询，过滤检索只给允许的位置打分。冻结检查通过，`api_operations` 50。参考套件 76。单元 251 passed。集成第一次 376 passed、1 failed（Hermes 身份探针 commit 为空）；该测试单独重跑通过；全量重跑 377 passed、1 warning。没有 skip。本 head 的 CI 还没记成通过。不改 `live_ready`。
+进度：冲突已按两边行为合并，决定是 ADR-F39。三条 P2 已接上：PDF 按媒体类型抽正文，停止的 schedule 确认删除后不再轮询，过滤检索只给允许的位置打分。冻结检查通过，`api_operations` 50。参考套件 76。单元 251 passed。集成第一次 376 passed、1 failed（Hermes 身份探针 commit 为空）；该测试单独重跑通过；全量重跑 377 passed、1 warning。没有 skip。头 `3a28a5f` 的 pack-and-unit、integration 与 SonarCloud 已通过。随后的交接提交另记，通过之前不把新 head 记成通过。不改 `live_ready`。

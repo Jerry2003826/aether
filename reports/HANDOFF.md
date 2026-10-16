@@ -48,7 +48,13 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 
 变基前的头 `517cd74` 上，`pack-and-unit`、`integration` 与 SonarCloud 质量门曾通过。Cursor Security Reviewer 没有安全发现。Approval Agent 判定高风险、需要人工评审，没有代码级 P0/P1。PR #23 的八条线程已回复并附上该提交。那一轮 CI 不覆盖 `cfbc65d` 上的这次变基。
 
-下一步：PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。等本 head 的 `pack-and-unit`、`integration` 与 SonarCloud。通过之前不把这三项记成通过。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
+头 `3a28a5f` 上的 CI 已通过。两次 workflow 都是 success：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38914706599 ：`pack-and-unit` 46s，`integration` 10m29s
+- https://github.com/Jerry2003826/aether/actions/runs/38914697785 ：`pack-and-unit` 50s，`integration` 12m9s
+- SonarCloud Code Analysis 通过：https://sonarcloud.io/dashboard?id=Jerry2003826_aether&pullRequest=25
+
+这条交接提交在 `3a28a5f` 之后。它自己的 CI 通过之前，不把新 head 记成通过。PR https://github.com/Jerry2003826/aether/pull/25 保持 ready，不合并。所有者在当前 head 重跑 live F26 之前，`live_ready` 保持 pending。
 
 ## R7-1 编码作业与技能评测（分支 `cursor/r7-coding-jobs-skill-eval-84e7`）
 
