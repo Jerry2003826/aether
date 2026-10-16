@@ -1008,7 +1008,9 @@ def _ensure_live_answer(
     age = _task_age_seconds(database, owner_id, project_id, task_id)
     if age > int(spec["active_seconds"]):
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
-    account = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id)
+    request_key = f"research-{task_id}"
+    attempt_id = uuid.uuid4().hex
+    account = ledger.snapshot(owner_id=owner_id, project_id=project_id, task_id=task_id, reclaimable_request_key=request_key)
     fraction = float(spec["verification_reserve_fraction"])
     token_ceiling = int(int(spec["max_tokens"]) * (1 - fraction))
     cost_ceiling = int(int(spec["max_cost_micro_usd"]) * (1 - fraction))
@@ -1019,7 +1021,6 @@ def _ensure_live_answer(
     if plan is None:
         return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="reservation")
     output_cap = int(plan["output_cap"])
-    request_key = f"research-{task_id}"
     prompt_sha = sha256_text(prompt)
     prepared = ledger.prepare_model_call(
         owner_id=owner_id,
@@ -1033,6 +1034,7 @@ def _ensure_live_answer(
         prompt_sha256=prompt_sha,
         output_cap=output_cap,
         source_snapshot_sha256=snapshot_sha,
+        attempt_id=attempt_id,
     )
     action = str(prepared["action"])
     if action == "denied":
@@ -1041,8 +1043,9 @@ def _ensure_live_answer(
         return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型调用结果未能对账", code="live_call_unreconciled")
     if action == "send":
         remaining = float(spec["active_seconds"]) - _task_age_seconds(database, owner_id, project_id, task_id)
+        held = {"owner_id": owner_id, "project_id": project_id, "task_id": task_id, "request_key": request_key, "attempt_id": attempt_id}
         if remaining <= 0:
-            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            ledger.release_unsent(**held)
             return _mark_budget_exhausted(database, owner_id=owner_id, project_id=project_id, task_id=task_id, limit="active_seconds")
         gateway = ModelGateway(
             database,
@@ -1058,17 +1061,23 @@ def _ensure_live_answer(
         )
         blocked = _block_execution(database, owner_id, project_id, task_id)
         if blocked is not None:
-            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+            ledger.release_unsent(**held)
             return {"status": blocked, "task_id": task_id}
-        if not ledger.acquire_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key):
-            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        if not ledger.acquire_dispatch_permit(**held):
+            ledger.release_unsent(**held)
             return {"status": _task_status(database, owner_id, project_id, task_id), "task_id": task_id}
-        if not ledger.consume_dispatch_permit(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key):
-            ledger.release_unsent(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        if not ledger.consume_dispatch_permit(**held):
+            ledger.release_unsent(**held)
             return {"status": _task_status(database, owner_id, project_id, task_id), "task_id": task_id}
         try:
             result = gateway.complete(token, {"alias": endpoints.live_model_alias, "prompt": prompt, "max_tokens": output_cap})
-        except GatewayDenied:
+        except GatewayDenied as denied:
+            if not denied.sent:
+                ledger.release_refused_send(**held, code=denied.code)
+                blocked = _block_execution(database, owner_id, project_id, task_id)
+                if blocked is not None:
+                    return {"status": blocked, "task_id": task_id}
+                return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型网关拒绝了这次调用", code="gateway_denied")
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")
         if result.get("usage_status") == "unknown" and not result.get("output"):

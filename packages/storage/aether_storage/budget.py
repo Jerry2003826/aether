@@ -11,12 +11,33 @@ from aether_domain.security import sha256_text
 from aether_storage.db import Database
 
 
+UNSENT_DISPATCH_STATES = frozenset({"dispatched", "permitted"})
+
+
 def _detail(value: object) -> dict:
     if isinstance(value, str):
         return json.loads(value)
     if isinstance(value, dict):
         return dict(value)
     return {}
+
+
+def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_id: str, request_key: str, amount: int, detail: dict) -> None:
+    reserved_tokens = int(detail.get("reserved_tokens") or 0)
+    detail["dispatch_state"] = "cancelled_before_dispatch"
+    conn.execute(
+        text(
+            "UPDATE model_requests SET usage_status = 'cancelled_before_dispatch', actual_micro_usd = NULL, usage_detail = CAST(:detail AS jsonb) "
+            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+        ),
+        {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+    )
+    conn.execute(
+        text(
+            "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :amount, tokens_held = tokens_held - :tokens, version = version + 1 WHERE id = :id"
+        ),
+        {"amount": amount, "tokens": reserved_tokens, "id": account_id},
+    )
 
 
 class BudgetError(Exception):
@@ -176,37 +197,55 @@ class BudgetLedger:
             if updated != 1:
                 raise BudgetError("not_reserved")
 
-    def release_unsent(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
-        """Drop a reservation that never left this process."""
+    def _held_by(self, conn, *, project_id: str, task_id: str, request_key: str, attempt_id: str) -> tuple[object, dict, dict] | None:
+        account = conn.execute(
+            text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+            {"project_id": project_id, "task_id": task_id},
+        ).mappings().one()
+        request = conn.execute(
+            text(
+                "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).mappings().first()
+        if request is None:
+            return None
+        detail = _detail(request["usage_detail"])
+        if detail.get("dispatch_holder") != attempt_id:
+            return None
+        return account["id"], dict(request), detail
+
+    def release_unsent(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, attempt_id: str) -> None:
+        """Drop this attempt's reservation if it never reached sending.
+
+        A sending row may already be billed. It is not released here.
+        """
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-            account = conn.execute(
-                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
-                {"project_id": project_id, "task_id": task_id},
-            ).mappings().one()
-            request = conn.execute(
-                text(
-                    "SELECT reserved_micro_usd, usage_detail FROM model_requests "
-                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
-                ),
-                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
-            ).mappings().first()
-            if request is None:
+            held = self._held_by(conn, project_id=project_id, task_id=task_id, request_key=request_key, attempt_id=attempt_id)
+            if held is None:
                 return
-            detail = _detail(request["usage_detail"])
-            reserved_tokens = int(detail.get("reserved_tokens") or 0)
-            detail["dispatch_state"] = "cancelled_before_dispatch"
-            conn.execute(
-                text(
-                    "UPDATE model_requests SET usage_status = 'cancelled_before_dispatch', actual_micro_usd = NULL, usage_detail = CAST(:detail AS jsonb) "
-                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
-                ),
-                {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+            account_id, request, detail = held
+            if detail.get("dispatch_state") not in UNSENT_DISPATCH_STATES:
+                return
+            _cancel_before_dispatch(
+                conn, account_id=account_id, project_id=project_id, task_id=task_id, request_key=request_key,
+                amount=int(request["reserved_micro_usd"]), detail=detail,
             )
-            conn.execute(
-                text(
-                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :amount, tokens_held = tokens_held - :tokens, version = version + 1 WHERE id = :id"
-                ),
-                {"amount": int(request["reserved_micro_usd"]), "tokens": reserved_tokens, "id": account["id"]},
+
+    def release_refused_send(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, attempt_id: str, code: str) -> None:
+        """Release a sending row the gateway refused before it contacted the provider."""
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            held = self._held_by(conn, project_id=project_id, task_id=task_id, request_key=request_key, attempt_id=attempt_id)
+            if held is None:
+                return
+            account_id, request, detail = held
+            if detail.get("dispatch_state") != "sending":
+                return
+            detail["gateway_refused"] = code
+            _cancel_before_dispatch(
+                conn, account_id=account_id, project_id=project_id, task_id=task_id, request_key=request_key,
+                amount=int(request["reserved_micro_usd"]), detail=detail,
             )
 
     def _runnable(self, conn, project_id: str, task_id: str) -> bool:
@@ -220,11 +259,12 @@ class BudgetLedger:
             return False
         return str(row["resume_state"] or "") not in {"pause_requested", "cancel_requested"}
 
-    def acquire_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> bool:
+    def acquire_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, attempt_id: str) -> bool:
         """Mark a reserved call permitted only while the task is still runnable.
 
         A pause or cancel that commits after this returns can still revoke the
-        permit before consume_dispatch_permit flips it to sending.
+        permit before consume_dispatch_permit flips it to sending. An attempt
+        whose reservation was taken over by a retry gets no permit.
         """
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             if not self._runnable(conn, project_id, task_id):
@@ -239,7 +279,7 @@ class BudgetLedger:
             if request is None or request["usage_status"] != "reserved":
                 return False
             detail = _detail(request["usage_detail"])
-            if detail.get("dispatch_state") not in {"dispatched", "permitted"}:
+            if detail.get("dispatch_state") not in UNSENT_DISPATCH_STATES or detail.get("dispatch_holder") != attempt_id:
                 return False
             detail["dispatch_state"] = "permitted"
             conn.execute(
@@ -251,7 +291,7 @@ class BudgetLedger:
             )
         return True
 
-    def consume_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> bool:
+    def consume_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, attempt_id: str) -> bool:
         """Flip a still-permitted call to sending. A committed stop makes this return false."""
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             if not self._runnable(conn, project_id, task_id):
@@ -266,7 +306,7 @@ class BudgetLedger:
             if request is None or request["usage_status"] != "reserved":
                 return False
             detail = _detail(request["usage_detail"])
-            if detail.get("dispatch_state") != "permitted":
+            if detail.get("dispatch_state") != "permitted" or detail.get("dispatch_holder") != attempt_id:
                 return False
             detail["dispatch_state"] = "sending"
             conn.execute(
@@ -298,25 +338,9 @@ class BudgetLedger:
                 detail = _detail(request["usage_detail"])
                 if detail.get("dispatch_state") == "sending":
                     continue
-                reserved_tokens = int(detail.get("reserved_tokens") or 0)
-                detail["dispatch_state"] = "cancelled_before_dispatch"
-                conn.execute(
-                    text(
-                        "UPDATE model_requests SET usage_status = 'cancelled_before_dispatch', actual_micro_usd = NULL, usage_detail = CAST(:detail AS jsonb) "
-                        "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
-                    ),
-                    {
-                        "detail": json.dumps(detail),
-                        "project_id": project_id,
-                        "task_id": task_id,
-                        "request_key": request["request_key"],
-                    },
-                )
-                conn.execute(
-                    text(
-                        "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :amount, tokens_held = tokens_held - :tokens, version = version + 1 WHERE id = :id"
-                    ),
-                    {"amount": int(request["reserved_micro_usd"]), "tokens": reserved_tokens, "id": account["id"]},
+                _cancel_before_dispatch(
+                    conn, account_id=account["id"], project_id=project_id, task_id=task_id, request_key=str(request["request_key"]),
+                    amount=int(request["reserved_micro_usd"]), detail=detail,
                 )
 
     def prepare_model_call(
@@ -333,10 +357,13 @@ class BudgetLedger:
         prompt_sha256: str,
         output_cap: int,
         source_snapshot_sha256: str,
+        attempt_id: str,
     ) -> dict[str, object]:
         """Reserve once, then either send, reuse a stored response, or stop.
 
-        A previous reservation is not permission to call the provider again.
+        A reservation still before sending is provably unsent, so a retry takes
+        it over and reprices it instead of freezing it as unknown. Only a row
+        that reached sending may have been billed; that one becomes unknown.
         """
         if amount < 0 or tokens < 0:
             raise BudgetError("invalid_amount")
@@ -364,7 +391,7 @@ class BudgetLedger:
             ).mappings().one()
             existing = conn.execute(
                 text(
-                    "SELECT usage_status, request_sha256, usage_detail FROM model_requests "
+                    "SELECT usage_status, reserved_micro_usd, request_sha256, usage_detail FROM model_requests "
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
                 ),
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
@@ -375,20 +402,32 @@ class BudgetLedger:
                     return {"action": "conflict"}
                 if detail.get("dispatch_state") == "response_recorded":
                     return {"action": "reuse", "book_result": str(detail.get("book_result") or "replayed"), "response": detail}
-                if existing["usage_status"] == "cancelled_before_dispatch":
+                unsent = existing["usage_status"] == "reserved" and detail.get("dispatch_state") in UNSENT_DISPATCH_STATES
+                if existing["usage_status"] == "cancelled_before_dispatch" or unsent:
+                    previous_amount = int(existing["reserved_micro_usd"]) if unsent else 0
+                    previous_tokens = int(detail.get("reserved_tokens") or 0) if unsent else 0
                     fraction = float(account["verification_reserve_fraction"])
                     ceiling = int(account["limit_micro_usd"] * (1 - fraction))
                     token_ceiling = int(account["token_limit"] * (1 - fraction))
-                    if output_cap < 1 or amount < 1 or tokens < 1:
-                        return {"action": "denied"}
-                    if account["spent_micro_usd"] + account["held_micro_usd"] + amount > ceiling:
-                        return {"action": "denied"}
-                    if account["tokens_used"] + account["tokens_held"] + tokens > token_ceiling:
+                    fits = (
+                        output_cap >= 1
+                        and amount >= 1
+                        and tokens >= 1
+                        and account["spent_micro_usd"] + account["held_micro_usd"] - previous_amount + amount <= ceiling
+                        and account["tokens_used"] + account["tokens_held"] - previous_tokens + tokens <= token_ceiling
+                    )
+                    if not fits:
+                        if unsent:
+                            _cancel_before_dispatch(
+                                conn, account_id=account["id"], project_id=project_id, task_id=task_id, request_key=request_key,
+                                amount=previous_amount, detail=detail,
+                            )
                         return {"action": "denied"}
                     detail.update(
                         {
                             "reserved_tokens": tokens,
                             "dispatch_state": "dispatched",
+                            "dispatch_holder": attempt_id,
                             "prompt_sha256": prompt_sha256,
                             "output_cap": output_cap,
                             "source_snapshot_sha256": source_snapshot_sha256,
@@ -396,16 +435,16 @@ class BudgetLedger:
                     )
                     conn.execute(
                         text(
-                            "UPDATE model_requests SET usage_status = 'reserved', reserved_micro_usd = :amount, usage_detail = CAST(:detail AS jsonb) "
+                            "UPDATE model_requests SET usage_status = 'reserved', reserved_micro_usd = :amount, request_sha256 = :digest, usage_detail = CAST(:detail AS jsonb) "
                             "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
                         ),
-                        {"amount": amount, "detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+                        {"amount": amount, "digest": digest, "detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
                     )
                     conn.execute(
                         text(
                             "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, version = version + 1 WHERE id = :id"
                         ),
-                        {"amount": amount, "tokens": tokens, "id": account["id"]},
+                        {"amount": amount - previous_amount, "tokens": tokens - previous_tokens, "id": account["id"]},
                     )
                     return {"action": "send"}
                 if existing["usage_status"] == "reserved":
@@ -429,6 +468,7 @@ class BudgetLedger:
             detail = {
                 "reserved_tokens": tokens,
                 "dispatch_state": "dispatched",
+                "dispatch_holder": attempt_id,
                 "prompt_sha256": prompt_sha256,
                 "output_cap": output_cap,
                 "source_snapshot_sha256": source_snapshot_sha256,
@@ -573,12 +613,25 @@ class BudgetLedger:
                 )
         return book_result
 
-    def snapshot(self, *, owner_id: str, project_id: str, task_id: str) -> dict:
+    def snapshot(self, *, owner_id: str, project_id: str, task_id: str, reclaimable_request_key: str | None = None) -> dict:
+        """Account totals. A reclaimable request's unsent hold is left out, since a retry reprices it."""
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             account = conn.execute(
                 text("SELECT limit_micro_usd, spent_micro_usd, held_micro_usd, tokens_used, tokens_held, requests_admitted FROM budget_accounts WHERE task_id = :task_id"),
                 {"task_id": task_id},
             ).mappings().one()
+            reclaim_amount = 0
+            reclaim_tokens = 0
+            if reclaimable_request_key is not None:
+                pending = conn.execute(
+                    text("SELECT reserved_micro_usd, usage_detail FROM model_requests WHERE task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"),
+                    {"task_id": task_id, "request_key": reclaimable_request_key},
+                ).mappings().first()
+                if pending is not None:
+                    detail = _detail(pending["usage_detail"])
+                    if detail.get("dispatch_state") in UNSENT_DISPATCH_STATES:
+                        reclaim_amount = int(pending["reserved_micro_usd"])
+                        reclaim_tokens = int(detail.get("reserved_tokens") or 0)
             usage = conn.execute(
                 text(
                     "SELECT COUNT(*) FILTER (WHERE usage_status = 'unknown') AS unknown_request_count, "
@@ -591,11 +644,11 @@ class BudgetLedger:
         return {
             "limit_micro_usd": account["limit_micro_usd"],
             "actual_known_micro_usd": account["spent_micro_usd"],
-            "held_micro_usd": account["held_micro_usd"],
+            "held_micro_usd": account["held_micro_usd"] - reclaim_amount,
             "unknown_request_count": int(usage["unknown_request_count"]),
             "observed_request_count": int(usage["observed_request_count"]),
             "observed_micro_usd": int(usage["observed_micro_usd"]),
             "tokens_used": account["tokens_used"],
-            "tokens_held": account["tokens_held"],
+            "tokens_held": account["tokens_held"] - reclaim_tokens,
             "request_count": account["requests_admitted"],
         }

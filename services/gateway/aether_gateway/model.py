@@ -44,9 +44,12 @@ def _redact(value: str, secret: str) -> str:
 
 
 class GatewayDenied(Exception):
-    def __init__(self, code: str) -> None:
+    """sent is true once the request may have reached the provider."""
+
+    def __init__(self, code: str, *, sent: bool = False) -> None:
         super().__init__(code)
         self.code = code
+        self.sent = sent
 
 
 class ModelGateway:
@@ -108,7 +111,7 @@ class ModelGateway:
                     "actual_cost_micro_usd": None,
                     "cost_status": "unknown",
                 }
-            raise GatewayDenied("upstream_error") from exc
+            raise GatewayDenied("upstream_error", sent=True) from exc
         output = _redact(response.choices[0].message.content or "", self.provider_key)
         upstream_model = _redact(str(getattr(response, "model", "") or ""), self.provider_key)
         cost = _cost_micro_usd(response)
@@ -142,7 +145,7 @@ class ModelGateway:
         self.audit.append(f"model project={project_id} alias={alias} outcome={result['usage_status']}")
         encoded = json.dumps(result)
         if self.provider_key in encoded or any(self.provider_key in line for line in self.audit):
-            raise GatewayDenied("secret_leak")
+            raise GatewayDenied("secret_leak", sent=True)
         return result
 
     def _scope(self, token: str) -> dict[str, Any]:
