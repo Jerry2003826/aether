@@ -226,9 +226,9 @@ def test_url_allowlist_and_redirects(role_urls, clean_db, tmp_path: Path) -> Non
             ("rss", "https://evil.invalid/feed.xml", ["example.test"]),
             ("url", f"http://127.0.0.1:{port}/doc", []),
             ("github_api", "https://api.github.com/repos/octocat/Hello-World", ["example.test"]),
-            ("github_api", "https://api.github.com/repos/octocat/Hello-World", []),
+            ("github_api", "https://api.github.com/repos/octocat/Spoon-Knife", []),
             ("arxiv_api", "1706.03762", ["example.test"]),
-            ("arxiv_api", "https://export.arxiv.org/api/query?id_list=1706.03762", []),
+            ("arxiv_api", "https://export.arxiv.org/api/query?id_list=1606.06565", []),
             ("github_api", f"http://127.0.0.1:{port}/repos/octocat/Hello-World", ["example.test"]),
             ("arxiv_api", f"http://127.0.0.1:{port}/api/query?id_list=1706.03762", []),
         )
