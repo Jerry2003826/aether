@@ -226,7 +226,40 @@ _POLARITY = (
 )
 _SUBJECT_NOISE = tuple(dict.fromkeys((*_PERIODS, *(word for word, _kind in _POLARITY), "接受", "发送", "允许", "可以", "请求", "完成", "一次", "每", "为", "的")))
 _GOAL_PART_SPLIT = re.compile(r"以及|和|与")
-_GOAL_PART_STOP = "根据资料请分别说明回答给出多少什么请求"
+_GENERIC_PART_WORDS = (
+    "限额",
+    "上限",
+    "下限",
+    "请求",
+    "时间",
+    "次数",
+    "数量",
+    "说明",
+    "回答",
+    "给出",
+    "分别",
+    "根据",
+    "资料",
+    "多少",
+    "什么",
+    "请",
+    "周期",
+    "分钟",
+    "小时",
+    "秒钟",
+    "毫秒",
+    "最多",
+    "最少",
+    "接受",
+    "发送",
+    "允许",
+    "可以",
+    "完成",
+    "一次",
+    "每",
+    "为",
+    "的",
+)
 
 
 def _rightmost(text: str, words: tuple[str, ...]) -> str:
@@ -285,6 +318,8 @@ def _bindings(text: str) -> list[tuple[str, str, str, str, frozenset[str]]]:
 def _binding_covered(
     binding: tuple[str, str, str, str, frozenset[str]],
     answers: list[tuple[str, str, str, str, frozenset[str]]],
+    *,
+    require_subject: bool,
 ) -> bool:
     number, unit, period, polarity, subjects = binding
     for other_number, other_unit, other_period, other_polarity, other_subjects in answers:
@@ -294,36 +329,52 @@ def _binding_covered(
             continue
         if polarity and other_polarity and polarity != other_polarity:
             continue
+        if subjects and not other_subjects and require_subject:
+            continue
         if not other_subjects <= subjects:
             continue
         return True
     return False
 
 
+def _part_objects(part: str) -> set[str]:
+    cleaned = part
+    for word in sorted(_GENERIC_PART_WORDS, key=len, reverse=True):
+        cleaned = cleaned.replace(word, "")
+    return _tokens(cleaned)
+
+
 def _unsupported_goal_part(goal: str, facts: list[str]) -> bool:
-    """A goal that asks for two things is not done when one thing has no source."""
+    """Each requested object needs its own source support, not a shared generic word."""
     parts = [part.strip() for part in _GOAL_PART_SPLIT.split(goal) if len(_cjk_bigrams(part)) >= 1]
     if len(parts) < 2:
         return False
     covered: set[str] = set()
     for fact in facts:
-        covered |= _tokens(fact)
-    stop = _tokens(_GOAL_PART_STOP)
+        covered |= _part_objects(fact)
     for part in parts:
-        content = _tokens(part) - stop
-        if content and not content & covered:
+        objects = _part_objects(part)
+        if not objects or not objects & covered:
             return True
     return False
 
 
-def _covers(answer: str, fact: str) -> bool:
+def _covers(answer: str, fact: str, *, require_subject: bool = False) -> bool:
     if fact in answer:
         return True
     bindings = _bindings(fact)
     if not bindings:
         return False
     answers = _bindings(_CITATION_LABEL.sub(" ", answer))
-    return all(_binding_covered(binding, answers) for binding in bindings)
+    return all(_binding_covered(binding, answers, require_subject=require_subject) for binding in bindings)
+
+
+def _requires_subject(facts: list[str]) -> bool:
+    named = 0
+    for fact in facts:
+        if any(binding[4] for binding in _bindings(fact)):
+            named += 1
+    return named >= 2
 
 
 def fact_satisfied(answer: str, fact: str, goal: str) -> bool:
@@ -352,7 +403,8 @@ def goal_completion_detail(*, answer: str, goal: str, source_text: str) -> str:
         return "unsupported_number:" + ",".join(f"'{number}'" for number in extras)
     if _unsupported_goal_part(goal, facts):
         return "unsupported_goal_part"
-    if any(not _covers(answer, fact) for fact in facts):
+    require_subject = _requires_subject(facts)
+    if any(not _covers(answer, fact, require_subject=require_subject) for fact in facts):
         return "missing_fact"
     return ""
 

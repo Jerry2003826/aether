@@ -209,6 +209,116 @@ class BudgetLedger:
                 {"amount": int(request["reserved_micro_usd"]), "tokens": reserved_tokens, "id": account["id"]},
             )
 
+    def _runnable(self, conn, project_id: str, task_id: str) -> bool:
+        row = conn.execute(
+            text("SELECT status, resume_state FROM tasks WHERE project_id = :project_id AND id = :id FOR UPDATE"),
+            {"project_id": project_id, "id": task_id},
+        ).mappings().first()
+        if row is None:
+            return False
+        if str(row["status"]) not in {"RUNNING", "VERIFYING"}:
+            return False
+        return str(row["resume_state"] or "") not in {"pause_requested", "cancel_requested"}
+
+    def acquire_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> bool:
+        """Mark a reserved call permitted only while the task is still runnable.
+
+        A pause or cancel that commits after this returns can still revoke the
+        permit before consume_dispatch_permit flips it to sending.
+        """
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            if not self._runnable(conn, project_id, task_id):
+                return False
+            request = conn.execute(
+                text(
+                    "SELECT usage_status, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if request is None or request["usage_status"] != "reserved":
+                return False
+            detail = _detail(request["usage_detail"])
+            if detail.get("dispatch_state") not in {"dispatched", "permitted"}:
+                return False
+            detail["dispatch_state"] = "permitted"
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+            )
+        return True
+
+    def consume_dispatch_permit(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> bool:
+        """Flip a still-permitted call to sending. A committed stop makes this return false."""
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            if not self._runnable(conn, project_id, task_id):
+                return False
+            request = conn.execute(
+                text(
+                    "SELECT usage_status, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if request is None or request["usage_status"] != "reserved":
+                return False
+            detail = _detail(request["usage_detail"])
+            if detail.get("dispatch_state") != "permitted":
+                return False
+            detail["dispatch_state"] = "sending"
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                ),
+                {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+            )
+        return True
+
+    def revoke_unsent(self, *, owner_id: str, project_id: str, task_id: str) -> None:
+        """Release reservations that have not started a provider call."""
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().first()
+            if account is None:
+                return
+            rows = conn.execute(
+                text(
+                    "SELECT request_key, reserved_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().all()
+            for request in rows:
+                detail = _detail(request["usage_detail"])
+                if detail.get("dispatch_state") == "sending":
+                    continue
+                reserved_tokens = int(detail.get("reserved_tokens") or 0)
+                detail["dispatch_state"] = "cancelled_before_dispatch"
+                conn.execute(
+                    text(
+                        "UPDATE model_requests SET usage_status = 'cancelled_before_dispatch', actual_micro_usd = NULL, usage_detail = CAST(:detail AS jsonb) "
+                        "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+                    ),
+                    {
+                        "detail": json.dumps(detail),
+                        "project_id": project_id,
+                        "task_id": task_id,
+                        "request_key": request["request_key"],
+                    },
+                )
+                conn.execute(
+                    text(
+                        "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :amount, tokens_held = tokens_held - :tokens, version = version + 1 WHERE id = :id"
+                    ),
+                    {"amount": int(request["reserved_micro_usd"]), "tokens": reserved_tokens, "id": account["id"]},
+                )
+
     def prepare_model_call(
         self,
         *,

@@ -62,6 +62,21 @@ AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgr
 EXIT:0
 ```
 
+## Codex 跟进（PR #11 合入 `967b55f` 之后）
+
+- 多对象：没有主语的 `每分钟最多60次，每分钟最多90次` 不再通过甲/乙验收。测试 `test_subjectless_numbers_do_not_cover_two_objects`、`test_subjectless_multi_object_answer_is_not_success`。单一事实的「每分钟六十次」仍可通过。
+- 目标拆分：「服务端限额」不能因为和「客户端限额」共享「限额」就算有资料。测试 `test_shared_generic_word_does_not_support_a_second_object`、`test_shared_limit_word_does_not_cover_a_second_object`。
+- 工作流：`approve_goal` 排在 pause 前面时仍抽出 pause。测试 `test_pause_behind_a_non_control_command_still_stops_the_call`。
+- 线程池：`apply_task_control` 在活动池占满时仍走 `aether-control`。测试 `test_apply_task_control_uses_the_control_pool_when_activity_threads_are_full`。
+- 派发栅栏：`acquire_dispatch_permit` 之后、`consume_dispatch_permit` 之前若暂停已提交，就不再调用供应商。测试 `test_stop_after_the_dispatch_permit_does_not_call_the_provider`。
+- 到期未派发改为 `release_unsent`，断言在 `test_codex_zero_remaining_time_does_not_dispatch`。输出上限按剩余金额缩到 4，测试 `test_output_cap_shrinks_to_the_remaining_money`。
+
+```text
+AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 pytest -q tests/unit tests/integration
+347 passed, 1 warning in 266.29s
+EXIT:0
+```
+
 ## 缺口
 
 本机没有 live model key。不把 `live_task_check` 或 F26 标成失败。R5 合入前尚需监督者用真实 key 重跑：

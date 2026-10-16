@@ -464,6 +464,17 @@ def test_codex_zero_remaining_time_does_not_dispatch(client, role_urls, monkeypa
     result = materialize_goal_effect(endpoints, payload)
     assert state["calls"] == 0, result
     assert result["stop_reason"] == "budget_exhausted"
+    with database.transaction(owner_id=owner, project_id=project) as conn:
+        usage = conn.execute(
+            text("SELECT usage_status, actual_micro_usd FROM model_requests WHERE task_id = :task"),
+            {"task": payload["task_id"]},
+        ).one()
+        held = conn.execute(
+            text("SELECT held_micro_usd FROM budget_accounts WHERE task_id = :task"),
+            {"task": payload["task_id"]},
+        ).scalar_one()
+    assert usage == ("cancelled_before_dispatch", None)
+    assert held == 0
 
 
 def test_codex_missing_explicit_file_is_not_dispatched(client, role_urls, monkeypatch) -> None:
@@ -475,6 +486,37 @@ def test_codex_missing_explicit_file_is_not_dispatched(client, role_urls, monkey
     result = materialize_goal_effect(endpoints, payload)
     assert state["calls"] == 0, result
     assert result["status"] == "NEEDS_REVIEW"
+
+
+async def signal_after_the_provider_starts(*, address, endpoints, project, workflow_id, payload, state, queue, signals, timeout=30) -> None:
+    """Start one live task and deliver extra workflow signals once the provider call has begun."""
+    configure(endpoints)
+    temporal = await Client.connect(address)
+    async with Worker(
+        temporal,
+        task_queue=queue,
+        workflows=[DurableTaskWorkflow],
+        activities=[prepare_task, execute_task, apply_task_control],
+    ):
+        handle = await temporal.start_workflow(
+            DurableTaskWorkflow.run,
+            {"task_id": payload["task_id"], "intake_pause_seconds": 0},
+            id=str(workflow_id),
+            task_queue=queue,
+        )
+        await handle.signal(
+            DurableTaskWorkflow.command,
+            {"command_id": payload["command_id"], "project_id": project, "kind": "start"},
+        )
+        for _ in range(80):
+            if state["calls"] >= 1:
+                break
+            await asyncio.sleep(0.05)
+        assert state["calls"] >= 1
+        for signal in signals:
+            await handle.signal(DurableTaskWorkflow.command, signal)
+        await handle.signal(DurableTaskWorkflow.close)
+        await asyncio.wait_for(handle.result(), timeout=timeout)
 
 
 @pytest.mark.parametrize("kind", ["pause", "cancel"])
@@ -494,40 +536,18 @@ def test_codex_workflow_signal_during_the_call_blocks_success(client, role_urls,
             command_key=command_key,
             kind=kind,
         )
-    configure(endpoints)
-    queue = f"round4-signal-{uuid.uuid4()}"
-
-    async def run() -> None:
-        temporal = await Client.connect(address)
-        async with Worker(
-            temporal,
-            task_queue=queue,
-            workflows=[DurableTaskWorkflow],
-            activities=[prepare_task, execute_task, apply_task_control],
-        ):
-            handle = await temporal.start_workflow(
-                DurableTaskWorkflow.run,
-                {"task_id": payload["task_id"], "intake_pause_seconds": 0},
-                id=str(workflow_id),
-                task_queue=queue,
-            )
-            await handle.signal(
-                DurableTaskWorkflow.command,
-                {"command_id": payload["command_id"], "project_id": project, "kind": "start"},
-            )
-            for _ in range(80):
-                if state["calls"] >= 1:
-                    break
-                await asyncio.sleep(0.05)
-            assert state["calls"] >= 1
-            await handle.signal(
-                DurableTaskWorkflow.command,
-                {"command_id": command_key, "project_id": project, "kind": kind},
-            )
-            await handle.signal(DurableTaskWorkflow.close)
-            await asyncio.wait_for(handle.result(), timeout=30)
-
-    asyncio.run(run())
+    asyncio.run(
+        signal_after_the_provider_starts(
+            address=address,
+            endpoints=endpoints,
+            project=project,
+            workflow_id=workflow_id,
+            payload=payload,
+            state=state,
+            queue=f"round4-signal-{uuid.uuid4()}",
+            signals=[{"command_id": command_key, "project_id": project, "kind": kind}],
+        )
+    )
     with database.transaction(owner_id=owner, project_id=project) as conn:
         status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": payload["task_id"]}).scalar_one()
         recorded = conn.execute(
