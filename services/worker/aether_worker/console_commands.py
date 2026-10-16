@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from typing import Any
@@ -10,8 +11,9 @@ from sqlalchemy import bindparam, text
 from sqlalchemy.exc import OperationalError
 
 from aether_domain.security import sha256_text
+from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
-from aether_worker.skill_eval import SkillEvalError, rollback_active
+from aether_worker.skill_eval import REPORT_CLASSIFICATION, SkillEvalError, rollback_active
 
 _KINDS = (
     "source.create",
@@ -39,7 +41,10 @@ class ConsoleCommandError(Exception):
         self.code = code
 
 
-def apply_console_commands(database: Database, *, owner_id: str, project_id: str) -> list[str]:
+def apply_console_commands(
+    database: Database, *, owner_id: str, project_id: str, store: ArtifactStore | None = None
+) -> list[str]:
+    """Without a store, promotions fail closed because their evaluation report cannot be re-read."""
     applied: list[str] = []
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
         rows = conn.execute(
@@ -54,7 +59,7 @@ def apply_console_commands(database: Database, *, owner_id: str, project_id: str
             payload = row["payload"] if isinstance(row["payload"], dict) else json.loads(row["payload"])
             nested = conn.begin_nested()
             try:
-                _apply(conn, owner_id=owner_id, project_id=project_id, outbox_id=str(row["id"]), kind=str(row["kind"]), payload=payload)
+                _apply(conn, owner_id=owner_id, project_id=project_id, outbox_id=str(row["id"]), kind=str(row["kind"]), payload=payload, store=store)
                 nested.commit()
                 status = "DELIVERED"
             except OperationalError:
@@ -115,7 +120,9 @@ def apply_verifier_commands(database: Database, *, owner_id: str, project_id: st
     return applied
 
 
-def _apply(conn: Any, *, owner_id: str, project_id: str, outbox_id: str, kind: str, payload: dict[str, Any]) -> None:
+def _apply(
+    conn: Any, *, owner_id: str, project_id: str, outbox_id: str, kind: str, payload: dict[str, Any], store: ArtifactStore | None
+) -> None:
     if kind == "source.create":
         _source_create(conn, project_id, payload)
     elif kind == "source.patch":
@@ -129,7 +136,7 @@ def _apply(conn: Any, *, owner_id: str, project_id: str, outbox_id: str, kind: s
     elif kind == "skill.import":
         _skill_import(conn, project_id, payload)
     elif kind == "skill.deploy":
-        _skill_deploy(conn, owner_id, project_id, payload)
+        _skill_deploy(conn, owner_id, project_id, payload, store)
     elif kind == "watch.create":
         _watch_create(conn, project_id, payload)
     elif kind == "watch.patch":
@@ -301,7 +308,7 @@ def _skill_import(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
     )
 
 
-def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]) -> None:
+def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any], store: ArtifactStore | None) -> None:
     action = payload["action"]
     if action == "rollback":
         _rollback(conn, owner_id, project_id, payload)
@@ -310,7 +317,9 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
         raise ConsoleCommandError("deploy_rejected")
     evaluation = conn.execute(
         text(
-            "SELECT run.evaluator_identity, run.status, run.candidate_version_id::text AS candidate, report.sha256 AS report_sha256 "
+            "SELECT run.id::text AS id, run.evaluator_identity, run.status, run.candidate_version_id::text AS candidate, "
+            "run.configuration->>'report_sha256' AS recorded_sha256, report.id::text AS report_id, "
+            "report.sha256 AS report_sha256, report.deleted_at AS report_deleted_at "
             "FROM evaluation_runs AS run "
             "LEFT JOIN artifacts AS report ON report.project_id = run.project_id AND report.id = run.report_artifact_id "
             "WHERE run.project_id = :project_id AND run.id = :id"
@@ -326,14 +335,17 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
         or evaluation["evaluator_identity"] != "aether_verifier"
         or evaluation["status"] != "ELIGIBLE"
         or evaluation["candidate"] != str(payload["target_version_id"])
-        or (evaluation["report_sha256"] is not None and evaluation["report_sha256"] != payload["report_sha256"])
         or version is None
         or version["status"] != "ELIGIBLE"
     ):
         raise ConsoleCommandError("deploy_rejected")
+    _verify_evaluation_report(store, owner_id, project_id, evaluation, str(payload.get("report_sha256") or ""))
     _claim_promotion_approval(conn, owner_id, project_id, payload)
     current = conn.execute(
-        text("SELECT version_id::text AS version_id, deployment_version FROM skill_deployments WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary'"),
+        text(
+            "SELECT version_id::text AS version_id, deployment_version FROM skill_deployments "
+            "WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary' FOR UPDATE"
+        ),
         {"project_id": project_id, "skill_id": payload["skill_id"]},
     ).mappings().first()
     expected = payload.get("expected_previous_version_id")
@@ -358,9 +370,68 @@ def _skill_deploy(conn: Any, owner_id: str, project_id: str, payload: dict[str, 
             },
         )
         return
-    if str(current["deployment_version"]) != str(payload["expected_deployment_version"]) or (expected and current["version_id"] != expected):
+    if str(current["deployment_version"]) != str(payload["expected_deployment_version"]) or current["version_id"] != expected:
         raise ConsoleCommandError("version_conflict")
-    raise ConsoleCommandError("deploy_rejected")
+    replaced = conn.execute(
+        text(
+            "UPDATE skill_deployments SET version_id = :version_id, evaluation_id = :evaluation_id, approval_id = :approval_id, "
+            "deployment_version = deployment_version + 1 "
+            "WHERE project_id = :project_id AND skill_id = :skill_id AND slot = 'canary' AND deployment_version = :deployment_version"
+        ),
+        {
+            "version_id": payload["target_version_id"],
+            "evaluation_id": payload["evaluation_id"],
+            "approval_id": payload["approval_id"],
+            "project_id": project_id,
+            "skill_id": payload["skill_id"],
+            "deployment_version": current["deployment_version"],
+        },
+    ).rowcount
+    if replaced != 1:
+        raise ConsoleCommandError("version_conflict")
+    conn.execute(
+        text("UPDATE skill_versions SET status = 'ELIGIBLE' WHERE project_id = :project_id AND id = :id AND status = 'CANARY'"),
+        {"project_id": project_id, "id": current["version_id"]},
+    )
+    conn.execute(
+        text("UPDATE skill_versions SET status = 'CANARY' WHERE project_id = :project_id AND id = :id AND status = 'ELIGIBLE'"),
+        {"project_id": project_id, "id": payload["target_version_id"]},
+    )
+
+
+def _verify_evaluation_report(
+    store: ArtifactStore | None, owner_id: str, project_id: str, evaluation: Any, claimed_sha256: str
+) -> None:
+    """Fail closed unless the report the verifier recorded is present, unchanged, and about this evaluation.
+
+    The claimed hash must equal the hash the verifier wrote into the evaluation row, which no role can
+    update, and the artifact ledger row; the bytes are then re-read and re-hashed.
+    """
+    if (
+        store is None
+        or evaluation["report_id"] is None
+        or evaluation["report_deleted_at"] is not None
+        or not claimed_sha256
+        or claimed_sha256 != evaluation["recorded_sha256"]
+        or claimed_sha256 != evaluation["report_sha256"]
+    ):
+        raise ConsoleCommandError("report_rejected")
+    try:
+        data, media_type = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(evaluation["report_id"]))
+        report = json.loads(data)
+    except (ArtifactError, OSError, ValueError) as exc:
+        raise ConsoleCommandError("report_rejected") from exc
+    if (
+        hashlib.sha256(data).hexdigest() != claimed_sha256
+        or media_type != "application/json"
+        or not isinstance(report, dict)
+        or report.get("kind") != REPORT_CLASSIFICATION
+        or report.get("evaluation_id") != evaluation["id"]
+        or report.get("candidate_version_id") != evaluation["candidate"]
+        or report.get("status") != evaluation["status"]
+        or report.get("evaluator_identity") != evaluation["evaluator_identity"]
+    ):
+        raise ConsoleCommandError("report_rejected")
 
 
 def _promotion_digest(skill_id: str, version_id: str) -> str:
@@ -438,7 +509,8 @@ def _claim_promotion_approval(conn: Any, owner_id: str, project_id: str, payload
 
 
 def _rollback(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]) -> None:
-    """Rolling back only lowers exposure, so it needs no new approval; it must name the canary it reverses."""
+    """Rolling back needs no new approval, but it must name the canary it reverses and return to a version that
+    was deployed before: the active version, or one a confirmed promotion put on the canary slot."""
     current = conn.execute(
         text(
             "SELECT deployment.version_id::text AS version_id, deployment.deployment_version, "
@@ -465,6 +537,8 @@ def _rollback(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]
         or target not in {current["parent_version_id"], current["active_version_id"]}
     ):
         raise ConsoleCommandError("deploy_rejected")
+    if target != current["active_version_id"] and not _was_promoted(conn, project_id, str(payload["skill_id"]), target):
+        raise ConsoleCommandError("rollback_target_never_deployed")
     try:
         rollback_active(
             _ConnectionDatabase(conn),
@@ -475,6 +549,20 @@ def _rollback(conn: Any, owner_id: str, project_id: str, payload: dict[str, Any]
         )
     except SkillEvalError as exc:
         raise ConsoleCommandError(exc.code) from exc
+    conn.execute(
+        text("UPDATE skill_versions SET status = 'CANARY' WHERE project_id = :project_id AND id = :id AND status <> 'ACTIVE'"),
+        {"project_id": project_id, "id": target},
+    )
+
+
+def _was_promoted(conn: Any, project_id: str, skill_id: str, version_id: str) -> bool:
+    return conn.execute(
+        text(
+            "SELECT 1 FROM operations WHERE project_id = :project_id AND tool_id = 'skill.promote' AND state = 'CONFIRMED' "
+            "AND normalized_arguments->>'skill_id' = :skill_id AND normalized_arguments->>'version_id' = :version_id LIMIT 1"
+        ),
+        {"project_id": project_id, "skill_id": skill_id, "version_id": version_id},
+    ).first() is not None
 
 
 def _watch_create(conn: Any, project_id: str, payload: dict[str, Any]) -> None:
