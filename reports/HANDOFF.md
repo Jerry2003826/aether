@@ -10,7 +10,7 @@
 | P2-08 | `tests/integration/test_round1_p2_08_bootstrap_passwords.py`（2） | 1 failed | 全过 |
 | P1-08 | `tests/integration/test_round1_p1_08_migration_drift.py`（3） | 全部 failed | 全过 |
 | P2-04 | `tests/integration/test_round1_p2_04_skill_lifecycle.py`（5） | 4 failed | 全过 |
-| P1-09 | `tests/integration/test_round1_p1_09_backup_restore.py`（4） | 4 failed | 全过 |
+| P1-09 | `tests/integration/test_round1_p1_09_backup_restore.py`（8） | 4 failed；审查补的 4 条 4 failed | 全过 |
 | P1-07 | `tests/integration/test_round1_p1_07_history_replay.py`（8） | NondeterminismError | 全过 |
 
 rebase 时的处理：
@@ -18,21 +18,35 @@ rebase 时的处理：
 - 迁移改号为 `0013_runtime_patches`（down_revision `0012`），建库脚本 head 记 `0013`，`0012` 进入可升级旧标记。P1-08 增加「已在 `0012` 的库升级到 head」一例，原「已在 `0011`」一例保留。
 - `durable_workflow.py` 保留 A 的 `bounded-activity-retry`（重试上限、心跳、`ArtifactError` 不重试），改为实例方法，补丁为真时同时证明是新版本。没有这一点，80f1d39 启动、start 与 pause 同时排队的历史在 prepare 之后会被当成首个版本回放，报 NondeterminismError（已用去掉该行的代码验证）。新增 80f1d39 的两份录制历史。
 - `console_commands.py` 自动合并，A 的异常处理不变，晋升闸门在其上。
+
+PR 标为 ready 后 Codex 在 `b87e6b9` 上提了 5 条 P1（没有 Critical）。已修 3 条，均先补失败用例再修：
+
+- 恢复把被更正（superseded）的记忆改回可用：`memories.epistemic_status` 保留当前值。用例 `test_restore_does_not_revive_a_memory_corrected_after_the_backup`。
+- 恢复把退役的索引代改回 ACTIVE，撞 `one_active_lexical_generation_per_project` 使整个恢复中止：`index_generations.state/activated_at` 保留当前值。用例 `test_restore_keeps_the_index_generation_activated_after_the_backup`。同类问题一起修：产物与任务产物的 `classification` 也保留当前值，否则记忆 claim 会变回可当资料的 `project_private`（用例 `test_restore_keeps_a_classification_decided_after_the_backup`）。
+- 产物逐个替换中途失败会留下一半，且数据库已提交：改为先在同级暂存目录合并完整，数据库事务提交前才整体换入。用例 `test_a_restore_that_cannot_stage_every_file_changes_nothing`。
+
+**待所有者决定（停在这里，没有改验收条件）**，详见 ADR-F27 的 P2-04 段：
+
+1. 修复计划要求 `skill.evaluate` 在执行器接上前返回「未实现」，但 `test_console_api` 断言 202 + QUEUED。
+2. Codex P1「回滚目标限于曾部署过的版本」：审计验收用例 `test_owner_can_roll_a_canary_back_through_the_api` 要求回滚到从未部署、仍是 QUARANTINED 的父版本 v1 成功。收紧会让这条验收用例失败。
+3. Codex P1「晋升必须有不可变的评测报告」：同一验收用例用不写报告的 `record_evaluation` 和任意 `report_sha256` 晋升并要求成功。收紧需要 verifier 写报告产物，并改这条验收用例传真实哈希。
+
+2、3 若批准收紧，需要同时批准修改该验收用例（先让 v1 经过部署、评测带报告产物）。
 - B 没有改工作流和迁移，bbf2811 的工作流与 80f1d39 相同，不需要新的回放历史。B 的 `docs/06_security.md` 改动与本组的 SSRF/MCP 段落自动合并。
 
-全量回归（head `0aef9e4`，本机 Postgres 17 + Temporal dev server）：
+全量回归（head `4c38026`，本机 Postgres 17 + Temporal dev server）：
 
 ```text
 export AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233
 uv run --locked --no-build python scripts/verify_freeze.py                         # exit 0
 uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'     # Ran 76 tests, OK
 uv run --locked --no-build pytest -q tests/unit                                   # 129 passed
-PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 314 passed
+PATH=.hermes/.venv/bin:$PATH uv run --locked --no-build pytest -q tests/integration  # 318 passed
 uv run --locked --no-build python scripts/doctor.py --require-services             # exit 0
 (cd apps/web && pnpm typecheck)                                                    # exit 0
 ```
 
-合计 443 = main 的 400 + 本分支 43。PR #13 的 `repro/`（main 未收录，临时放回跑）：46 passed、1 failed；`test_p1_02_unbounded_retry` 用 main 自己的工作流也同样失败，因为它借用的 P1-01 触发条件已被 A 修掉，任务直接 SUCCEEDED，A 的 P1-02 测试在 `tests/` 里通过。
+合计 447 = main 的 400 + 本分支 47。同一 head 上第一次全量里 `test_hermes_compare_protocol::test_pinned_hermes_identity_and_local_protocol` 报 commit 为 None（身份探测子进程超时或失败时的返回值），单独重跑通过，integration 全量重跑 318 全过；本分支没有改 Hermes 相关代码。PR #13 的 `repro/`（main 未收录，临时放回跑）：46 passed、1 failed；`test_p1_02_unbounded_retry` 用 main 自己的工作流也同样失败，因为它借用的 P1-01 触发条件已被 A 修掉，任务直接 SUCCEEDED，A 的 P1-02 测试在 `tests/` 里通过。
 
 SonarCloud：PR 之前那次失败是 abe0f5c 的新代码重复率 22.2%，来源是三份整段复制的旧版工作流代码夹具；1ba72d5 起换成录制的 JSON 事件历史，重复率 0.0%，质量门通过，没有加排除或抑制。
 
