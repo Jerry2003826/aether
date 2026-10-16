@@ -23,7 +23,7 @@
     "(cd apps/web && pnpm typecheck)",
     "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build python scripts/doctor.py --require-services"
   ],
-  "last_test_result": "Local on 2026-10-16 after the PR review follow-ups. verify_freeze passed with api_operations 50. unittest 76 OK. unit 244 passed in 105.56s. integration 358 passed, 1 warning in 330.18s with Playwright Chromium and pinned Hermes on PATH. doctor --require-services exit 0. reports/doctor.json local probe was not committed. web typecheck exit 0 on Node 22.14.0; CI uses Node 24. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after the PR review follow-ups. verify_freeze passed with api_operations 50. unittest 76 OK. unit 244 passed in 105.56s. integration 358 passed, 1 warning in 330.18s with Playwright Chromium and pinned Hermes on PATH. doctor --require-services exit 0. reports/doctor.json local probe was not committed. web typecheck exit 0 on Node 22.14.0; CI uses Node 24. SonarCloud on 9aa001c rated new-code reliability C because container_name was compared with itself. That assertion now expects aether-code-6f1c1a2e7b344c2a9d10111111111111, and tests/unit/test_coding_job_lease.py is 2 passed. The full unit and integration suites were not rerun for that line. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

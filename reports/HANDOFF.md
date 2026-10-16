@@ -135,7 +135,9 @@ uv run --locked --no-build python scripts/doctor.py --require-services
 
 做不到：沙箱里没有 OpenHands，也没有作业范围的模型网关。没有新增编码作业 GET。持有 worker 数据库口令的人仍可以伪造账本。`live_ready` 仍要所有者重跑 live F26。
 
-下一步：同一 PR 保持 ready，不合并。等 CI（pack-and-unit、integration、SonarCloud）全绿。若失败或出现新的审查意见，修到全绿再收口。
+`9aa001c` 的 SonarCloud 质量门只有新代码可靠性评级失败（实际 C，要求 A）。唯一的 BUG 是 `test_stop_uses_a_ten_second_grace_and_checks_the_job_label` 把 `container_name(job_id)` 和同一次调用比较。该断言改为期望名 `aether-code-6f1c1a2e7b344c2a9d10111111111111`。`uv run --locked --no-build pytest -q tests/unit/test_coding_job_lease.py` 为 2 passed。安全、可维护性、重复率和热点审查当时已是 OK。全量单元和集成没有为这一行再跑。
+
+下一步：同一 PR 保持 ready，不合并。等这一提交的 CI（pack-and-unit、integration、SonarCloud）全绿。若失败或出现新的审查意见，修到全绿再收口。
 
 ## P2-09 公开采集、工具账本、检索可见性与只读推荐（已合入 main，ADR-F34）
 

@@ -11,7 +11,7 @@ from aether_worker.coding_sandbox import CANCEL_GRACE_SECONDS, container_argumen
 def test_stop_uses_a_ten_second_grace_and_checks_the_job_label(tmp_path) -> None:
     job_id = "6f1c1a2e-7b34-4c2a-9d10-111111111111"
     assert CANCEL_GRACE_SECONDS == 10
-    assert container_name(job_id) == container_name(job_id)
+    assert container_name(job_id) == "aether-code-6f1c1a2e7b344c2a9d10111111111111"
     assert container_name(job_id) != container_name("6f1c1a2e-7b34-4c2a-9d10-222222222222")
     commands = stop_arguments(job_id)
     flat = [part for command in commands for part in command]
