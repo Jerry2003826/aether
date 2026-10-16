@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-16",
   "artifact_type": "core_done_live_pending",
-  "current_task": "P2-09 credential boundary ADR-F40",
+  "current_task": "R8-A ingest libraries ADR-F41",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,16 +14,22 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Coding jobs stay ADR-F36, cancel and TTL stay ADR-F37, and the review follow-ups stay ADR-F38. Ingest boundaries stay ADR-F39. Credential separation, the digest image, artifact recovery, and the crash drill are ADR-F40 on top of b75fb36. Local unit and integration passed. CI for this rebase is not recorded here.",
+  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing, splitting, and fetch retry are ADR-F41. The Codex P1 corrections (invalid markdown YAML, non-finite Retry-After, tokenizer mismatch, shared redirect retry budget, UTF-16 entity rejection) are in d215ebc. That commit's pack-and-unit, integration, and SonarCloud checks passed. A fresh @codex review was refused because the connector requires a connected Codex account, so the previous review of 716af7c is still the latest and its findings are still marked unresolved. Local Postgres, Temporal, and Docker were absent, so the full integration suite ran only in CI.",
   "last_executed_commands": [
+    "uv lock",
+    "uv sync --locked --no-build",
+    "uv run --locked --no-build python scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
-    "uv run --locked --no-build pytest -q tests/unit",
-    "AETHER_REQUIRE_SERVICES=1 AETHER_ADMIN_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/postgres AETHER_TEMPORAL_ADDRESS=127.0.0.1:7233 uv run --locked --no-build pytest -q tests/integration",
-    "(cd apps/web && pnpm typecheck)",
-    "AETHER_REQUIRE_SERVICES=1 uv run --locked --no-build python scripts/doctor.py --require-services"
+    "uv run --locked --no-build pytest -q tests/unit tests/integration/test_ingest.py",
+    "uv run --locked --no-build playwright install chromium",
+    "uv run --locked --no-build pytest -q tests/integration/test_ingest.py::test_playwright_profile_renders_javascript tests/integration/test_ingest.py::test_rss_parser_is_isolated_and_rejects_entities tests/integration/test_ingest.py::test_offsets_cover_cjk_emoji_and_newlines tests/unit/test_r8a_libraries.py",
+    "uv run --locked --no-build python scripts/rebuild_spec.py",
+    "uv run --locked --no-build python scripts/verify_freeze.py",
+    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
+    "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-16 after rebasing onto origin/main b75fb36. verify_freeze passed with api_operations 50. unittest 76 OK. unit 277 passed in 105.49s. integration 382 passed, 1 warning in 547.92s with Playwright Chromium and pinned Hermes on PATH. web typecheck exit 0 on Node 22.14.0; CI uses Node 24. doctor --require-services exit 0 and reports/doctor.json was not committed. live_ready stays pending. CI for this commit is not recorded in this file.",
+  "last_test_result": "Local on 2026-10-16 from a2b9313 on cursor/r8-a-ingest-libraries-47e9 after the Codex P1 corrections. verify_freeze passed with api_operations 50. unittest 76 OK. pytest tests/unit: 297 passed. Earlier on the same branch, pytest tests/unit plus tests/integration/test_ingest.py was 294 passed, 1 skipped, 1 failed. The skip is test_fixture_download_is_real_and_parser_stays_static because AETHER_ADMIN_DATABASE_URL is unset. The failure was test_playwright_profile_renders_javascript before Chromium was installed; after playwright install chromium that test passed. The full integration suite was not run locally. d215ebc CI passed pack-and-unit, integration, and SonarCloud (runs 38939914317 and 38939904243). Sonar quality gate passed with 4 new issues. Codex did not review d215ebc. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",

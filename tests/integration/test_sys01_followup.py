@@ -9,7 +9,6 @@ import threading
 import time
 import uuid
 import zipfile
-import zlib
 from collections.abc import Iterator
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -303,19 +302,14 @@ def test_local_document_indexes_the_uploaded_artifact(role_urls, clean_db, tmp_p
         assert all(SECRET not in hit["text"] for hit in leaked.json()["hits"])
 
 
-def _text_pdf(shown: str) -> bytes:
-    content = zlib.compress(f"BT ({shown}) Tj ET".encode())
-    stream = f"<< /Filter /FlateDecode /Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
-    return b"%PDF-1.4\n1 0 obj\n" + stream + b"\nendobj\n%%EOF"
-
-
 def test_text_pdf_is_indexed_as_extracted_text(role_urls, clean_db, tmp_path: Path) -> None:
+    shown = (ROOT / "tests" / "fixtures" / "r8a" / "bake.pdf").read_bytes()
     with _services(role_urls, tmp_path, "pdf") as running:
         running.bootstrap("pdf-project", "文本")
         uploaded = running.http.post(
             f"/v1/projects/{running.project_id}/artifacts",
             headers=_headers(running.csrf, "pdf-upload"),
-            files={"file": ("note.pdf", _text_pdf("苹果派烘烤说明"), "application/pdf")},
+            files={"file": ("note.pdf", shown, "application/pdf")},
         )
         assert uploaded.status_code == 201, uploaded.text
         assert uploaded.json()["media_type"] == "application/pdf"
@@ -365,7 +359,7 @@ def test_fetch_failures_reach_a_terminal_state(role_urls, clean_db, tmp_path: Pa
         )
         for key, locator in cases:
             source_id = running.create_source(f"fetch-{key}", "url", locator, ["127.0.0.1"])
-            job = running.ingest(f"fetch-{key}-ingest", source_id, timeout=25)
+            job = running.ingest(f"fetch-{key}-ingest", source_id, timeout=45)
             assert job["status"] == "FAILED", job
             assert job["error_code"] == "fetch_failed", job
             time.sleep(0.8)

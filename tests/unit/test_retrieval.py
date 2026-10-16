@@ -1,4 +1,6 @@
+import hashlib
 import json
+from contextlib import nullcontext
 
 import bm25s
 import pytest
@@ -12,9 +14,11 @@ from aether_worker.retrieval import (
     _lexical_ids,
     encode_texts,
     group_metrics,
+    require_tokenizer_version,
     rrf,
+    search,
 )
-from aether_worker.tokenize import tokenize
+from aether_worker.tokenize import TOKENIZER_VERSION, tokenize
 
 
 def test_tokenizer_keeps_negation_and_code_symbols() -> None:
@@ -89,6 +93,88 @@ def test_cache_miss_does_not_invent_a_vector(monkeypatch) -> None:
     with pytest.raises(RetrievalError) as rejected:
         encode_texts(["this sentence is not in the measured table"])
     assert rejected.value.code == "encode_failed"
+
+
+_OLD_TOKENIZER = "jieba-0.42.1-dict-forward-max+code-symbols"
+
+
+class _Database:
+    def transaction(self, **_kwargs: object) -> object:
+        return nullcontext(object())
+
+
+def _generation(**overrides: object) -> dict[str, object]:
+    row: dict[str, object] = {
+        "id": "gen-1",
+        "generation_key": "g1",
+        "state": "ACTIVE",
+        "manifest_sha256": "unused",
+        "tokenizer_version": TOKENIZER_VERSION,
+    }
+    row.update(overrides)
+    return row
+
+
+def _patch_generation(monkeypatch: pytest.MonkeyPatch, row: dict[str, object]) -> None:
+    monkeypatch.setattr("aether_worker.retrieval.current_epoch", lambda *_args, **_kwargs: 1)
+    monkeypatch.setattr("aether_worker.retrieval._load_generation", lambda *_args, **_kwargs: row)
+
+
+def test_require_tokenizer_version_rejects_the_previous_cut() -> None:
+    assert TOKENIZER_VERSION != _OLD_TOKENIZER
+    require_tokenizer_version(TOKENIZER_VERSION)
+    with pytest.raises(RetrievalError) as rejected:
+        require_tokenizer_version(_OLD_TOKENIZER)
+    assert rejected.value.code == "tokenizer_mismatch"
+
+
+def test_active_generation_with_old_tokenizer_is_refused_before_cache(tmp_path, monkeypatch) -> None:
+    _patch_generation(monkeypatch, _generation(tokenizer_version=_OLD_TOKENIZER))
+
+    def cached(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise AssertionError("cache")
+
+    monkeypatch.setattr("aether_worker.retrieval.read_cached_result", cached)
+    with pytest.raises(RetrievalError) as rejected:
+        search(_Database(), owner_id="owner", project_id="project", query="苹果派", index_root=tmp_path, mode="lexical")
+    assert rejected.value.code == "tokenizer_mismatch"
+
+
+def test_active_manifest_with_old_tokenizer_is_refused_before_bm25(tmp_path, monkeypatch) -> None:
+    manifest = {
+        "b": 0.75,
+        "chunk_ids": ["chunk-1"],
+        "embedding_revision": EMBEDDING_REVISION,
+        "k1": 1.2,
+        "method": "lucene",
+        "tokenizer_version": _OLD_TOKENIZER,
+    }
+    raw = json.dumps(manifest, ensure_ascii=False, sort_keys=True).encode()
+    directory = tmp_path / "g1"
+    directory.mkdir()
+    (directory / "manifest.json").write_bytes(raw)
+    _patch_generation(monkeypatch, _generation(manifest_sha256=hashlib.sha256(raw).hexdigest()))
+    monkeypatch.setattr("aether_worker.retrieval.read_cached_result", lambda *_args, **_kwargs: None)
+
+    def lexical(*_args: object, **_kwargs: object) -> list[str]:
+        raise AssertionError("bm25")
+
+    monkeypatch.setattr("aether_worker.retrieval._bounded_lexical", lexical)
+    with pytest.raises(RetrievalError) as rejected:
+        search(_Database(), owner_id="owner", project_id="project", query="苹果派", index_root=tmp_path, mode="lexical")
+    assert rejected.value.code == "tokenizer_mismatch"
+
+
+def test_inactive_generation_does_not_search_with_the_old_tokenizer(tmp_path, monkeypatch) -> None:
+    _patch_generation(monkeypatch, _generation(state="READY", tokenizer_version=_OLD_TOKENIZER))
+
+    def cached(*_args: object, **_kwargs: object) -> dict[str, str]:
+        raise AssertionError("cache")
+
+    monkeypatch.setattr("aether_worker.retrieval.read_cached_result", cached)
+    result = search(_Database(), owner_id="owner", project_id="project", query="苹果派", index_root=tmp_path, mode="lexical")
+    assert result["stale"] is True
+    assert result["state"] == "READY"
 
 
 def test_live_payload_with_the_wrong_revision_is_rejected(monkeypatch) -> None:

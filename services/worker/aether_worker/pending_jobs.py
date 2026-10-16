@@ -16,6 +16,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.db import Database
 from aether_worker.document_text import document_text
+from aether_worker.html_text import page_text
 from aether_worker.ingest import TEXT_MEDIA, IngestError, attach_text_version, fetch_url, parse_rss_items
 from aether_worker.remote_sources import arxiv_text, fetch_arxiv, fetch_github, github_text
 from aether_worker.retrieval import RetrievalError, activate_generation, build_generation
@@ -145,7 +146,10 @@ def _read_body(
         raw, media_type = _artifact_bytes(store, owner_id=owner_id, project_id=project_id, locator=locator)
         return raw, document_text(raw, media_type), media_type
     domains = _allowed_domains(source)
-    if kind in {"url", "rss"}:
+    if kind == "url":
+        raw = fetch_url(locator, allowed_domains=domains)
+        return raw, page_text(raw), TEXT_MEDIA
+    if kind == "rss":
         raw, text_value = _decoded(_remote_bytes(kind, locator, domains))
         return raw, text_value, TEXT_MEDIA
     if kind == "github_api":

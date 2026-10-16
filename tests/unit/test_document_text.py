@@ -1,5 +1,5 @@
 import uuid
-import zlib
+from pathlib import Path
 
 import pytest
 
@@ -7,24 +7,20 @@ from aether_worker.document_text import document_text
 from aether_worker.ingest import IngestError
 from aether_worker.pending_jobs import _read_body
 
+_FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "r8a"
 
-def _pdf(shown: bytes, *, flate: bool) -> bytes:
-    content = b"BT (" + shown + b") Tj ET"
-    header = ""
-    if flate:
-        content = zlib.compress(content)
-        header = "/Filter /FlateDecode "
-    stream = f"<< {header}/Length {len(content)} >>\nstream\n".encode() + content + b"\nendstream"
-    return b"%PDF-1.4\n1 0 obj\n" + stream + b"\nendobj\n%%EOF"
+
+def _fixture(name: str) -> bytes:
+    return (_FIXTURES / name).read_bytes()
 
 
 def test_text_pdf_extracts_shown_text_and_ignores_the_container() -> None:
-    plain = _pdf("苹果派".encode(), flate=False)
-    packed = _pdf("苹果派".encode(), flate=True)
+    plain = _fixture("apple.pdf")
+    packed = _fixture("apple-flate.pdf")
     assert document_text(plain, "application/pdf") == "苹果派"
     assert document_text(packed, "application/pdf") == "苹果派"
     assert "%PDF" not in document_text(plain, "application/pdf")
-    escaped = _pdf(br"a\(b\) \101", flate=False)
+    escaped = _fixture("escaped.pdf")
     assert document_text(escaped, "application/pdf") == "a(b) A"
 
 
@@ -39,7 +35,7 @@ def test_markdown_decodes_and_non_text_media_is_rejected() -> None:
 
 
 def test_local_document_uses_the_artifact_media_type() -> None:
-    payload = _pdf("苹果派".encode(), flate=True)
+    payload = _fixture("apple-flate.pdf")
 
     class _Store:
         def get(self, **_kwargs):

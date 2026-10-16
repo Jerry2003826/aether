@@ -1,5 +1,59 @@
 # 交接
 
+## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
+
+`b40ce32` 的 CI 已绿：`pack-and-unit`、`integration`、SonarCloud（workflow `38937123243` 与 `38937117126`）。随后按 PR #30 的 Codex P1 收紧，没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
+
+- 非法 YAML 的 markdown frontmatter 变成 `IngestError("parse_rejected")`。证明：`test_invalid_markdown_yaml_is_parse_rejected`。
+- Retry-After 的 NaN、无穷不是有限数，改走指数退避。证明：`test_retry_after_rejects_non_finite_values`。
+- ACTIVE 索引的行和 manifest 必须等于当前 `TOKENIZER_VERSION`，否则 `tokenizer_mismatch`，且发生在读缓存和 BM25 之前。search 不重建。证明：`test_require_tokenizer_version_rejects_the_previous_cut`、`test_active_generation_with_old_tokenizer_is_refused_before_cache`、`test_active_manifest_with_old_tokenizer_is_refused_before_bm25`。
+- 重定向链共用一次 tenacity 预算。两跳之后传输失败，起点、中跳和失败目标各 3 次，不是 27 次。证明：`test_redirect_chain_shares_one_retry_budget`。`test_ssrf_does_not_connect_to_loopback_or_follow_redirect` 仍要求重定向前 opener 只调用 1 次。
+- RSS 先按 UTF-8、UTF-16（含 BOM、UTF-16LE 声明、UTF-16BE BOM）和 UTF-32 解码，再拒绝 `<!DOCTYPE` / `<!ENTITY`，并且在 `feedparser.parse` 之前。证明：`test_utf16_entity_declarations_are_rejected_before_feedparser`。`test_rss_parser_is_isolated_and_rejects_entities` 仍要求 UTF-8 billion laughs 为 `parse_rejected`。
+- 网页跳过 BOM、XML 声明和已闭合注释后再交给 trafilatura。未闭合注释仍是纯文本。证明：`test_html_preamble_still_uses_trafilatura`。
+- 技能 metadata 只读到第二个 `---`。证明：`test_metadata_reads_only_the_frontmatter_fence`。
+
+本机没有 PostgreSQL、Temporal 和 Docker。全套集成测试没有在本机跑。这次本地：`verify_freeze` 通过（`api_operations` 50），参考套件 76 OK，`pytest tests/unit` 297 passed。
+
+提交 `d215ebc` 的 CI 已通过：`pack-and-unit`、`integration`、SonarCloud。workflow：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38939914317
+- https://github.com/Jerry2003826/aether/actions/runs/38939904243
+
+质量门通过，Sonar 仍报 4 个新 issue，没有挡住合并检查。用 `@codex review` 请求复审时，连接器回复需要 Codex 账号连接 GitHub，没有产生针对 `d215ebc` 的新审查。上一次 Codex 审查仍停在 `716af7c`，摘要里的 findings 仍是 unresolved。其中 frontmatter、Retry-After、HTML 注释、技能正文和 RSS 编码五条评论在新 diff 上已过期；分词版本和重试装饰器两条仍锚在未改动的行上，对应行为已分别改到 `retrieval.py` 和 `_fetch_once`。`live_ready` 仍是 pending。
+
+## R8-A 采集解析换成固定版本的开源库（分支 `cursor/r8-a-ingest-libraries-47e9`）
+
+基线是 `origin/main` 的 `a2b9313`。ADR-F40 仍是已合并的最后一条，本决定记为 ADR-F41。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed。SSRF、钉住 IP、产物账本、outbox、幂等和 fencing 仍是手写。
+
+替换：feedparser 6.0.14、trafilatura 2.3.1、docling-slim 2.140.0（`format-pdf` 与 `format-office`，不用完整 docling）、jieba 0.42.1、python-frontmatter 1.3.0、httpx（采集传输原本已是 httpx）、langchain-text-splitters 1.1.3 的 `CharacterTextSplitter`、tenacity 9.2.1。jieba 只有 sdist，wheel 在 `third_party/wheels/jieba-0.42.1-py3-none-any.whl`。`CHUNKER_VERSION` 仍是 `codepoint-1`，`PARSER_VERSION` 仍是 `text-1`。`TOKENIZER_VERSION` 改为 `jieba-0.42.1-cut+code-symbols`。
+
+本机没有 PostgreSQL、Temporal 和 Docker。`tests/integration` 全套没有在本机跑。`test_fixture_download_is_real_and_parser_stays_static` 因没有数据库被 skip。直接对本地 `/slow` 调用 `fetch_url`：`ReadTimeout`，3 次尝试，15.65 秒。抓取失败集成测试的等待改为 45 秒，断言仍是 `FAILED` 与 `fetch_failed`。
+
+PR https://github.com/Jerry2003826/aether/pull/30 的 CI 已通过：`pack-and-unit`、`integration`、SonarCloud。两次 workflow 都是 success：
+
+- https://github.com/Jerry2003826/aether/actions/runs/38934988113
+- https://github.com/Jerry2003826/aether/actions/runs/38935020559
+- SonarCloud：https://sonarcloud.io/dashboard?id=Jerry2003826_aether&pullRequest=30
+
+`live_ready` 仍是 pending。
+
+```text
+uv lock
+uv sync --locked --no-build
+uv run --locked --no-build python scripts/rebuild_spec.py
+uv run --locked --no-build python scripts/verify_freeze.py
+# exit 0，api_operations 50
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+# Ran 76 tests in 0.797s, OK
+uv run --locked --no-build pytest -q tests/unit tests/integration/test_ingest.py
+# 294 passed，1 skipped，1 failed
+# skipped: test_fixture_download_is_real_and_parser_stays_static（没有 AETHER_ADMIN_DATABASE_URL）
+# failed: test_playwright_profile_renders_javascript（当时没有 Chromium）
+uv run --locked --no-build playwright install chromium
+uv run --locked --no-build pytest -q tests/integration/test_ingest.py::test_playwright_profile_renders_javascript tests/integration/test_ingest.py::test_rss_parser_is_isolated_and_rejects_entities tests/integration/test_ingest.py::test_offsets_cover_cjk_emoji_and_newlines tests/unit/test_r8a_libraries.py
+# 13 passed
+```
+
 ## R7 凭证分离、镜像摘要、产物恢复与崩溃演练（分支 `cursor/r7-cred-sandbox-recover-0956`）
 
 基线已变基到 `origin/main` 的 `b75fb36`（PR #25 已合入）。ADR-F34 是公开采集，ADR-F35 是复核出口，ADR-F36、ADR-F37、ADR-F38 是编码作业、取消回收和审查收紧，ADR-F39 是采集域名、抓取终态和跟踪批准。本路凭证、镜像、产物和崩溃演练改记 ADR-F40。没有改 `contracts/`、`reference/`，没有改 F26 结果文件字节，没有把 `readiness.live_ready` 改成 passed。`f26.live_ready` 仍是 false。`service.py` 同时保留 `dispatch_approved_tools`、`execute_queued_coding_jobs`、`execute_queued_ingestions` 和 `launch_privileged_roles`。`goal_effect.py` 同时保留所有者批准和凭证拆分。编码作业的 `JOB_IMAGE` 改为与沙箱相同的 digest，取代 ADR-F36 正文里的 `python:3.12-alpine`。显式传入 `python:3.12-alpine` 的编码测试参数没有改。

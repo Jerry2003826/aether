@@ -30,6 +30,45 @@ def _package(root: Path) -> None:
     )
 
 
+def test_metadata_reads_only_the_frontmatter_fence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _package(tmp_path)
+    seen: list[str] = []
+    original = Path.open
+
+    class _Bounded:
+        def __init__(self, handle: object) -> None:
+            self._handle = handle
+
+        def readline(self, *args: object, **kwargs: object) -> str:
+            line = self._handle.readline(*args, **kwargs)  # type: ignore[attr-defined]
+            seen.append(line)
+            return line
+
+        def read(self, *args: object, **kwargs: object) -> str:
+            body = self._handle.read(*args, **kwargs)  # type: ignore[attr-defined]
+            seen.append(body)
+            return body
+
+        def __enter__(self):
+            self._handle.__enter__()  # type: ignore[attr-defined]
+            return self
+
+        def __exit__(self, *args: object) -> object:
+            return self._handle.__exit__(*args)  # type: ignore[attr-defined]
+
+    def spy(self: Path, *args: object, **kwargs: object):
+        handle = original(self, *args, **kwargs)
+        if self.name != "SKILL.md":
+            return handle
+        return _Bounded(handle)
+
+    monkeypatch.setattr(Path, "open", spy)
+    meta = load_metadata(tmp_path)
+    assert meta["name"] == "check-lock"
+    assert "BODY_SECRET" not in "".join(seen)
+    assert "BODY_SECRET" in load_body(tmp_path)
+
+
 def test_metadata_body_and_resources_load_on_demand(tmp_path: Path) -> None:
     _package(tmp_path)
     meta = load_metadata(tmp_path)

@@ -417,11 +417,17 @@ def activate_generation(database: Database, *, owner_id: str, project_id: str, g
         raise RetrievalError("activation_rejected")
 
 
+def require_tokenizer_version(recorded: object) -> None:
+    """An ACTIVE generation built by another tokenizer must not answer a query."""
+    if recorded != TOKENIZER_VERSION:
+        raise RetrievalError("tokenizer_mismatch")
+
+
 def _load_generation(conn: Any, project_id: str, generation_id: str | None) -> dict[str, Any] | None:
     if generation_id is None:
         row = conn.execute(
             text(
-                "SELECT id::text AS id, generation_key, state, manifest_sha256 FROM index_generations "
+                "SELECT id::text AS id, generation_key, state, manifest_sha256, tokenizer_version FROM index_generations "
                 "WHERE project_id = :project_id AND state = 'ACTIVE'"
             ),
             {"project_id": project_id},
@@ -429,7 +435,7 @@ def _load_generation(conn: Any, project_id: str, generation_id: str | None) -> d
     else:
         row = conn.execute(
             text(
-                "SELECT id::text AS id, generation_key, state, manifest_sha256 FROM index_generations "
+                "SELECT id::text AS id, generation_key, state, manifest_sha256, tokenizer_version FROM index_generations "
                 "WHERE project_id = :project_id AND id = :id"
             ),
             {"project_id": project_id, "id": generation_id},
@@ -600,6 +606,7 @@ def search(
             result = _empty(True, state=generation["state"])
             result["query"] = query
             return result
+        require_tokenizer_version(generation.get("tokenizer_version"))
         cached = read_cached_result(conn, project_id, cache_key, generation_id=str(generation["id"]))
         if cached is not None:
             return cached
@@ -613,6 +620,7 @@ def search(
         manifest = json.loads(raw)
         if manifest.get("embedding_revision") != EMBEDDING_REVISION:
             raise RetrievalError("revision_mismatch")
+        require_tokenizer_version(manifest.get("tokenizer_version"))
         visible = _visible(conn, project_id)
         selected = visible
         if chosen_sources is not None:

@@ -8,6 +8,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+import frontmatter
 import yaml
 
 from aether_worker.runner import JOB_IMAGE, _docker, _ensure_image, docker_available
@@ -33,18 +34,34 @@ def _skill_file(root: Path) -> Path:
     return path
 
 
-def _frontmatter(root: Path) -> dict[str, Any]:
-    header: list[str] = []
+def _frontmatter_only(root: Path) -> str:
+    """Read through the closing fence. The instruction body stays on disk."""
     with _skill_file(root).open(encoding="utf-8") as handle:
-        if handle.readline().strip() != "---":
+        first = handle.readline()
+        if first.strip() != "---":
             raise SkillError("frontmatter_missing")
-        for line in handle:
+        lines = [first]
+        while True:
+            line = handle.readline()
+            if line == "":
+                raise SkillError("frontmatter_missing")
+            lines.append(line)
             if line.strip() == "---":
-                break
-            header.append(line)
-        else:
-            raise SkillError("frontmatter_missing")
-    loaded = yaml.safe_load("".join(header)) or {}
+                return "".join(lines)
+
+
+def _loads(text: str) -> frontmatter.Post:
+    try:
+        post = frontmatter.loads(text)
+    except yaml.YAMLError as exc:
+        raise SkillError("metadata_invalid") from exc
+    if not post.metadata:
+        raise SkillError("frontmatter_missing")
+    return post
+
+
+def _frontmatter(root: Path) -> dict[str, Any]:
+    loaded = _loads(_frontmatter_only(root)).metadata
     if not isinstance(loaded, dict) or not loaded.get("name") or not loaded.get("description"):
         raise SkillError("metadata_invalid")
     return {"name": str(loaded["name"]), "description": str(loaded["description"])}
@@ -58,9 +75,7 @@ def load_metadata(root: Path) -> dict[str, Any]:
 
 
 def load_body(root: Path) -> str:
-    lines = _skill_file(root).read_text(encoding="utf-8").splitlines()
-    end = lines[1:].index("---") + 1
-    return "\n".join(lines[end + 1 :]).strip() + "\n"
+    return _loads(_skill_file(root).read_text(encoding="utf-8")).content.strip() + "\n"
 
 
 def load_resource(root: Path, relative: str) -> str:
