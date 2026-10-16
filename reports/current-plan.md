@@ -11,4 +11,4 @@
 - SOCKS 只绑定该内部地址，出口网卡不提供代理
 - `playwright==1.64.0`
 
-结果：冻结检查通过。SOCKS 收紧的定向单元测试 3 passed。本机没有 Docker。`74cbfd8` 和 `1e2abdd` 的 CI 已通过，但不包含这次收紧。`live_ready` 保持 pending。
+结果：冻结检查通过。威胁浏览器单元测试 27 passed。本机没有 Docker。`0c19274` 的 pull_request integration 是 `392 passed, 4 warnings in 656.17s`。同一次提交的 push integration 有 1 个无关失败：PDF 索引进度停在 RUNNING。Sonar 质量门通过。`live_ready` 保持 pending。

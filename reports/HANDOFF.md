@@ -16,7 +16,7 @@ Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所�
 
 本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 失败，失败信息是 Docker is required，不是 skip。
 
-`74cbfd8` 的 CI 已通过。workflow https://github.com/Jerry2003826/aether/actions/runs/38959600766 ：`pack-and-unit` 成功，integration 日志是 `392 passed, 4 warnings in 793.36s (0:13:13)`。文档提交 `1e2abdd` 的 workflow https://github.com/Jerry2003826/aether/actions/runs/38961979707 也通过，integration 是 `392 passed, 4 warnings in 822.05s (0:13:42)`。这两次都不包含这次 SOCKS 收紧，不能当作它的证据。这次提交的 CI 还没有记录。Approval Agent 仍不构成批准，没有合并。`live_ready` 仍是 pending。
+`0c19274` 的 pull_request integration 已通过。workflow https://github.com/Jerry2003826/aether/actions/runs/38964663923 ：`pack-and-unit` 成功，integration 日志是 `392 passed, 4 warnings in 656.17s (0:10:56)`。同一提交的 push integration https://github.com/Jerry2003826/aether/actions/runs/38964656426 是 `1 failed, 391 passed`：`test_text_pdf_is_indexed_as_extracted_text` 在 90 秒时仍是 `RUNNING`，`error_code` 为空。容器测试在通过的那次里。Sonar 质量门 OK，`new_security_rating` 的 actualValue 是 1。Approval Agent 仍不构成批准，没有合并。`live_ready` 仍是 pending。
 
 本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
 
