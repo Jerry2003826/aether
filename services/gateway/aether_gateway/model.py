@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import secrets
 import sys
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -32,10 +34,83 @@ COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
+# One upstream answer is read under one overall deadline and one byte cap. The per-read
+# socket timeout alone lets a slow drip (a byte now and then) hold a thread and its buffer.
+UPSTREAM_DEADLINE_SECONDS = 120.0
+UPSTREAM_MAX_BYTES = 8 * 1_048_576
+_UPSTREAM_READ_CHUNK = 65_536
 # Upper-bound guess of input tokens from request bytes. Real tokenizers average
 # more than two bytes per token for English and code, so this over-reserves; the
 # measured usage settles the difference after the call.
 INPUT_BYTES_PER_TOKEN = 2
+
+
+def upstream_deadline_seconds() -> float:
+    """AETHER_GATEWAY_UPSTREAM_DEADLINE_SECONDS, or the default when unset, not a finite positive number."""
+    raw = os.environ.get("AETHER_GATEWAY_UPSTREAM_DEADLINE_SECONDS", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return UPSTREAM_DEADLINE_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return UPSTREAM_DEADLINE_SECONDS
+    return value
+
+
+def upstream_max_bytes() -> int:
+    """AETHER_GATEWAY_UPSTREAM_MAX_BYTES, or the default when unset or not a positive integer."""
+    raw = os.environ.get("AETHER_GATEWAY_UPSTREAM_MAX_BYTES", "").strip()
+    if not raw.isdigit():
+        return UPSTREAM_MAX_BYTES
+    value = int(raw)
+    return value if value > 0 else UPSTREAM_MAX_BYTES
+
+
+def _read_cut(reason: str) -> GatewayDenied:
+    """A response cut short was sent and may be billed; it settles like any other upstream error."""
+    _logger().warning("upstream_read_cut reason=%s", reason)
+    return GatewayDenied("upstream_error", sent=True)
+
+
+def _response_socket(response: Any) -> Any:
+    raw = getattr(getattr(response, "fp", None), "raw", None)
+    sock = getattr(raw, "_sock", None)
+    return sock if hasattr(sock, "settimeout") else None
+
+
+def _read_bounded(response: Any, *, deadline: float, limit: int, per_read: float) -> bytes:
+    """Read the whole body before deadline (time.monotonic) and within limit bytes.
+
+    Each socket read waits at most the time left, so the deadline covers the whole body,
+    not each read. A declared Content-Length above the cap is refused before reading.
+    """
+    declared = response.headers.get("content-length") if getattr(response, "headers", None) is not None else None
+    if declared is not None and str(declared).strip().isdigit() and int(str(declared).strip()) > limit:
+        raise _read_cut("size")
+    sock = _response_socket(response)
+    chunks: list[bytes] = []
+    total = 0
+    while True:
+        if getattr(response, "fp", None) is None:
+            # http.client drops fp once the declared or chunked body is complete.
+            return b"".join(chunks)
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise _read_cut("deadline")
+        if sock is not None:
+            sock.settimeout(max(0.001, min(per_read, remaining)))
+        try:
+            chunk = response.read1(min(_UPSTREAM_READ_CHUNK, limit - total + 1))
+        except TimeoutError:
+            if time.monotonic() >= deadline:
+                raise _read_cut("deadline") from None
+            raise
+        if not chunk:
+            return b"".join(chunks)
+        total += len(chunk)
+        if total > limit:
+            raise _read_cut("size")
+        chunks.append(chunk)
 
 
 def estimate_input_tokens(prompt: str) -> int:
@@ -1162,9 +1237,11 @@ class ModelGateway:
             method="POST",
         )
         opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        window = upstream_deadline_seconds()
+        deadline = time.monotonic() + window
         try:
-            with opener.open(request, timeout=self.timeout) as response:
-                raw = response.read()
+            with opener.open(request, timeout=min(self.timeout, window)) as response:
+                raw = _read_bounded(response, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
                 content_type = response.headers.get("content-type", "")
                 status = getattr(response, "status", 200)
         except urllib.error.HTTPError as exc:
