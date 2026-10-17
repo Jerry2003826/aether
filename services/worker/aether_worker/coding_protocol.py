@@ -1085,13 +1085,15 @@ def _run_case_method(cls: type, method: str) -> dict[str, object]:
 
 
 def _run_class_method(cls: type, method: str) -> dict[str, object]:
-    """A pytest-style Test* class: a fresh instance; setup_class/setup_method and their teardowns run."""
+    """A pytest-style Test* class: a fresh instance; setup_class/setup_method and their teardowns run.
+
+    As with pytest, each teardown runs whether or not its setup is defined; only a failing setup
+    stops them (the setup error is the verdict and nothing else runs)."""
     if "__init__" in {name for klass in cls.__mro__[:-1] for name in vars(klass)}:
         return _result("FAIL", "unsupported_test_class:init")
     fn = getattr(cls, method, None)
     if not _trusted_test(fn):
         return _result("FAIL", "not_a_test")
-    steps: list[tuple[str, object]] = []
     try:
         instance = cls()
         bound = getattr(instance, method)
@@ -1099,13 +1101,12 @@ def _run_class_method(cls: type, method: str) -> dict[str, object]:
             hook = getattr(cls if name == "setup_class" else instance, name, None)
             if callable(hook):
                 hook(*args)
-                steps.append((name, hook))
     except BaseException as exc:  # noqa: BLE001 - a failing fixture fails the test
         return _result("FAIL", _failure_detail(exc))
     outcome = _call_test(bound)
-    for name, partner in (("teardown_method", "setup_method"), ("teardown_class", "setup_class")):
+    for name in ("teardown_method", "teardown_class"):
         hook = getattr(cls if name == "teardown_class" else instance, name, None)
-        if not callable(hook) or not any(step == partner for step, _ in steps):
+        if not callable(hook):
             continue
         try:
             hook(bound) if name == "teardown_method" else hook()
