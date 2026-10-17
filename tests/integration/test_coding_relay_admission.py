@@ -667,3 +667,64 @@ def _all_requests(database: Database, owner_id: str, project_id: str, task_id: s
             {"project_id": project_id, "task_id": task_id},
         ).mappings().all()
     return [dict(row) for row in found]
+
+
+def test_oversized_prompt_is_rejected_before_the_provider(client, role_urls) -> None:
+    """A large request is counted against the budget before it is sent, not after."""
+    owner_id, project_id, _headers = project(client)
+    database = Database(role_urls["aether_worker"])
+    parent = _reserve_parent(
+        database,
+        owner_id=owner_id,
+        project_id=project_id,
+        token_limit=5_000,
+        money_limit=5_000,
+    )
+    seen: list[int] = []
+
+    class Counting(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            length = int(self.headers.get("content-length") or "0")
+            self.rfile.read(length)
+            seen.append(length)
+            payload = json.dumps(
+                {
+                    "id": "chatcmpl-big",
+                    "model": "coder-upstream",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                    "usage": {"prompt_tokens": 250_000, "completion_tokens": 1, "total_tokens": 250_001},
+                }
+            ).encode()
+            self.send_response(200)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Counting)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    gateway = ModelGateway(
+        database,
+        upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1",
+        provider_key=_KEY,
+        timeout=5,
+    )
+    huge = "x" * (1024 * 1024 - 256)
+    try:
+        with pytest.raises(GatewayDenied) as blocked:
+            gateway.relay_chat(parent["token"], {"model": "coder", "messages": [{"role": "user", "content": huge}]})
+        assert blocked.value.code == "budget_exceeded"
+        assert blocked.value.sent is False
+        gateway.relay_chat(parent["token"], {"model": "coder", "messages": [{"role": "user", "content": "small"}]})
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(seen) == 1
+    assert seen[0] < 10_000
+    row = _parent(database, owner_id, project_id, parent["task_id"])
+    assert row["usage_detail"]["pending_tokens"] == 0
+    rows = [r for r in _all_requests(database, owner_id, project_id, parent["task_id"]) if r["role"] == "coding_call"]
+    assert len(rows) == 1
