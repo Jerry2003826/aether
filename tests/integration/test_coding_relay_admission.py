@@ -8,11 +8,17 @@ import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
-from sqlalchemy import text
-
-from aether_gateway.model import CODING_CALL_OUTPUT_CAP, GatewayDenied, ModelGateway, chat_prompt, estimate_input_tokens
+from aether_gateway.model import (
+    CODING_CALL_OUTPUT_CAP,
+    GatewayDenied,
+    ModelGateway,
+    chat_prompt,
+    estimate_input_tokens,
+)
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
+from sqlalchemy import text
+
 from tests.integration.sysfix_b_helpers import project
 
 _KEY = "gateway-provider-key"
@@ -686,7 +692,7 @@ def test_oversized_prompt_is_rejected_before_the_provider(client, role_urls) -> 
     seen: list[int] = []
 
     class Counting(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:  # noqa: N802
+        def do_POST(self) -> None:
             length = int(self.headers.get("content-length") or "0")
             self.rfile.read(length)
             seen.append(length)
