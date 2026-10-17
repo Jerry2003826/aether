@@ -242,3 +242,30 @@ def test_a_lease_lost_in_the_final_drain_after_an_unexpected_error_is_fence_lost
     assert failed == []
     assert job.drains == 1
     assert job.closed == 1
+
+
+def test_a_lease_lost_while_the_sandbox_polls_is_fence_lost_and_never_settled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Claim-time renewal and the first poll hold; the second poll finds the lease gone.
+    job = _Job(monkeypatch, renewals=[True, True, False])
+    failed: list[str] = []
+    monkeypatch.setattr(coding_jobs, "_fail", lambda *_a, **_k: failed.append("fail"))
+    polled: list[float] = []
+
+    def sandbox(_root: Path, **kwargs: Any) -> dict[str, Any]:
+        on_poll = kwargs["on_poll"]
+        for _ in range(3):
+            polled.append(job.clock.now)
+            on_poll()
+            job.clock.now += 0.25
+        return {"exit_code": 0, "result": {"passed": 1, "failed": 0, "agent_completed": True, "patch": ""}}
+
+    monkeypatch.setattr(coding_jobs, "run_coding_sandbox", sandbox)
+    outcome = job.run()
+    assert outcome == {"coding_job_id": _JOB, "state": "ACTIVE", "error_code": "fence_lost"}
+    # The poll that lost the lease ended the run: no further poll happened.
+    assert len(polled) == 2
+    assert job.settled == []
+    assert job.published == []
+    assert job.released == []
+    assert job.stopped == []
+    assert failed == []
