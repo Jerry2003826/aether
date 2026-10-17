@@ -14,6 +14,7 @@ COPY environments/openhands/wheels/ wheels/
 RUN uv sync --locked --no-build --no-dev
 
 COPY services/worker/aether_worker/coding_protocol.py /opt/aether/coding_protocol.py
+COPY services/worker/aether_worker/grading_files.py /opt/aether/grading_files.py
 COPY services/worker/aether_worker/openhands_sandbox_entry.py /opt/aether/openhands_sandbox_entry.py
 RUN chmod -R a+rX /opt/openhands /opt/aether
 

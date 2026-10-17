@@ -25,6 +25,15 @@ from openhands.sdk import LLM, Agent, Conversation, ConversationExecutionStatus,
 from openhands.sdk.event import ActionEvent
 from openhands.sdk.workspace.local import LocalWorkspace
 
+# grading_files.py ships next to this script (repo and image); `-I` drops the script dir from sys.path.
+# Appended, then removed, so it cannot shadow any other module.
+_HERE = str(Path(__file__).resolve().parent)
+sys.path.append(_HERE)
+try:
+    import grading_files
+finally:
+    sys.path.remove(_HERE)
+
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
 EXECUTOR = "openhands.sdk.Agent"
@@ -417,23 +426,18 @@ def stop_agent_processes() -> None:
         time.sleep(0.05)
 
 
-# Files the agent is asked to change. Every other path in the grading directory must match the baseline.
-CANDIDATE_FILES = frozenset({"app.py"})
-
-
 def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
 def _baseline_files(work: Path) -> dict[str, bytes]:
+    """Every grading file of the job-creation workspace, by content. Caches are never baseline."""
     found: dict[str, bytes] = {}
-    for path in sorted(work.rglob("*")):
-        relative = path.relative_to(work)
-        if any(part in {".git", "__pycache__"} for part in relative.parts):
+    for name in sorted(grading_files.grading_paths(work)):
+        path = work / name
+        if grading_files.is_cache_path(name) or path.is_symlink() or not path.is_file():
             continue
-        if path.is_symlink() or not path.is_file():
-            continue
-        found[relative.as_posix()] = path.read_bytes()
+        found[name] = path.read_bytes()
     return found
 
 
@@ -447,12 +451,12 @@ def _remove(path: Path) -> None:
 
 
 def restore_grading_directory(work: Path, job: Path) -> None:
-    """Make the whole grading directory match the job-creation baseline, file by file.
+    """Make every grading path of the job directory match the baseline, file by file.
 
-    Only CANDIDATE_FILES keep the agent's content. Any other changed file (tests,
-    oracle.py, conftest.py, pytest.ini, .pth, ...) is rewritten from the baseline;
-    any file or directory the agent added is deleted, including bytecode caches and
-    agent state. The result is then verified against the baseline SHA-256 hashes.
+    Grading paths are defined by aether_worker.grading_files (everything except
+    CANDIDATE_FILES). A changed file (tests, oracle.py, conftest.py, pytest.ini, .pth, ...)
+    is rewritten from the baseline; a file, directory, cache or symlink the agent added is
+    deleted. The result is verified against the baseline SHA-256 hashes.
     """
     baseline = _baseline_files(work)
     expected = {name: _digest(data) for name, data in baseline.items()}
@@ -464,18 +468,17 @@ def restore_grading_directory(work: Path, job: Path) -> None:
             path.unlink()
         elif path.is_dir():
             prefix = name + "/"
-            keep = any(item.startswith(prefix) for item in expected) or any(
-                item.startswith(prefix) for item in CANDIDATE_FILES
+            keep = not grading_files.is_cache_path(name) and (
+                any(item.startswith(prefix) for item in expected)
+                or any(item.startswith(prefix) for item in grading_files.CANDIDATE_FILES)
             )
             if not keep:
                 _remove(path)
-        elif name in CANDIDATE_FILES:
+        elif not grading_files.is_grading_path(name):
             continue
         elif name not in expected or not path.is_file():
             _remove(path)
     for name, data in baseline.items():
-        if name in CANDIDATE_FILES:
-            continue
         target = job / name
         if target.is_file() and not target.is_symlink() and _digest(target.read_bytes()) == expected[name]:
             continue
@@ -487,22 +490,14 @@ def restore_grading_directory(work: Path, job: Path) -> None:
 
 
 def _verify_grading_directory(job: Path, expected: dict[str, str]) -> None:
-    seen: set[str] = set()
-    for path in job.rglob("*"):
-        name = path.relative_to(job).as_posix()
-        if path.is_symlink():
-            raise RuntimeError("grading_symlink")
-        if path.is_dir():
-            continue
-        if name in CANDIDATE_FILES:
-            continue
-        if name not in expected:
-            raise RuntimeError("grading_extra_file")
-        if _digest(path.read_bytes()) != expected[name]:
+    present = grading_files.grading_paths(job)
+    if any((job / name).is_symlink() for name in present):
+        raise RuntimeError("grading_symlink")
+    if present != set(expected):
+        raise RuntimeError("grading_file_set_mismatch")
+    for name in present:
+        if _digest((job / name).read_bytes()) != expected[name]:
             raise RuntimeError("grading_hash_mismatch")
-        seen.add(name)
-    if seen != {name for name in expected if name not in CANDIDATE_FILES}:
-        raise RuntimeError("grading_missing_file")
 
 
 def main() -> None:

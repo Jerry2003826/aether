@@ -526,6 +526,11 @@ _TAMPER = (
     "open(job + '/conftest.py', 'w').write('import oracle\\noracle.expected = lambda: 0\\n')\n"
     "open(job + '/sitecustomize.py', 'w').write('import oracle\\n')\n"
     "open(job + '/evil.pth', 'w').write('import oracle\\n')\n"
+    "import os\n"
+    "os.makedirs(job + '/__pycache__', exist_ok=True)\n"
+    "open(job + '/__pycache__/planted.pyc', 'wb').write(b'x')\n"
+    "os.makedirs(job + '/.pytest_cache', exist_ok=True)\n"
+    "open(job + '/.pytest_cache/conftest.py', 'w').write('x')\n"
 )
 
 
@@ -582,6 +587,9 @@ def test_tampered_support_files_are_restored_before_grading(tmp_path: Path) -> N
     assert (job / "conftest.py").read_text(encoding="utf-8") == conftest
     assert not (job / "sitecustomize.py").exists()
     assert not (job / "evil.pth").exists()
+    # The protocol may write fresh bytecode; the planted file must be gone.
+    assert not (job / "__pycache__" / "planted.pyc").exists()
+    assert not (job / ".pytest_cache").exists()
     assert body["passed"] == 0
     assert completed.returncode != 0
 
@@ -745,6 +753,7 @@ def _sandbox_context(root: Path) -> None:
         "environments/openhands/pyproject.toml",
         "environments/openhands/uv.lock",
         "services/worker/aether_worker/coding_protocol.py",
+        "services/worker/aether_worker/grading_files.py",
         "services/worker/aether_worker/openhands_sandbox_entry.py",
     ):
         target = root / name
@@ -769,6 +778,7 @@ def test_sandbox_tag_hashes_the_build_context_and_lock_files(tmp_path: Path) -> 
         "environments/openhands/pyproject.toml",
         "environments/openhands/wheels/local.whl",
         "services/worker/aether_worker/coding_protocol.py",
+        "services/worker/aether_worker/grading_files.py",
         "services/worker/aether_worker/openhands_sandbox_entry.py",
     ):
         path = root / name
