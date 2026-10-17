@@ -89,7 +89,8 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
     workspace = {
         "kind": "aether.coding_workspace",
         "base_files": {"app.py": "def value():\n    return 0\n"},
-        "files": {"app.py": "def value():\n    return 42\n"},
+        # The candidate does not pass yet: the no-upstream model's terminal edit makes it return 42.
+        "files": {"app.py": "def value():\n    return 0\n"},
         "tests": {"test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n"},
     }
     uploaded = client.post(

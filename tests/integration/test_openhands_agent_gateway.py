@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import select
 import subprocess
 import sys
@@ -120,14 +121,18 @@ class _FakeModel:
         }
 
 
+_REPOSITORY = re.compile(r"The repository is the directory (/[^;\s\"]+);")
+
+
 def _app_path(text: str) -> str:
-    marker = "/app.py"
-    start = text.rfind(marker)
-    if start <= 0:
+    """app.py under the workspace the entry names in its system prompt.
+
+    The user message is the job objective verbatim and carries no sandbox path.
+    """
+    found = _REPOSITORY.search(text)
+    if found is None:
         return ""
-    end = start + len(marker)
-    begin = max(text.rfind(" ", 0, start), text.rfind('"', 0, start)) + 1
-    return text[begin:end]
+    return f"{found.group(1)}/app.py"
 
 
 def _handler(model: _FakeModel) -> type[BaseHTTPRequestHandler]:

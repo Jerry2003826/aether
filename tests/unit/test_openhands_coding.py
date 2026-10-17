@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from aether_gateway.model import scripted_chat_completion
 from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.openhands_image import OPENHANDS_VERSION, launch_image
 from aether_worker.runner import JOB_IMAGE
@@ -909,7 +910,8 @@ def test_only_grading_and_cache_edits_leave_an_empty_patch_and_no_change(tmp_pat
     assert ".pytest_cache" not in body["patch"]
     from aether_worker.coding_jobs import _coding_terminal
 
-    sandbox = {"exit_code": 0, "result": {**body, "model_requests": 2}}
+    result = {**body, "model_requests": 2, "credential_present": False, "network_errno": 101}
+    sandbox = {"exit_code": 0, "result": result}
     assert _coding_terminal(sandbox, upstream_error=None, measured=(8, 4), usage_missing=False) == (
         "FAILED",
         "agent_no_change",
@@ -955,11 +957,46 @@ def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_pat
     assert body["patch"] == expected
 
 
+def test_the_no_upstream_substitute_really_edits_app_py_and_finishes(tmp_path: Path) -> None:
+    """The gateway's scripted reply drives a real terminal edit, so the job has an agent patch."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    fake = _SocketModel(scripted=True)
+    fake.start()
+    env = _entry_env(tmp_path, fake, AETHER_OBJECTIVE="Make value() return 42.")
+    try:
+        completed = _run_entry(tmp_path, env)
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert body["agent_completed"] is True
+    assert len(fake.bodies) == 2
+    assert body["input_tokens"] == 16 and body["output_tokens"] == 8
+    assert (tmp_path / "job" / "app.py").read_text(encoding="utf-8") == "def value():\n    return 42\n"
+    assert body["patch"] == (
+        "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 0\n+    return 42\n"
+    )
+    from aether_worker.coding_jobs import _coding_terminal
+
+    # The host test env is not the sandbox: credential and network flags are the container's job.
+    result = {**body, "model_requests": 2, "credential_present": False, "network_errno": 101}
+    sandbox = {"exit_code": 0, "result": result}
+    assert _coding_terminal(sandbox, upstream_error=None, measured=(16, 8), usage_missing=False) == ("FINISHED", None)
+
+
 class _SocketModel:
     def __init__(
-        self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
+        self,
+        *,
+        finish_only: bool = False,
+        rewrite_tests: bool = False,
+        terminal_command: str = "",
+        scripted: bool = False,
     ) -> None:
         self.finish_only = finish_only
+        self.scripted = scripted
         self.terminal_command = terminal_command
         self.rewrite_tests = rewrite_tests
         self.path = Path(os.environ.get("TMPDIR", "/tmp")) / f"aether-model-test-{os.getpid()}.sock"
@@ -994,6 +1031,8 @@ class _SocketModel:
             if isinstance(name, str):
                 self.tool_names.add(name)
         text = raw.decode("utf-8", "replace")
+        if self.scripted:
+            return scripted_chat_completion("coder", loaded.get("messages"))
         if self._calls == 1 and self.terminal_command:
             arguments = json.dumps({"command": self.terminal_command})
             name = "terminal"

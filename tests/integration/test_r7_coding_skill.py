@@ -197,7 +197,9 @@ def _wait_approval(database: Database, owner_id: str, project_id: str, task_id: 
 
 def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, logs) -> None:
     _wait_approval(database, owner_id, project_id, task_id, proc, logs)
-    broken = _upload(http, csrf, project_id, "r7-code-broken", "broken.json", _workspace(0, 42), "application/json")
+    # The no-upstream model really edits app.py from return 0 to return 42 (SCRIPTED_EDIT_COMMAND).
+    # The first attempt's tests want 43, so the edited code still fails; the retry's tests want 42.
+    broken = _upload(http, csrf, project_id, "r7-code-broken", "broken.json", _workspace(0, 43), "application/json")
     failed = http.post(
         f"/v1/projects/{project_id}/coding-jobs",
         headers=_headers(csrf, "r7-code-fail"),
@@ -208,7 +210,7 @@ def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, lo
     first = _wait_job(database, owner_id, project_id, "value", {"FAILED"}, proc, logs)
     assert first["patch_id"]
     assert _task_status(database, owner_id, project_id, task_id) == "WAITING_APPROVAL"
-    fixed = _upload(http, csrf, project_id, "r7-code-fixed", "fixed.json", _workspace(42, 42), "application/json")
+    fixed = _upload(http, csrf, project_id, "r7-code-fixed", "fixed.json", _workspace(0, 42), "application/json")
     again = http.post(
         f"/v1/projects/{project_id}/coding-jobs",
         headers=_headers(csrf, "r7-code-retry"),

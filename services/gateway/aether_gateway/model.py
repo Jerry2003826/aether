@@ -32,6 +32,8 @@ COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
 SCRIPTED_PROMPT_TOKENS = 8
 SCRIPTED_COMPLETION_TOKENS = 4
+# The fixed edit of the no-upstream substitute, run in the sandbox workspace by the terminal tool.
+SCRIPTED_EDIT_COMMAND = "sed -i 's/return 0$/return 42/' app.py"
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
 # Upper-bound guess of input tokens from request bytes. Real tokenizers average
@@ -331,10 +333,24 @@ def _public(value: object, secret: str) -> str:
     return text
 
 
-def scripted_chat_completion(model: str) -> dict[str, Any]:
-    """One finish call. No file edit, so the candidate files still decide the verdict."""
+def scripted_chat_completion(model: str, messages: object = None) -> dict[str, Any]:
+    """The no-upstream substitute: one real terminal edit, then finish.
+
+    The first turn (no tool result in ``messages`` yet) runs SCRIPTED_EDIT_COMMAND
+    through the terminal tool in the workspace, so the sandbox produces an agent
+    patch. Every later turn is a finish call. Each turn reports 8/4 tokens.
+    A workspace the command cannot change ends with an empty patch and fails as
+    agent_no_change; candidate files that already pass do not finish a job.
+    """
     prompt = SCRIPTED_PROMPT_TOKENS
     completion = SCRIPTED_COMPLETION_TOKENS
+    answered = isinstance(messages, list) and any(
+        isinstance(item, dict) and item.get("role") == "tool" for item in messages
+    )
+    if answered:
+        call = {"id": "call_finish", "name": "finish", "arguments": json.dumps({"message": "done"})}
+    else:
+        call = {"id": "call_edit", "name": "terminal", "arguments": json.dumps({"command": SCRIPTED_EDIT_COMMAND})}
     return {
         "id": "chatcmpl-aether-scripted",
         "object": "chat.completion",
@@ -349,9 +365,9 @@ def scripted_chat_completion(model: str) -> dict[str, Any]:
                     "content": None,
                     "tool_calls": [
                         {
-                            "id": "call_finish",
+                            "id": call["id"],
                             "type": "function",
-                            "function": {"name": "finish", "arguments": "{\"message\":\"done\"}"},
+                            "function": {"name": call["name"], "arguments": call["arguments"]},
                         }
                     ],
                 },
@@ -589,7 +605,7 @@ class ModelGateway:
         try:
             if not self.upstream_base:
                 self._response_kind = "scripted"
-                result = scripted_chat_completion(model or "coder")
+                result = scripted_chat_completion(model or "coder", body.get("messages"))
             else:
                 result = self._post_upstream(payload)
         except GatewayDenied as exc:

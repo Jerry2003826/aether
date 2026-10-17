@@ -21,6 +21,7 @@ from aether_gateway.model import (
     accepted_chat_body,
     coding_reservation_gap,
     coding_reservation_micro,
+    SCRIPTED_EDIT_COMMAND,
     scripted_chat_completion,
 )
 from aether_worker.role_launch import _gateway_env
@@ -125,14 +126,26 @@ def test_chat_body_keeps_only_the_allowlist_and_the_server_timeout() -> None:
     assert gateway_timeout("/v1/complete", {"timeout": 0}) == 30.0
 
 
-def test_empty_upstream_returns_a_finish_call_with_token_usage() -> None:
+def test_empty_upstream_edits_once_then_finishes_with_token_usage() -> None:
     gateway = _gateway("")
-    body = gateway.relay_chat(_JOB, {"model": "coder", "messages": [{"role": "user", "content": "edit"}]})
-    assert body == scripted_chat_completion("coder")
+    first_messages = [{"role": "user", "content": "edit"}]
+    body = gateway.relay_chat(_JOB, {"model": "coder", "messages": first_messages})
+    assert body == scripted_chat_completion("coder", first_messages)
     usage = body["usage"]
     assert usage["prompt_tokens"] == 8
     assert usage["completion_tokens"] == 4
-    assert body["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "finish"
+    edit = body["choices"][0]["message"]["tool_calls"][0]
+    assert edit["function"]["name"] == "terminal"
+    assert json.loads(edit["function"]["arguments"]) == {"command": SCRIPTED_EDIT_COMMAND}
+    answered = [
+        *first_messages,
+        {"role": "assistant", "content": None, "tool_calls": [edit]},
+        {"role": "tool", "tool_call_id": edit["id"], "content": "ok"},
+    ]
+    done = scripted_chat_completion("coder", answered)
+    assert done["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "finish"
+    assert done["usage"]["prompt_tokens"] == 8
+    assert done["usage"]["completion_tokens"] == 4
 
 
 def test_relay_posts_the_provider_key_and_ignores_http_proxy(monkeypatch) -> None:
