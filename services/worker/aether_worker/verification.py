@@ -159,6 +159,28 @@ def run_grader_container(
             "--read-only",
             "--cap-drop",
             "ALL",
+            # The grader is root (PID 1) and must stay root: it hides the suite from the candidate by
+            # running probes as nobody. Without capabilities that root cannot do its job, so exactly
+            # these come back (all in Docker's default set; nothing else):
+            #   DAC_OVERRIDE  /work is a host bind mount owned by the worker uid with 0700 dirs and a
+            #                 0600 protocol.json/suite, so root needs it to stat/read them (DAC_READ_SEARCH
+            #                 would also do, but it enables open_by_handle_at and is not a Docker default);
+            #                 the mount and the rootfs are read-only, writes only reach the /run/aether tmpfs.
+            #   CHOWN         hand /run/aether/child to nobody.
+            #   SETUID/SETGID setuid/setgid/setgroups to nobody for every probe and pytest run.
+            #   KILL          kill(-1) reaps nobody's leftover processes; without it they survive.
+            # A non-root --user is no alternative: it cannot drop to nobody (Docker gives a non-root
+            # user no effective capabilities) and nobody would then share the suite owner's view.
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--cap-add",
+            "KILL",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "SETUID",
             "--security-opt",
             "no-new-privileges",
             "--pids-limit",
