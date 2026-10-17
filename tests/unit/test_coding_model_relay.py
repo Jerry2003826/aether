@@ -21,8 +21,6 @@ from aether_gateway.model import (
     accepted_chat_body,
     coding_reservation_gap,
     coding_reservation_micro,
-    SCRIPTED_EDIT_COMMAND,
-    scripted_chat_completion,
 )
 from aether_worker.role_launch import _gateway_env
 from aether_storage.db import Database
@@ -126,26 +124,67 @@ def test_chat_body_keeps_only_the_allowlist_and_the_server_timeout() -> None:
     assert gateway_timeout("/v1/complete", {"timeout": 0}) == 30.0
 
 
-def test_empty_upstream_edits_once_then_finishes_with_token_usage() -> None:
+def test_empty_upstream_is_model_unavailable_and_returns_no_completion() -> None:
+    """Without an upstream there is no model: no tool call, no scripted completion, no spent ticket."""
     gateway = _gateway("")
-    first_messages = [{"role": "user", "content": "edit"}]
-    body = gateway.relay_chat(_JOB, {"model": "coder", "messages": first_messages})
-    assert body == scripted_chat_completion("coder", first_messages)
-    usage = body["usage"]
-    assert usage["prompt_tokens"] == 8
-    assert usage["completion_tokens"] == 4
-    edit = body["choices"][0]["message"]["tool_calls"][0]
-    assert edit["function"]["name"] == "terminal"
-    assert json.loads(edit["function"]["arguments"]) == {"command": SCRIPTED_EDIT_COMMAND}
-    answered = [
-        *first_messages,
-        {"role": "assistant", "content": None, "tool_calls": [edit]},
-        {"role": "tool", "tool_call_id": edit["id"], "content": "ok"},
+    notes: list[str] = []
+    spent: list[str] = []
+    gateway._note_admission_block = lambda _session, code: notes.append(code)  # type: ignore[method-assign]
+
+    def spend(_session: object, *, alias: str, prompt: str) -> int:
+        spent.append(prompt)
+        return 64
+
+    gateway._spend_coding_ticket = spend  # type: ignore[method-assign]
+    for body in (
+        {"model": "coder", "messages": [{"role": "user", "content": "edit"}]},
+        {"model": "openai/coder", "messages": [{"role": "tool", "tool_call_id": "x", "content": "ok"}]},
+    ):
+        try:
+            returned = gateway.relay_chat(_JOB, body)
+        except GatewayDenied as exc:
+            assert exc.code == "model_unavailable"
+            assert exc.sent is False
+        else:
+            raise AssertionError(f"no-upstream relay returned a completion: {returned!r}")
+    assert notes == ["model_unavailable", "model_unavailable"]
+    assert spent == []
+
+
+def test_production_code_has_no_scripted_coding_model() -> None:
+    import aether_gateway.model as gateway_model
+
+    assert not hasattr(gateway_model, "scripted_chat_completion")
+    assert not hasattr(gateway_model, "SCRIPTED_EDIT_COMMAND")
+    banned = ("scripted_chat_completion", "SCRIPTED_EDIT_COMMAND", "chatcmpl-aether-scripted", "sed -i")
+    found = [
+        f"{path}: {word}"
+        for path in sorted(Path("services").rglob("*.py"))
+        for word in banned
+        if word in path.read_text(encoding="utf-8")
     ]
-    done = scripted_chat_completion("coder", answered)
-    assert done["choices"][0]["message"]["tool_calls"][0]["function"]["name"] == "finish"
-    assert done["usage"]["prompt_tokens"] == 8
-    assert done["usage"]["completion_tokens"] == 4
+    assert found == []
+
+
+def test_a_model_unavailable_job_fails_even_when_the_files_pass() -> None:
+    from aether_worker.coding_jobs import _coding_terminal
+
+    result = {
+        "passed": 1,
+        "failed": 0,
+        "model_requests": 0,
+        "agent_completed": False,
+        "patch": "--- a/app.py\n+++ b/app.py\n",
+        "credential_present": False,
+        "network_errno": 101,
+    }
+    assert _coding_terminal(
+        {"exit_code": 0, "result": result},
+        upstream_error=None,
+        measured=None,
+        usage_missing=False,
+        admission_error="model_unavailable",
+    ) == ("FAILED", "model_unavailable")
 
 
 def test_relay_posts_the_provider_key_and_ignores_http_proxy(monkeypatch) -> None:
