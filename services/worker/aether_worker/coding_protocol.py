@@ -1,7 +1,17 @@
-"""Stdlib test protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands."""
+"""Stdlib test protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands.
+
+Integrity: before any candidate code runs, every file under the workspace is read into memory and
+hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
+are served from that in-memory snapshot, so a file rewritten during the run has no effect on any
+module loaded afterwards. The files are hashed again before each test module and after the run;
+any difference fails the suite with `grading_tampered`.
+"""
 
 from __future__ import annotations
 
+import hashlib
+import importlib.abc
+import importlib.machinery
 import importlib.util
 import inspect
 import json
@@ -10,22 +20,99 @@ import time
 from pathlib import Path
 from typing import Any
 
+_SKIP_DIRS = {"__pycache__", ".git", ".aether-state", ".pytest_cache"}
+
+
+def _files(root: Path) -> dict[str, Path]:
+    found: dict[str, Path] = {}
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root)
+        if any(part in _SKIP_DIRS for part in relative.parts):
+            continue
+        if path.is_symlink() or not path.is_file():
+            continue
+        found[relative.as_posix()] = path
+    return found
+
+
+def _digests(root: Path) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for name, path in _files(root).items():
+        try:
+            result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+        except OSError:
+            result[name] = "unreadable"
+    return result
+
+
+class _SnapshotLoader(importlib.abc.Loader):
+    def __init__(self, source: bytes, origin: str) -> None:
+        self._source = source
+        self._origin = origin
+
+    def create_module(self, spec):
+        return None
+
+    def exec_module(self, module) -> None:
+        code = compile(self._source, self._origin, "exec", dont_inherit=True)
+        exec(code, module.__dict__)  # noqa: S102 - running the suite is the point
+
+
+class _SnapshotFinder(importlib.abc.MetaPathFinder):
+    """Serves workspace modules from bytes captured before any candidate code ran."""
+
+    def __init__(self, root: Path, sources: dict[str, bytes]) -> None:
+        self._root = root
+        self._modules: dict[str, tuple[str, bytes, bool]] = {}
+        for name, data in sources.items():
+            if not name.endswith(".py"):
+                continue
+            parts = name[:-3].split("/")
+            package = parts[-1] == "__init__"
+            if package:
+                parts = parts[:-1]
+            if not parts or not all(part.isidentifier() for part in parts):
+                continue
+            self._modules[".".join(parts)] = (name, data, package)
+
+    def find_spec(self, fullname, path=None, target=None):
+        entry = self._modules.get(fullname)
+        if entry is None:
+            return None
+        name, data, package = entry
+        origin = str(self._root / name)
+        spec = importlib.machinery.ModuleSpec(fullname, _SnapshotLoader(data, origin), origin=origin, is_package=package)
+        if package:
+            spec.submodule_search_locations = [str((self._root / name).parent)]
+        spec.has_location = True
+        return spec
+
 
 def run_suite(root: Path) -> dict[str, Any]:
     started = time.monotonic()
     cases: list[dict[str, str]] = []
     passed = 0
     failed = 0
-    tests = sorted(path for path in root.glob("test_*.py") if path.is_file() and not path.is_symlink())
+    sys.dont_write_bytecode = True
+    files = _files(root)
+    sources = {name: path.read_bytes() for name, path in files.items()}
+    baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
+    tests = sorted(path.name for path in root.glob("test_*.py") if path.name in sources)
+    sys.meta_path.insert(0, _SnapshotFinder(root, sources))
     sys.path.insert(0, str(root))
-    for path in tests:
-        spec = importlib.util.spec_from_file_location(path.stem, path)
+    tampered = False
+    for name in tests:
+        if _digests(root) != baseline:
+            tampered = True
+            break
+        stem = name[:-3]
+        spec = importlib.util.find_spec(stem)
         if spec is None or spec.loader is None:
             failed += 1
-            cases.append({"name": path.stem, "verdict": "FAIL", "detail": "import"})
+            cases.append({"name": stem, "verdict": "FAIL", "detail": "import"})
             continue
         module = importlib.util.module_from_spec(spec)
-        sys.modules[path.stem] = module
+        sys.modules[stem] = module
         spec.loader.exec_module(module)
         for attr in sorted(dir(module)):
             if not attr.startswith("test_"):
@@ -37,15 +124,18 @@ def run_suite(root: Path) -> dict[str, Any]:
                 value = fn()
             except Exception as exc:
                 failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": type(exc).__name__})
+                cases.append({"name": stem + "." + attr, "verdict": "FAIL", "detail": type(exc).__name__})
                 continue
             if inspect.iscoroutine(value):
                 value.close()
                 failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": "async"})
+                cases.append({"name": stem + "." + attr, "verdict": "FAIL", "detail": "async"})
                 continue
             passed += 1
-            cases.append({"name": path.stem + "." + attr, "verdict": "PASS", "detail": ""})
+            cases.append({"name": stem + "." + attr, "verdict": "PASS", "detail": ""})
+    if tampered or _digests(root) != baseline:
+        failed += 1
+        cases.append({"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"})
     if not cases:
         failed += 1
         cases.append({"name": "suite", "verdict": "FAIL", "detail": "no_tests"})
