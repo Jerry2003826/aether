@@ -698,6 +698,32 @@ def test_added_startup_hook_is_deleted_and_fails_the_job(tmp_path: Path) -> None
     assert "+++ b/app.py" in body["patch"]
 
 
+def test_added_hidden_pytest_config_cannot_redirect_grading(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    script = (
+        "import sys\n"
+        "job = sys.argv[1]\n"
+        "for name in ('.pytest.ini', 'pytest.toml', '.pytest.toml'):\n"
+        "    open(job + '/' + name, 'w').write('[pytest]\\npython_files = my_tests.py\\n')\n"
+        "open(job + '/my_tests.py', 'w').write('def test_ok():\\n    assert True\\n')\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    job = tmp_path / "job"
+    for name in (".pytest.ini", "pytest.toml", ".pytest.toml"):
+        assert not (job / name).exists(), name
+    assert completed.returncode == 1
+    assert body["passed"] == 0
+    assert [case["name"] for case in body["cases"]] == ["test_app.test_value"]
+    assert body["cases"][0]["verdict"] == "FAIL"
+
+
 class _SocketModel:
     def __init__(
         self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
