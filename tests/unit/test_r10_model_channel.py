@@ -167,8 +167,7 @@ def test_only_the_job_token_can_revoke(proxy: CodingModelProxy) -> None:
 def test_the_token_is_compared_in_constant_time_for_chat_and_revoke(
     proxy: CodingModelProxy, monkeypatch
 ) -> None:
-    import hmac
-    import types
+    import secrets
 
     from aether_worker import coding_model_proxy
 
@@ -176,10 +175,11 @@ def test_the_token_is_compared_in_constant_time_for_chat_and_revoke(
 
     def compare(presented, expected):
         calls.append((presented, expected))
-        return hmac.compare_digest(presented, expected)
+        return secrets.compare_digest(presented, expected)
 
+    # secrets.compare_digest is hmac.compare_digest; the proxy calls it through secrets.
     monkeypatch.setattr(
-        coding_model_proxy, "hmac", types.SimpleNamespace(compare_digest=compare)
+        coding_model_proxy, "secrets", types.SimpleNamespace(compare_digest=compare)
     )
     assert _send(proxy.socket_path, "/aether/revoke", "wrong") == 401
     assert _chat(proxy.socket_path) == 200
@@ -276,10 +276,19 @@ def test_a_call_in_flight_at_revoke_still_answers_and_drains(monkeypatch) -> Non
             "revoke must not wait for calls in flight"
         )
         assert made.active_connections == 1
+        assert made.forwarding_calls == 1
+        # Drain waits for the call that crossed the revoke.
+        drained: list[int] = []
+        drainer = threading.Thread(target=lambda: drained.append(made.drain(timeout=10)))
+        drainer.start()
+        drainer.join(0.5)
+        assert drainer.is_alive(), "drain returned while a call was still being forwarded"
         release.set()
         caller.join(10)
+        drainer.join(10)
         assert statuses == [200]
-        assert made.drain(timeout=5) == 0
+        assert drained == [0]
+        assert made.forwarding_calls == 0
     finally:
         release.set()
         made.close()
@@ -320,3 +329,59 @@ def test_a_call_not_yet_forwarded_when_revoke_returns_is_never_forwarded(
         made.close()
     assert forwarded == []
     assert status == 401
+
+
+def test_after_revoke_chat_is_refused_and_never_reaches_the_upstream(monkeypatch) -> None:
+    hits: list[int] = []
+
+    class _Counting(_Gateway):
+        def do_POST(self) -> None:
+            hits.append(1)
+            super().do_POST()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Counting)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv("AETHER_GATEWAY_BASE", f"http://127.0.0.1:{server.server_address[1]}")
+    monkeypatch.setenv("AETHER_LOOPBACK_TOKEN", "loopback-model-channel")
+    made = CodingModelProxy(cast(Database, object()), job_token=_JOB)
+    try:
+        # A connection accepted before the revoke, whose request arrives after it.
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as early:
+            early.settimeout(5)
+            early.connect(str(made.socket_path))
+            made.revoke()
+            raw = json.dumps({"model": "coder", "messages": []}).encode()
+            head = f"POST /v1/chat/completions HTTP/1.1\r\nauthorization: Bearer {_JOB}\r\ncontent-length: {len(raw)}\r\n\r\n"
+            early.sendall(head.encode() + raw)
+            answer = b""
+            while block := early.recv(65536):
+                answer += block
+        assert answer.split(b" ", 2)[1] == b"401"
+        assert b"revoked" in answer
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as late, pytest.raises(OSError):
+            late.connect(str(made.socket_path))
+        assert hits == []
+    finally:
+        made.close()
+        server.shutdown()
+        server.server_close()
+
+
+def test_repeated_revokes_shut_the_listener_down_once(proxy: CodingModelProxy, monkeypatch) -> None:
+    shutdowns: list[int] = []
+    real_shutdown = proxy._server.shutdown
+
+    def shutdown() -> None:
+        shutdowns.append(1)
+        real_shutdown()
+
+    monkeypatch.setattr(proxy._server, "shutdown", shutdown)
+    threads = [threading.Thread(target=proxy.revoke) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    proxy.drain(timeout=1)
+    proxy.close()
+    proxy.revoke()
+    assert shutdowns == [1]

@@ -238,6 +238,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             )
             proxy: CodingModelProxy | None = None
             drained = False
+            channel_revoked = False
 
             def keep_lease() -> None:
                 # Only an explicit True is a renewed lease (never fail open): False means it expired or the fencing token moved on;
@@ -259,6 +260,9 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 if proxy is None or drained:
                     return
                 drained = True
+                # Host-side backstop: whatever the sandbox did, the channel is closed once its container
+                # is done. Calls already in flight still answer and are settled by the drain below.
+                proxy.revoke()
                 _drain_proxy(
                     proxy,
                     ledger,
@@ -303,6 +307,8 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     if stopped is not None:
                         return stopped
                     raise
+                # Read before the worker's own revoke: did the sandbox close the channel before it graded?
+                channel_revoked = proxy.revoked_in_band
                 # A call can still be forwarding after the agent exits; settle only once it is done.
                 drain_once()
                 _settle(
@@ -345,6 +351,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 measured=measured,
                 usage_missing=usage_missing,
                 admission_error=blocked,
+                channel_revoked=channel_revoked,
             )
             observed = _successful_model_requests(
                 ledger,
@@ -1188,6 +1195,15 @@ GRADING_VIOLATIONS = frozenset({"grading_startup_hook", "grading_shadow_module",
 # The protocol produced no result line (hung past its limit, killed, crashed). A graded failure with its
 # own error code; never a violation, since nothing was shown to be forged.
 GRADING_TIMEOUT = "grading_timeout"
+# The model channel was not confirmed closed before grading (see ADR-F44). Our side failed to close
+# it, nothing shows tampering, so it is its own failure code and never a violation.
+MODEL_CHANNEL_OPEN = "model_channel_open"
+
+
+def _graded(body: dict[str, Any]) -> bool:
+    """The result claims grading ran: a test case other than the runner's, or a passing count."""
+    cases = body.get("cases") or []
+    return int(body.get("passed") or 0) > 0 or any(isinstance(case, dict) and case.get("name") != "runner" for case in cases)
 
 
 def _runner_details(sandbox: dict[str, Any]) -> set[str]:
@@ -1254,6 +1270,7 @@ def _coding_terminal(
     measured: tuple[int, int] | None,
     usage_missing: bool,
     admission_error: str | None = None,
+    channel_revoked: bool | None = None,
 ) -> tuple[str, str | None]:
     """FINISHED needs a completed agent, an agent change and a passing protocol.
 
@@ -1262,7 +1279,9 @@ def _coding_terminal(
     finishes without changing any source file (empty or missing patch; grading
     files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
-    terminal-only change shows up in the patch.
+    terminal-only change shows up in the patch. channel_revoked is whether the
+    proxy saw the sandbox revoke the model channel (None: not known, not checked);
+    graded results without it are FAILED/model_channel_open.
     """
     result = sandbox.get("result")
     body = result if isinstance(result, dict) else {}
@@ -1271,6 +1290,10 @@ def _coding_terminal(
         return "FAILED", "credential_present"
     if body.get("network_errno") == 0:
         return "FAILED", "network_open"
+    # The sandbox could not confirm the model channel closed and skipped grading; or (channel_revoked
+    # False: the proxy saw no in-band revoke) it reports grading that ran with the channel open.
+    if MODEL_CHANNEL_OPEN in _runner_details(sandbox) or (channel_revoked is False and _graded(body)):
+        return "FAILED", MODEL_CHANNEL_OPEN
     violation = _grading_violation(sandbox)
     if violation:
         return "FAILED", violation

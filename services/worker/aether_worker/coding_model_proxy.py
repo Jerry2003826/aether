@@ -89,7 +89,9 @@ class CodingModelProxy:
         self._closed = False
         self._listening = True
         self._listen_lock = threading.Lock()
-        self._revoked = False
+        self._revoke_lock = threading.Lock()
+        self._revoked_by: str | None = None
+        self._forwarding = 0
         self._stopped = threading.Event()
         self.directory = Path(tempfile.mkdtemp(prefix="aether-model-"))
         try:
@@ -155,9 +157,28 @@ class CodingModelProxy:
             heartbeat()
         return self.active_connections
 
+    @property
+    def forwarding_calls(self) -> int:
+        """Model calls registered (under the revoke lock) and still being forwarded."""
+        with self._revoke_lock:
+            return self._forwarding
+
+    @property
+    def revoked(self) -> bool:
+        return self._revoked_by is not None
+
+    @property
+    def revoked_in_band(self) -> bool:
+        """The sandbox itself closed the channel (before its container ended), not the worker's backstop."""
+        return self._revoked_by == "sandbox"
+
     def wait_until_revoked(self, *, timeout: float) -> bool:
         """Block until a revoke has removed the socket and closed the listener, or `timeout` passes."""
-        return self._revoked and self._stopped.wait(timeout)
+        return self.revoked and self._stopped.wait(timeout)
+
+    def revoke(self) -> None:
+        """Host-side backstop: end the model channel from the worker. Same effect as the sandbox's revoke."""
+        self._revoke("worker")
 
     def close(self) -> None:
         if self._closed:
@@ -167,6 +188,7 @@ class CodingModelProxy:
         shutil.rmtree(self.directory, ignore_errors=True)
 
     def _stop_listening(self) -> None:
+        # Exactly once, whoever gets here first (drain, close or a revoke on any thread).
         with self._listen_lock:
             if self._listening:
                 self._listening = False
@@ -174,42 +196,61 @@ class CodingModelProxy:
                 self._server.server_close()
         self._stopped.set()
 
-    def _revoke(self) -> None:
+    def _revoke(self, by: str) -> None:
         """End the model channel for the rest of the job: no more model calls, and the socket is gone.
 
-        The sandbox calls this (with the job token) once the agent phase ends and before it runs
-        candidate code for grading, so that code cannot reach the paid model. The socket file is
-        unlinked here on the host (the container cannot remove it), so a later connect fails with
-        ENOENT; the listener is closed on a separate thread so this answer can still be written.
+        The sandbox asks for this (with the job token) once the agent phase ends and before it runs
+        candidate code for grading, so that code cannot reach the paid model; the worker calls it too
+        when the container is done. The socket file is unlinked here on the host (the container
+        cannot remove it), so a later connect fails with ENOENT, and the listener is closed.
+
+        Idempotent and safe under concurrent calls: the first caller marks the channel revoked and
+        unlinks the socket; the listener closes exactly once (shared with drain/close). Calls already
+        being forwarded are not interrupted: they answer and their usage is recorded as usual, and
+        drain still waits for them; only calls that start after the revoke are refused. Closing the
+        listener from a handler thread is safe (serve_forever runs on its own thread) and the
+        accepted connection still gets its answer.
         """
-        self._revoked = True
-        self.socket_path.unlink(missing_ok=True)
-        threading.Thread(target=self._stop_listening, daemon=True).start()
+        with self._revoke_lock:
+            if self._revoked_by is not None:
+                return
+            self._revoked_by = by
+            self.socket_path.unlink(missing_ok=True)
+        self._stop_listening()
 
     def respond(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
         if method != "POST" or (path not in _CHAT_PATHS and path != REVOKE_PATH):
             return 404, {"error": "not_found"}
         expected = f"Bearer {self.job_token}"
         presented = headers.get("authorization", "")
-        if not secrets.compare_digest(presented, expected):
+        # Constant-time; a non-ASCII header can never match (and str compare_digest rejects it).
+        if not presented.isascii() or not secrets.compare_digest(presented, expected):
             return 401, {"error": "unauthorized"}
         if path == REVOKE_PATH:
-            self._revoke()
+            self._revoke("sandbox")
             return 200, {"revoked": True}
-        if self._revoked:
-            return 401, {"error": "revoked"}
         try:
             loaded = json.loads(raw.decode()) if raw else {}
         except (UnicodeError, json.JSONDecodeError):
             return 400, {"error": "body_rejected"}
         if not isinstance(loaded, dict):
             return 400, {"error": "body_rejected"}
+        # Checked under the revoke lock right before forwarding: once revoke() has returned, no call
+        # starts forwarding. A call that got here first is in flight (its connection holds a slot),
+        # so drain waits for it and its usage settles normally.
+        with self._revoke_lock:
+            if self._revoked_by is not None:
+                return 401, {"error": "revoked"}
+            self._forwarding += 1
         try:
             return 200, self._forward(loaded)
         except GatewayDenied as denied:
             return 409, {"error": denied.code}
         except (LoopbackError, OSError, TimeoutError, json.JSONDecodeError):
             return 502, {"error": "relay_failed"}
+        finally:
+            with self._revoke_lock:
+                self._forwarding -= 1
 
     def _forward(self, body: dict) -> dict:
         base = os.environ.get("AETHER_GATEWAY_BASE", "").rstrip("/")

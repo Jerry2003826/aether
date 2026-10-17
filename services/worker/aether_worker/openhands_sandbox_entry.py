@@ -143,37 +143,61 @@ _REVOKE_PATH = "/aether/revoke"
 _REVOKE_TIMEOUT_SECONDS = 5.0
 
 
-def close_model_channel() -> None:
-    """Take the model channel away before any candidate code runs for grading.
+class ModelChannelOpen(RuntimeError):
+    """The model channel could not be confirmed closed, so no candidate code may run for grading.
 
-    The job token and socket path leave this process's environment, so nothing started from here
-    inherits them, and the host proxy is asked (with the token) to revoke the job: it refuses later
-    model calls and unlinks the socket, which this unprivileged process could not remove itself.
-    Revoking is best effort; we wait briefly for the socket file to disappear.
+    Not a grading violation: nothing shows the agent tampered (it cannot remove or keep the socket;
+    the host owns it). It is our side failing to close the channel, so the job fails with its own
+    code `model_channel_open` and grading is skipped, never run with the channel still open.
+    """
+
+
+def _revoke_status(socket_path: str, token: str, timeout: float) -> int | None:
+    """HTTP status of the revoke request, or None if it could not be sent or got no status line."""
+    request = (
+        f"POST {_REVOKE_PATH} HTTP/1.1\r\nhost: aether-proxy\r\nauthorization: Bearer {token}\r\n"
+        "content-length: 0\r\nconnection: close\r\n\r\n"
+    ).encode("ascii")
+    chunks: list[bytes] = []
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(timeout)
+            channel.connect(socket_path)
+            channel.sendall(request)
+            while block := channel.recv(4096):
+                chunks.append(block)
+    except OSError:
+        return None
+    parts = b"".join(chunks).split(b"\r\n", 1)[0].split(b" ")
+    if len(parts) < 2 or not parts[0].startswith(b"HTTP/") or not parts[1].isdigit():
+        return None
+    return int(parts[1])
+
+
+def close_model_channel() -> None:
+    """Take the model channel away before any candidate code runs for grading; fail closed.
+
+    The agent phase knew the job token and socket path and may have written them into the
+    workspace, so dropping them from this process's environment is not enough: the host proxy
+    must revoke the job. It is asked (with the token) to do so; it refuses later model calls and
+    unlinks the socket, which this unprivileged process could not remove itself. Only an HTTP 200
+    followed by the socket file disappearing within the timeout counts as closed; anything else
+    raises ModelChannelOpen and grading does not run. With no channel configured there is nothing
+    to close.
     """
     socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
     token = os.environ.get("AETHER_JOB_TOKEN", "")
     for name in _MODEL_ENV:
         os.environ.pop(name, None)
-    if not socket_path or not token:
+    if not socket_path and not token:
         return
-    request = (
-        f"POST {_REVOKE_PATH} HTTP/1.1\r\nhost: aether-proxy\r\nauthorization: Bearer {token}\r\n"
-        "content-length: 0\r\nconnection: close\r\n\r\n"
-    ).encode("ascii")
     deadline = time.monotonic() + _REVOKE_TIMEOUT_SECONDS
-    try:
-        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
-            channel.settimeout(_REVOKE_TIMEOUT_SECONDS)
-            channel.connect(socket_path)
-            channel.sendall(request)
-            while channel.recv(4096):
-                pass
-    except OSError:
-        sys.stderr.write("model_channel_revoke_failed\n")
-        return
-    while os.path.lexists(socket_path) and time.monotonic() < deadline:
+    status = _revoke_status(socket_path, token, _REVOKE_TIMEOUT_SECONDS) if socket_path and token else None
+    while status == 200 and os.path.lexists(socket_path) and time.monotonic() < deadline:
         time.sleep(0.05)
+    if status != 200 or os.path.lexists(socket_path):
+        sys.stderr.write(f"model_channel_open status={status}\n")
+        raise ModelChannelOpen("model_channel_open")
 
 
 def credential_present() -> bool:
@@ -678,11 +702,12 @@ def main() -> None:
         before = _snapshot(job)
         agent_report = _run_agent(job, objective)
         stop_agent_processes()
-        close_model_channel()
         # Taken only once nothing the agent started can still write, and before grading files
         # are restored, so the published patch is the agent's source change that gets graded.
         # Grading files and caches are left out of it; tampering with them is caught separately.
         agent_report["patch"] = _patch(before, job)
+        # Before any candidate code runs: no grading with the model channel still open.
+        close_model_channel()
         restore_grading_directory(WORK, job)
         not_dumpable()
         nonce = secrets.token_hex(16)
@@ -708,6 +733,11 @@ def main() -> None:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
+    except ModelChannelOpen as exc:
+        # Exit 1 like a graded failure, so the worker records FAILED/model_channel_open with the patch.
+        failure = _failure(str(exc))
+        failure.update(agent_report)
+        emit(failure, 1)
     except GradingTimeout as exc:
         # Exit 1 like a failed test: a graded failure that is not tampering, with its own detail.
         failure = _failure(exc.detail)

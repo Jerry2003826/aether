@@ -49,11 +49,13 @@ class _Job(_Harness):
         revoke: bool,
         in_flight: bool = False,
         fails: BaseException | None = None,
+        first_call: tuple[int, int] | None = None,
+        release: bool = True,
     ) -> None:
         super().__init__(
             monkeypatch,
-            first_call=None,
-            release_after=0.5 if in_flight else None,
+            first_call=first_call,
+            release_after=0.5 if in_flight and release else None,
             fails=fails,
         )
         self.revoke = revoke
@@ -80,12 +82,16 @@ class _Job(_Harness):
         self, _root: Path, *, proxy_dir: Path, job_token: str, **_kwargs: Any
     ) -> dict[str, Any]:
         socket_path = proxy_dir / "model.sock"
+        if self.first_call is not None:
+            self._open_call()
+            self._answer(*self.first_call)
         if self.in_flight:
-            threading.Thread(
-                target=_post, args=(socket_path, job_token), daemon=True
-            ).start()
+            threading.Thread(target=_post, args=(socket_path, job_token), daemon=True).start()
             assert self.entered.wait(10), "the in-flight call never reached the proxy"
-            threading.Timer(self.release_after or 0.5, self.release.set).start()
+            if self.release_after is not None:
+                timer = threading.Timer(self.release_after, self.release.set)
+                self.timers.append(timer)
+                timer.start()
         if self.revoke:
             assert _revoke_in_band(socket_path, job_token) == 200
         if self.fails is not None:
@@ -173,3 +179,21 @@ def test_a_graded_result_needs_the_channel_closed_before_the_container_ended() -
         usage_missing=False,
         channel_revoked=True,
     ) == ("FINISHED", None)
+
+
+def test_a_call_crossing_the_revoke_that_outlasts_the_drain_is_charged_its_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_p1_proxy_drain import _CALL
+
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "0.3")
+    job = _Job(monkeypatch, revoke=True, in_flight=True, first_call=(100, 50), release=False)
+    job.run()
+    assert job.done_at_settle == [False]
+    row = job.db.request(_PROJECT, _TASK, _KEY)
+    assert row["usage_status"] == "known"
+    assert (row["input_tokens"], row["output_tokens"]) == (100, 50)
+    assert row["usage_detail"]["proxy_drained"] is True
+    assert row["usage_detail"]["unknown_usage_calls"] == 1
+    assert row["usage_detail"]["unknown_reserved_tokens"] == _CALL
+    account = job.db.account(_PROJECT, _TASK)
+    assert account["spent_micro_usd"] == 150 + _CALL
+    assert account["held_micro_usd"] == 0
