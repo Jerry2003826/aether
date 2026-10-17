@@ -1387,6 +1387,9 @@ class ModelGateway:
             # urllib wraps connect and write errors alike in URLError, so the reason's type cannot tell
             # them apart; where it happened can. Once the connection was up, a reset, broken pipe or
             # timeout may come after request bytes reached the provider: sent, charged at the hold.
+            # A same-origin redirect reuses this one seen, so a second hop that never connects still
+            # counts as sent once the first hop was up. That can only overcharge, never undercharge;
+            # it is on purpose.
             raise GatewayDenied("upstream_error", sent=seen.up) from exc
         self._response_kind = "sse" if _is_event_stream(raw, content_type) else "json"
         decoded = raw.decode(errors="replace")
