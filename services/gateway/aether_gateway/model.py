@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import functools
+import http.client
 import json
 import logging
 import math
@@ -247,6 +249,56 @@ class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
         if not _same_origin(req.full_url, newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+class _ConnectSeen:
+    """up turns true once the TCP connection (and, for https, the TLS handshake) to the upstream is up.
+
+    From then on any byte of the request may have left this host, so a failure is treated as sent.
+    Before it, a failure (DNS, refused, connect timeout, TLS handshake) sent no request byte.
+    """
+
+    def __init__(self) -> None:
+        self.up = False
+
+
+class _SeenHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: Any, seen: _ConnectSeen, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._seen = seen
+
+    def connect(self) -> None:
+        super().connect()
+        self._seen.up = True
+
+
+class _SeenHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, seen: _ConnectSeen, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._seen = seen
+
+    def connect(self) -> None:
+        # HTTPSConnection.connect returns only after the TLS handshake.
+        super().connect()
+        self._seen.up = True
+
+
+class _SeenHTTPHandler(urllib.request.HTTPHandler):
+    def __init__(self, seen: _ConnectSeen) -> None:
+        super().__init__()
+        self._seen = seen
+
+    def http_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(functools.partial(_SeenHTTPConnection, seen=self._seen), req)
+
+
+class _SeenHTTPSHandler(urllib.request.HTTPSHandler):
+    def __init__(self, seen: _ConnectSeen) -> None:
+        super().__init__()
+        self._seen = seen
+
+    def https_open(self, req: urllib.request.Request) -> Any:
+        return self.do_open(functools.partial(_SeenHTTPSConnection, seen=self._seen), req, context=self._context)
 
 
 def _chat_url(base: str) -> str:
@@ -1302,7 +1354,10 @@ class ModelGateway:
             headers={"authorization": f"Bearer {self.provider_key}", "content-type": "application/json"},
             method="POST",
         )
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SameOriginRedirect)
+        seen = _ConnectSeen()
+        opener = urllib.request.build_opener(
+            urllib.request.ProxyHandler({}), _SameOriginRedirect, _SeenHTTPHandler(seen), _SeenHTTPSHandler(seen)
+        )
         window = upstream_deadline_seconds()
         deadline = time.monotonic() + window
         try:
@@ -1328,8 +1383,11 @@ class ModelGateway:
             provider = _provider_error_code(detail)
             code = f"upstream_http_{status_code}" if 400 <= status_code <= 599 else "upstream_error"
             raise GatewayDenied(code, sent=True, upstream_status=status_code or None, provider_error=provider) from exc
-        except (TimeoutError, urllib.error.URLError) as exc:
-            raise GatewayDenied("upstream_error", sent=_is_timeout(exc)) from exc
+        except (OSError, http.client.HTTPException) as exc:
+            # urllib wraps connect and write errors alike in URLError, so the reason's type cannot tell
+            # them apart; where it happened can. Once the connection was up, a reset, broken pipe or
+            # timeout may come after request bytes reached the provider: sent, charged at the hold.
+            raise GatewayDenied("upstream_error", sent=seen.up) from exc
         self._response_kind = "sse" if _is_event_stream(raw, content_type) else "json"
         decoded = raw.decode(errors="replace")
         if self.provider_key and self.provider_key in decoded:

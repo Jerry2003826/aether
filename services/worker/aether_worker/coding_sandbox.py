@@ -56,6 +56,11 @@ CODING_MEMORY_BYTES = 805306368
 # while the container runs, so a longer container time does not let it lapse.
 CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
+# The proxy (directory, job token) each container this process started is wired to, by job id.
+# A run always gets a fresh proxy directory and token, so a container found under any other
+# key was started by a worker whose proxy and socket are gone.
+_STARTED_ON: dict[str, tuple[str, str]] = {}
+_STARTED_LOCK = threading.Lock()
 
 
 class CodingSandboxError(Exception):
@@ -398,8 +403,19 @@ def _ensure_started(
     existing = coding_container_ids(job_id)
     if existing is None:
         raise CodingSandboxError("sandbox_unavailable")
+    wired = (str(proxy_dir.resolve()) if proxy_dir is not None else "", job_token or "")
     if existing:
-        return
+        with _STARTED_LOCK:
+            ours = _STARTED_ON.get(job_id) == wired
+        if ours:
+            return
+        # Left by a worker that died: it still talks to that worker's socket, which nothing serves.
+        # Its usage so far is already on the job's reservation row; the agent reruns from the base
+        # artifact on this run's proxy, and the publish stays fenced.
+        _LOG.warning("coding_stale_container_replaced job=%s", job_id)
+        release_coding_container(job_id)
+        if coding_container_ids(job_id) != []:
+            raise CodingSandboxError("stale_container_unconfirmed")
     if worker_delegates():
         if image != JOB_IMAGE:
             raise CodingSandboxError("sandbox_unavailable")
@@ -429,6 +445,9 @@ def _ensure_started(
         launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
     if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")
+    if launched.returncode == 0:
+        with _STARTED_LOCK:
+            _STARTED_ON[job_id] = wired
 
 
 def _wait_until_stopped(

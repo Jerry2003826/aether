@@ -33,7 +33,7 @@ from aether_worker.runner import JOB_IMAGE
 
 _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
 LEASE_SECONDS = 30
-_UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout_unconfirmed"})
+_UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout_unconfirmed", "stale_container_unconfirmed"})
 _CONFIRMED_STOP = frozenset({"cancelled", "deadline_exceeded", "timeout"})
 CODING_CALL_RESERVE_TOKENS = 4096
 CODING_CALL_RESERVE_MICRO_USD = 4096
