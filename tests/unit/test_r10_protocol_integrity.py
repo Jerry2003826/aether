@@ -108,3 +108,53 @@ def test_an_honest_suite_still_passes_and_packages_import(tmp_path: Path) -> Non
     (tmp_path / "test_b.py").write_text("import app\n\ndef test_b():\n    assert app.value() == 42\n", encoding="utf-8")
     code, body = _grade(tmp_path)
     assert (code, body["passed"], body["failed"]) == (0, 2, 0), body
+
+
+def test_new_files_and_non_grading_data_written_during_the_run_are_fine(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "data.json": "{}\n",
+            ".venv/lib/site.py": "x = 1\n",
+            "node_modules/pkg/index.js": "module.exports = 1\n",
+            "test_a.py": (
+                "import pathlib\nimport app\n\n"
+                "def test_a():\n"
+                "    pathlib.Path('run.log').write_text('log line\\n')\n"
+                "    pathlib.Path('tmp/out.txt').parent.mkdir()\n"
+                "    pathlib.Path('tmp/out.txt').write_text('x')\n"
+                "    pathlib.Path('data.json').write_text('{\"seen\": 1}\\n')\n"
+                "    pathlib.Path('.venv/lib/site.py').write_text('x = 2\\n')\n"
+                "    pathlib.Path('node_modules/pkg/index.js').write_text('changed')\n"
+                "    assert app.value() == 42\n"
+            ),
+            "test_b.py": "import app\n\ndef test_b():\n    assert app.value() == 42\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert not any(case["detail"] == "grading_tampered" for case in body["cases"]), body
+    assert (code, body["passed"], body["failed"]) == (0, 2, 0), body
+
+
+def test_deleting_or_changing_a_grading_file_is_still_tampering(tmp_path: Path) -> None:
+    for index, script in enumerate(
+        (
+            "pathlib.Path('oracle.py').unlink()",
+            "pathlib.Path('pyproject.toml').write_text('[tool.x]\\n')",
+        )
+    ):
+        root = tmp_path / str(index)
+        root.mkdir()
+        _write(
+            root,
+            {
+                "app.py": "def value():\n    return 42\n",
+                "oracle.py": "def expected():\n    return 42\n",
+                "pyproject.toml": "[project]\nname = 'x'\n",
+                "test_a.py": f"import pathlib\nimport app\n\ndef test_a():\n    {script}\n    assert app.value() == 42\n",
+            },
+        )
+        code, body = _grade(root)
+        assert code == 1, body
+        assert {"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"} in body["cases"], body
