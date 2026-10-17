@@ -16,7 +16,7 @@ from typing import Any, BinaryIO
 from docker.errors import DockerException
 
 from aether_worker.container_runtime import container_logs
-from aether_worker.openhands_image import IMAGE_UNAVAILABLE, launch_image
+from aether_worker.openhands_image import IMAGE_UNAVAILABLE, RUN_IMAGE_REASONS, launch_image
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
@@ -314,9 +314,11 @@ def _ensure_started(
             )
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
-        if launched.returncode != 0 and (launched.stderr or "").strip() == IMAGE_UNAVAILABLE:
-            # Image prep failed before the roles started; the runner has no sandbox image to run.
-            raise CodingSandboxError("image_unavailable")
+        marker = (launched.stderr or "").strip()
+        if launched.returncode != 0 and (marker == IMAGE_UNAVAILABLE or marker in RUN_IMAGE_REASONS):
+            # The runner has no usable image: prep failed before the roles started, or the run's
+            # image could not be pulled or lacked its label. The precise reason rides in the payload.
+            raise CodingSandboxError("image_unavailable", {"reason": marker})
     else:
         try:
             runtime_image = launch_image(image, JOB_IMAGE)

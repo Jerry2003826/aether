@@ -19,6 +19,12 @@ DOCKERFILE = "infra/openhands-sandbox.Dockerfile"
 # The runner answers a delegated "run" with this stderr when no sandbox image exists; the worker
 # matches it to fail the job as image_unavailable. One constant so the two sides cannot drift.
 IMAGE_UNAVAILABLE = "image_unavailable"
+# The other ImageUnavailable reasons container_runtime answers a run with when the image could not
+# be made present (a pull was tried, or the image lacks its context-hash label).
+IMAGE_PULL_FAILED = "image_pull_failed"
+IMAGE_LABEL_MISMATCH = "image_label_mismatch"
+# Every stderr marker of a run that failed because no usable image exists; the worker reads each as image_unavailable.
+RUN_IMAGE_REASONS = frozenset({IMAGE_UNAVAILABLE, IMAGE_PULL_FAILED, IMAGE_LABEL_MISMATCH})
 # Always hashed, even if the Dockerfile stops naming them: the environment and its lock files.
 _CONTEXT_ROOTS = ("environments/openhands",)
 _LOCK_FILES = ("environments/openhands/pyproject.toml", "environments/openhands/uv.lock")
@@ -199,9 +205,9 @@ def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build:
         else:
             if acceptable(pulled):
                 return str(pulled.id)
-            pull_error = ImageUnavailable("image_label_mismatch", tag)
+            pull_error = ImageUnavailable(IMAGE_LABEL_MISMATCH, tag)
     if not allow_build:
-        raise ImageUnavailable("image_pull_failed" if allow_pull else "image_unavailable", tag) from pull_error
+        raise ImageUnavailable(IMAGE_PULL_FAILED if allow_pull else IMAGE_UNAVAILABLE, tag) from pull_error
     if not sandbox:
         raise ImageUnavailable("image_build_unsupported", tag) from pull_error
     try:
@@ -210,7 +216,7 @@ def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build:
     except (DockerException, OSError) as exc:
         raise ImageUnavailable("image_build_failed", tag) from exc
     if not acceptable(image):
-        raise ImageUnavailable("image_label_mismatch", tag)
+        raise ImageUnavailable(IMAGE_LABEL_MISMATCH, tag)
     return str(image.id)
 
 
