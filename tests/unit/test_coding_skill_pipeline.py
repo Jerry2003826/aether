@@ -109,6 +109,23 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
     )
 
 
+def test_a_terminal_only_agent_patch_is_published_without_file_editor_calls() -> None:
+    parsed = parse_workspace(json.dumps(_workspace()).encode())
+    agent_patch = "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 0\n+    return 7\n"
+    terminal = _sandbox(1, requests=2, edits=0, patch=agent_patch)
+    assert _patch_source(terminal) == "agent_edit"
+    assert _published_patch(parsed, terminal) == agent_patch.encode()
+    unknown = _sandbox(1, requests=2, patch=agent_patch)
+    unknown["result"]["edit_calls"] = "not-a-number"
+    assert _patch_source(unknown) == "agent_edit"
+    assert _published_patch(parsed, unknown) == agent_patch.encode()
+    for rejected in ("", "diff --git a/app.py b/app.py\n", None, 7):
+        sandbox = _sandbox(1, requests=2, edits=3)
+        sandbox["result"]["patch"] = rejected
+        assert _patch_source(sandbox) == "candidate_files"
+        assert b"return 42" in _published_patch(parsed, sandbox)
+
+
 def test_coding_job_log_has_no_patch_text(caplog) -> None:
     caplog.set_level(logging.INFO, logger="aether.worker.coding")
     _log_job(
