@@ -30,6 +30,9 @@ class _Result:
     def first(self) -> dict[str, Any] | None:
         return self._rows[0] if self._rows else None
 
+    def all(self) -> list[dict[str, Any]]:
+        return list(self._rows)
+
     def scalar(self) -> Any:
         if not self._rows:
             return None
@@ -118,6 +121,22 @@ class FakeLedgerDatabase:
                 if project_id == params["project_id"] and task_id == params["task_id"] and key.startswith(prefix)
             )
             return _Result([{"count": count}])
+        if sql.startswith("SELECT request_key FROM model_requests") and "LIKE :prefix" in sql:
+            prefix = params["prefix"].rstrip("%")
+            keys = sorted(
+                key
+                for (project_id, task_id, key), row in self.requests.items()
+                if project_id == params["project_id"]
+                and task_id == params["task_id"]
+                and key.startswith(prefix)
+                and ("role = 'coding'" not in sql or row.get("role") == "coding")
+                and ("usage_status = 'reserved'" not in sql or row["usage_status"] == "reserved")
+            )
+            return _Result([{"request_key": key} for key in keys])
+        if "FROM coding_jobs" in sql:
+            # This fake keeps no coding_jobs table: the attempt under test still holds its fence.
+            # CodingSqlFake models the table and answers this for real.
+            return _Result([{"one": 1}])
         if "FROM model_requests" in sql:
             row = self.requests.get((params["project_id"], params["task_id"], params.get("request_key", "")))
             if row is None or ("usage_status = 'reserved'" in sql and row["usage_status"] != "reserved"):
