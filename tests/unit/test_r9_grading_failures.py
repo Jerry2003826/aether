@@ -32,7 +32,7 @@ def _result(detail: str) -> dict:
     }
 
 
-@pytest.mark.parametrize("detail", ["grading_startup_hook"])
+@pytest.mark.parametrize("detail", ["grading_startup_hook", "grading_shadow_module"])
 def test_grading_violation_exit_1_is_failed_with_the_agent_patch(monkeypatch, detail: str) -> None:
     stdout = ("RESULT " + json.dumps(_result(detail)) + "\n").encode()
     monkeypatch.setattr(coding_sandbox, "worker_delegates", lambda: False)

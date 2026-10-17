@@ -112,3 +112,15 @@ def test_grading_protocol_never_reads_pytest_configuration() -> None:
     imported |= {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     assert not imported & {"pytest", "_pytest", "pluggy", "tomllib", "configparser"}
     assert 'glob("test_*.py")' in source
+
+
+def test_new_top_level_modules_that_shadow_imports_are_detected() -> None:
+    from aether_worker.grading_files import is_shadow_module
+    from aether_worker.verification import _SHADOW_ROOTS
+
+    for name in sorted(_SHADOW_ROOTS):
+        assert is_shadow_module(name) or is_shadow_module(name + "/__init__.py"), name
+    for name in ("pytest.py", "_pytest/__init__.py", "pluggy.py", "json.py", "json/__init__.py", "os.py", "openhands/x.py"):
+        assert is_shadow_module(name), name
+    for name in ("helper.py", "newmod.py", "app.py", "pkg/json.py", "README.md"):
+        assert not is_shadow_module(name), name

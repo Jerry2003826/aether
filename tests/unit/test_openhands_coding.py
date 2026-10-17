@@ -12,6 +12,8 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
+
 from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.openhands_image import OPENHANDS_VERSION, launch_image
 from aether_worker.runner import JOB_IMAGE
@@ -722,6 +724,33 @@ def test_added_hidden_pytest_config_cannot_redirect_grading(tmp_path: Path) -> N
     assert body["passed"] == 0
     assert [case["name"] for case in body["cases"]] == ["test_app.test_value"]
     assert body["cases"][0]["verdict"] == "FAIL"
+
+
+@pytest.mark.parametrize("planted", ["pytest.py", "_pytest/__init__.py", "json.py"])
+def test_added_shadow_module_is_deleted_and_fails_the_job(tmp_path: Path, planted: str) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    script = (
+        "import os, sys\n"
+        "job = sys.argv[1]\n"
+        "open(job + '/app.py', 'w').write('def value():\\n    return 42\\n')\n"
+        f"target = os.path.join(job, {planted!r})\n"
+        "os.makedirs(os.path.dirname(target), exist_ok=True)\n"
+        "open(target, 'w').write('raise SystemExit(0)\\n')\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    job = tmp_path / "job"
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert body["passed"] == 0
+    assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "grading_shadow_module"}]
+    assert not (job / planted.split("/")[0]).exists()
+    assert "+++ b/app.py" in body["patch"]
 
 
 class _SocketModel:
