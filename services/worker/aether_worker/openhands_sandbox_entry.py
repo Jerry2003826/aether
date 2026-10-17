@@ -232,7 +232,7 @@ def _blank_report() -> dict[str, object]:
     }
 
 
-def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], job: Path) -> dict[str, object]:
+def _collect(agent: Agent, conversation: Conversation) -> dict[str, object]:
     usage = agent.llm.metrics.accumulated_token_usage
     incoming = int(usage.prompt_tokens) if usage is not None else 0
     outgoing = int(usage.completion_tokens) if usage is not None else 0
@@ -245,7 +245,8 @@ def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], j
         "output_tokens": outgoing,
         "edit_calls": edits,
         "model_requests": len(agent.llm.metrics.token_usages),
-        "patch": _patch(before, job),
+        # Filled in by main after stop_agent_processes, so late writers are included.
+        "patch": "",
         "agent_completed": True,
     }
 
@@ -273,7 +274,7 @@ def system_prompt(job: Path) -> str:
     )
 
 
-def _run_agent(job: Path, before: dict[str, str], objective: str) -> dict[str, object]:
+def _run_agent(job: Path, objective: str) -> dict[str, object]:
     report = _blank_report()
     socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
     token = os.environ.get("AETHER_JOB_TOKEN", "")
@@ -316,7 +317,7 @@ def _run_agent(job: Path, before: dict[str, str], objective: str) -> dict[str, o
         conversation.send_message(objective)
         conversation.run()
         if conversation.state.execution_status == ConversationExecutionStatus.FINISHED:
-            report = _collect(agent, conversation, before, job)
+            report = _collect(agent, conversation)
     except Exception as exc:
         sys.stderr.write(f"agent_failed {type(exc).__name__}\n")
         return report
@@ -545,8 +546,11 @@ def main() -> None:
         job = job_directory()
         copy_tree(WORK, job)
         before = _snapshot(job)
-        agent_report = _run_agent(job, before, objective)
+        agent_report = _run_agent(job, objective)
         stop_agent_processes()
+        # Taken only once nothing the agent started can still write, and before grading files
+        # are restored, so the published patch is the code that gets graded (plus any tampering).
+        agent_report["patch"] = _patch(before, job)
         restore_grading_directory(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
