@@ -10,12 +10,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 from sqlalchemy import text
 
-from aether_gateway.model import CODING_CALL_OUTPUT_CAP, GatewayDenied, ModelGateway
+from aether_gateway.model import CODING_CALL_OUTPUT_CAP, GatewayDenied, ModelGateway, chat_prompt, estimate_input_tokens
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from tests.integration.sysfix_b_helpers import project
 
 _KEY = "gateway-provider-key"
+# A fixed reservation must hold the request's estimated input as well as the output cap.
+_SMALL_CALL_TOKENS = CODING_CALL_OUTPUT_CAP + 512
 
 
 class _Upstream(BaseHTTPRequestHandler):
@@ -68,6 +70,15 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
         token_limit=1_000,
         max_requests=4,
     )
+    first = {
+        "model": "openai/coder",
+        "messages": [{"role": "user", "content": "one"}],
+        "timeout": 1e12,
+        "stream": True,
+        "user": "root",
+        "max_tokens": 99999,
+    }
+    one_call = estimate_input_tokens(chat_prompt(first)) + CODING_CALL_OUTPUT_CAP
     request_key = f"coding-admit-{uuid.uuid4().hex}"
     fencing = 1
     binding = _leased_job(database, owner_id=owner_id, project_id=project_id, task_id=task_id, fencing=fencing)
@@ -78,7 +89,7 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
         request_key=request_key,
         amount=4096,
         role="coding",
-        tokens=CODING_CALL_OUTPUT_CAP,
+        tokens=one_call,
         model_alias="coder",
     )
     assert reserved is True
@@ -99,14 +110,6 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
         job_id=binding["job_id"],
         operation_id=binding["operation_id"],
     )
-    first = {
-        "model": "openai/coder",
-        "messages": [{"role": "user", "content": "one"}],
-        "timeout": 1e12,
-        "stream": True,
-        "user": "root",
-        "max_tokens": 99999,
-    }
     try:
         gateway.relay_chat(token, first)
         with pytest.raises(GatewayDenied) as replayed:
@@ -166,7 +169,7 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
     assert by_role["coding_call"]["model_revision"] == "coder-upstream"
     assert int(account["held_micro_usd"]) == 4096
     assert int(account["requests_admitted"]) == 1
-    assert int(account["tokens_held"]) == CODING_CALL_OUTPUT_CAP
+    assert int(account["tokens_held"]) == one_call
     live = [row["request_key"] for row in grants if row["live"]]
     revoked = [row["request_key"] for row in grants if not row["live"]]
     assert live == [request_key]
@@ -268,7 +271,7 @@ def _prepare_task(
         request_key=request_key,
         amount=4096,
         role="coding",
-        tokens=CODING_CALL_OUTPUT_CAP,
+        tokens=_SMALL_CALL_TOKENS,
         model_alias="coder",
     )
     job = _leased_job(

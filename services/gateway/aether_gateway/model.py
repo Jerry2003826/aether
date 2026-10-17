@@ -34,6 +34,16 @@ SCRIPTED_PROMPT_TOKENS = 8
 SCRIPTED_COMPLETION_TOKENS = 4
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
+# Upper-bound guess of input tokens from request bytes. Real tokenizers average
+# more than two bytes per token for English and code, so this over-reserves; the
+# measured usage settles the difference after the call.
+INPUT_BYTES_PER_TOKEN = 2
+
+
+def estimate_input_tokens(prompt: str) -> int:
+    """Tokens held for the request body before it is sent. Never zero."""
+    size = len(prompt.encode("utf-8"))
+    return max(1, -(-size // INPUT_BYTES_PER_TOKEN))
 
 
 def coding_reservation_gap(
@@ -42,11 +52,15 @@ def coding_reservation_gap(
     measured_tokens: int,
     pending_tokens: int,
     call_reserve_tokens: int | None,
+    call_tokens: int = CODING_CALL_OUTPUT_CAP,
 ) -> int | None:
-    """Tokens to append so the next call fits. None means this reservation does not grow."""
+    """Tokens to append so the next call fits. None means this reservation does not grow.
+
+    call_tokens is this call's estimated input plus the output cap.
+    """
     if call_reserve_tokens is None or call_reserve_tokens < 1:
         return None
-    allowance = max(call_reserve_tokens, CODING_CALL_OUTPUT_CAP)
+    allowance = max(call_reserve_tokens, call_tokens)
     need = measured_tokens + pending_tokens + allowance
     if reserved_tokens >= need:
         return 0
@@ -397,6 +411,7 @@ class ModelGateway:
         self.timeout = timeout
         self.audit: list[str] = []
         self._coding_child_key = ""
+        self._coding_call_tokens = CODING_CALL_OUTPUT_CAP
         self._response_kind = "json"
 
     def issue_token(
@@ -639,6 +654,7 @@ class ModelGateway:
         fencing = _fencing_token(scope.get("attempt_id"))
         attempt_id = str(fencing)
         prompt_sha = sha256_text(prompt)
+        call_tokens = estimate_input_tokens(prompt) + CODING_CALL_OUTPUT_CAP
         child_key = f"{parent_key}:call:{prompt_sha}"
         self._open_coding_ticket(
             project_id=project_id,
@@ -651,6 +667,7 @@ class ModelGateway:
             job_id=job_id,
             operation_id=operation_id,
             fencing=fencing,
+            call_tokens=call_tokens,
         )
         try:
             child_token = self.issue_token(
@@ -677,6 +694,7 @@ class ModelGateway:
             raise
         self._close_coding_ticket(project_id, task_id, child_key)
         self._coding_child_key = child_key
+        self._coding_call_tokens = call_tokens
         return CODING_CALL_OUTPUT_CAP
 
     def _require_coding_lease(
@@ -724,6 +742,7 @@ class ModelGateway:
         job_id: str,
         operation_id: str,
         fencing: int,
+        call_tokens: int = CODING_CALL_OUTPUT_CAP,
     ) -> None:
         with self.database.transaction(project_id=project_id) as conn:
             if not _coding_lease_held(
@@ -773,9 +792,10 @@ class ModelGateway:
                 measured_tokens=measured,
                 pending_tokens=pending,
                 call_reserve_tokens=call_reserve,
+                call_tokens=call_tokens,
             )
             if gap is None:
-                if reserved_tokens < 1 or measured + pending + CODING_CALL_OUTPUT_CAP > reserved_tokens:
+                if reserved_tokens < 1 or measured + pending + call_tokens > reserved_tokens:
                     raise GatewayDenied("budget_exceeded")
             elif gap > 0:
                 call_micro = _positive_int(detail.get("call_reserve_micro_usd")) or call_reserve or gap
@@ -798,7 +818,7 @@ class ModelGateway:
                     gap,
                     micro,
                 )
-            detail["pending_tokens"] = pending + CODING_CALL_OUTPUT_CAP
+            detail["pending_tokens"] = pending + call_tokens
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -820,7 +840,8 @@ class ModelGateway:
             if int(used or 0) >= CODING_MAX_MODEL_CALLS:
                 raise GatewayDenied("budget_exceeded")
             child_detail = {
-                "reserved_tokens": CODING_CALL_OUTPUT_CAP,
+                "reserved_tokens": call_tokens,
+                "input_estimate_tokens": call_tokens - CODING_CALL_OUTPUT_CAP,
                 "dispatch_state": "sending",
                 "dispatch_holder": attempt_id,
                 "prompt_sha256": prompt_sha,
@@ -899,7 +920,8 @@ class ModelGateway:
                 if isinstance(detail, str):
                     detail = json.loads(detail)
                 detail = dict(detail or {})
-                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+                held = _positive_int(_object_detail(row["usage_detail"]).get("reserved_tokens")) or CODING_CALL_OUTPUT_CAP
+                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - held)
                 conn.execute(
                     text(
                         "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -988,7 +1010,7 @@ class ModelGateway:
             if row is None:
                 return
             detail = _object_detail(row["usage_detail"])
-            detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+            detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
             if counted is None:
                 detail["usage_missing"] = True
             else:
@@ -1042,7 +1064,7 @@ class ModelGateway:
             if exc.provider_error:
                 detail["provider_error"] = exc.provider_error
             if release_pending:
-                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - CODING_CALL_OUTPUT_CAP)
+                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
