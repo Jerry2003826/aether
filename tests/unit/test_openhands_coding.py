@@ -106,7 +106,7 @@ def test_entry_source_calls_the_agent_and_launch_keeps_other_images(monkeypatch)
         assert str(exc) == "image_unavailable"
     else:
         raise AssertionError("missing sandbox image was accepted")
-    args = container_arguments(Path("."), JOB_IMAGE)
+    args = container_arguments(Path("."), JOB_IMAGE, objective="make value() return 42")
     assert args[-1] == "/opt/aether/openhands_sandbox_entry.py"
     assert "importlib" not in " ".join(args)
     assert str(CODING_MEMORY_BYTES) in args

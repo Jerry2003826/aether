@@ -178,6 +178,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         )
         if early is not None:
             return early
+        objective = _job_objective(row)
         workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
         _ensure_account(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
         reserve_tokens = coding_call_reserve_tokens()
@@ -240,6 +241,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 try:
                     sandbox = run_coding_sandbox(
                         root,
+                        objective=objective,
                         job_id=job_id,
                         proxy_dir=proxy.directory,
                         job_token=model_token,
@@ -358,7 +360,9 @@ def _claim(database: Database, *, owner_id: str, project_id: str, job_id: str) -
             row = conn.execute(
                 text(
                     "SELECT id::text AS id, task_id::text AS task_id, operation_id::text AS operation_id, "
-                    "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state "
+                    "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state, "
+                    "(SELECT o.normalized_arguments ->> 'objective' FROM operations o "
+                    "WHERE o.project_id = coding_jobs.project_id AND o.id = coding_jobs.operation_id) AS objective "
                     "FROM coding_jobs WHERE project_id = :project_id AND id = :id AND state = ANY(:states) FOR UPDATE"
                 ),
                 {"project_id": project_id, "id": job_id, "states": list(_OPEN)},
@@ -1119,6 +1123,14 @@ def _issue_coding_token(
         job_id=job_id,
         operation_id=operation_id,
     )
+
+
+def _job_objective(row: dict[str, Any]) -> str:
+    """The objective stored in the claimed operation's arguments. There is no default prompt."""
+    objective = row.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        raise CodingError("objective_missing")
+    return objective
 
 
 def _agent_patch(sandbox: dict[str, Any]) -> str | None:

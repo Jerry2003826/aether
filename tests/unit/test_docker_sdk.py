@@ -71,7 +71,7 @@ def test_run_and_pull_use_the_sdk_and_not_subprocess(tmp_path: Path, monkeypatch
         version = execute_docker(["info", "--format", "{{.ServerVersion}}"])
         digest = "python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f"
         pulled = execute_docker(["pull", digest])
-        args = container_arguments(tmp_path, "python:3.12-alpine")
+        args = container_arguments(tmp_path, "python:3.12-alpine", objective="make value() return 42")
         with pytest.raises(subprocess.TimeoutExpired):
             execute_docker(args, timeout=3)
     finally:

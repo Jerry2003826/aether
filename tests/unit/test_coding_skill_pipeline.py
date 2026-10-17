@@ -128,7 +128,7 @@ def test_coding_job_log_has_no_patch_text(caplog) -> None:
 
 
 def test_coding_container_is_offline_read_only_and_limited(tmp_path) -> None:
-    args = container_arguments(tmp_path, "python:3.12-alpine")
+    args = container_arguments(tmp_path, "python:3.12-alpine", objective="make value() return 42")
     assert args[0] == "run"
     assert "--network" in args and args[args.index("--network") + 1] == "none"
     assert "--read-only" in args
@@ -142,7 +142,9 @@ def test_coding_container_is_offline_read_only_and_limited(tmp_path) -> None:
     assert str(CODING_MEMORY_BYTES) in args
     proxy = tmp_path / "aether-model-proof"
     proxy.mkdir()
-    mounted = container_arguments(tmp_path, "python:3.12-alpine", proxy_dir=proxy, job_token="job-token-unit")
+    mounted = container_arguments(
+        tmp_path, "python:3.12-alpine", objective="make value() return 42", proxy_dir=proxy, job_token="job-token-unit"
+    )
     mounted_text = " ".join(mounted)
     assert f"{proxy.resolve()}:/run/aether/proxy:rw" in mounted_text
     assert "AETHER_MODEL_SOCKET=/run/aether/proxy/model.sock" in mounted_text

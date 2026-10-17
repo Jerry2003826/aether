@@ -29,6 +29,7 @@ WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
 EXECUTOR = "openhands.sdk.Agent"
 _STATE_DIR = ".aether-state"
+_OBJECTIVE = "AETHER_OBJECTIVE"
 _SKIP = {".git", "__pycache__", _STATE_DIR}
 
 
@@ -233,7 +234,30 @@ def _collect(agent: Agent, conversation: Conversation, before: dict[str, str], j
     }
 
 
-def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
+class ObjectiveMissing(RuntimeError):
+    pass
+
+
+def job_objective() -> str:
+    """The job objective from the environment, unchanged. A missing or blank one is a runner failure."""
+    objective = os.environ.get(_OBJECTIVE, "")
+    if not objective.strip():
+        raise ObjectiveMissing("objective_missing")
+    return objective
+
+
+def system_prompt(job: Path) -> str:
+    """Generic coding instructions. The objective is not part of it; it arrives as the user message."""
+    return (
+        "You are a coding agent. The user message is the task. "
+        f"The repository is the directory {job}; work only inside it and use absolute paths under it. "
+        "Read the relevant files, then make the change with file_editor or the terminal. "
+        "Tests are restored and run after you finish, so do not edit test files to make them pass. "
+        "There is no network access. Call finish when the change is complete."
+    )
+
+
+def _run_agent(job: Path, before: dict[str, str], objective: str) -> dict[str, object]:
     report = _blank_report()
     socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
     token = os.environ.get("AETHER_JOB_TOKEN", "")
@@ -261,7 +285,7 @@ def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
                 Tool(name=terminal_tool.TerminalTool.name, params={"terminal_type": "subprocess"}),
             ],
             condenser=None,
-            system_prompt="Edit the requested file with file_editor, then call finish. Do not use any other network.",
+            system_prompt=system_prompt(job),
         )
         state = job / _STATE_DIR
         state.mkdir(parents=True, exist_ok=True)
@@ -273,8 +297,7 @@ def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
             visualizer=None,
             persistence_dir=state,
         )
-        target = job / "app.py"
-        conversation.send_message(f"Edit {target} with file_editor str_replace so it returns 42, then call finish.")
+        conversation.send_message(objective)
         conversation.run()
         if conversation.state.execution_status == ConversationExecutionStatus.FINISHED:
             report = _collect(agent, conversation, before, job)
@@ -413,10 +436,11 @@ def main() -> None:
     started = time.monotonic()
     try:
         become_subreaper()
+        objective = job_objective()
         job = job_directory()
         copy_tree(WORK, job)
         before = _snapshot(job)
-        agent_report = _run_agent(job, before)
+        agent_report = _run_agent(job, before, objective)
         stop_agent_processes()
         restore_baseline_tests(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
@@ -428,6 +452,8 @@ def main() -> None:
         payload = _protocol_payload(result.stdout or "")
     except SystemExit:
         raise
+    except ObjectiveMissing:
+        emit(_failure("objective_missing"), 2)
     except Exception as exc:
         emit(_failure(type(exc).__name__), 2)
     payload.update(agent_report)

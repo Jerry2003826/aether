@@ -17,7 +17,7 @@ def test_stop_uses_a_ten_second_grace_and_checks_the_job_label(tmp_path) -> None
     flat = [part for command in commands for part in command]
     assert "10" in flat
     assert f"label=aether.coding={job_id}" in flat
-    args = container_arguments(tmp_path, "python:3.12-alpine", job_id=job_id)
+    args = container_arguments(tmp_path, "python:3.12-alpine", objective="make value() return 42", job_id=job_id)
     assert f"aether.coding={job_id}" in args
     assert "docker.sock" not in " ".join(args)
 

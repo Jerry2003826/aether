@@ -17,6 +17,7 @@ from aether_worker.openhands_image import launch_image
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
+    accepted_objective,
     remote_completed,
     remote_logs,
     remote_run,
@@ -45,15 +46,28 @@ def container_name(job_id: str) -> str:
     return f"aether-code-{token}"
 
 
+def checked_objective(objective: object) -> str:
+    """The objective text, unchanged, or objective_invalid. It is never formatted into a command."""
+    try:
+        return accepted_objective(objective)
+    except SandboxDelegateError as exc:
+        raise CodingSandboxError("objective_invalid") from exc
+
+
 def container_arguments(
     workspace: Path,
     image: str,
     *,
+    objective: str,
     job_id: str | None = None,
     proxy_dir: Path | None = None,
     job_token: str | None = None,
 ) -> list[str]:
-    """Flags only. The caller supplies docker and does not inherit the worker environment."""
+    """Flags only. The caller supplies docker and does not inherit the worker environment.
+
+    The objective is one argv element, so no shell sees it; the entry sends it as the user message.
+    """
+    text = checked_objective(objective)
     labels: list[str] = []
     if job_id is not None:
         labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding"]
@@ -105,6 +119,8 @@ def container_arguments(
         "PATH=/usr/local/bin:/usr/bin:/bin:/opt/openhands/.venv/bin",
         "-e",
         "OPENHANDS_SUPPRESS_BANNER=1",
+        "-e",
+        f"AETHER_OBJECTIVE={text}",
         *proxy,
         "-v",
         f"{workspace.resolve()}:/work:ro",
@@ -196,6 +212,7 @@ def release_coding_container(job_id: str) -> None:
 def run_coding_sandbox(
     workspace: Path,
     *,
+    objective: str,
     image: str = JOB_IMAGE,
     timeout_seconds: int = CODING_SANDBOX_TIMEOUT_SECONDS,
     job_id: str | None = None,
@@ -209,8 +226,9 @@ def run_coding_sandbox(
 ) -> dict[str, Any]:
     if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
         raise CodingSandboxError("sandbox_unavailable")
+    text = checked_objective(objective)
     chosen = job_id or str(uuid.uuid4())
-    _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token)
+    _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token, objective=text)
     return _wait_until_stopped(
         chosen,
         timeout_seconds=timeout_seconds,
@@ -229,6 +247,7 @@ def _ensure_started(
     *,
     proxy_dir: Path | None,
     job_token: str | None,
+    objective: str,
 ) -> None:
     existing = coding_container_ids(job_id)
     if existing is None:
@@ -239,7 +258,9 @@ def _ensure_started(
         if image != JOB_IMAGE:
             raise CodingSandboxError("sandbox_unavailable")
         try:
-            launched = remote_run(workspace, job_id, proxy_dir=proxy_dir, job_token=job_token or "", timeout=180)
+            launched = remote_run(
+                workspace, job_id, proxy_dir=proxy_dir, job_token=job_token or "", objective=objective, timeout=180
+            )
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
     else:
@@ -250,7 +271,7 @@ def _ensure_started(
         args = [
             part
             for part in container_arguments(
-                workspace, runtime_image, job_id=job_id, proxy_dir=proxy_dir, job_token=job_token
+                workspace, runtime_image, objective=objective, job_id=job_id, proxy_dir=proxy_dir, job_token=job_token
             )
             if part != "--rm"
         ]
