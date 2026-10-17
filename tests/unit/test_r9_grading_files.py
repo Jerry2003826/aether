@@ -124,3 +124,36 @@ def test_new_top_level_modules_that_shadow_imports_are_detected() -> None:
         assert is_shadow_module(name), name
     for name in ("helper.py", "newmod.py", "app.py", "pkg/json.py", "README.md"):
         assert not is_shadow_module(name), name
+
+
+def test_shadow_set_comes_from_the_installed_names_source(monkeypatch) -> None:
+    """Modelled on a minimal sandbox image: only its own packages, stdlib/builtins and SHADOW_ROOTS shadow."""
+    from aether_worker import grading_files
+
+    monkeypatch.setattr(grading_files, "_installed_top_level", lambda: frozenset({"openhands", "litellm"}))
+    grading_files.shadow_names.cache_clear()
+    try:
+        for name in ("utils.py", "config.py", "utils/__init__.py", "helper.py"):
+            assert not grading_files.is_shadow_module(name), name
+        for name in ("json.py", "os.py", "litellm.py", "openhands/__init__.py", "pytest.py", "_pytest/__init__.py"):
+            assert grading_files.is_shadow_module(name), name
+        monkeypatch.setattr(grading_files, "_installed_top_level", lambda: frozenset({"utils"}))
+        grading_files.shadow_names.cache_clear()
+        assert grading_files.is_shadow_module("utils.py")
+    finally:
+        grading_files.shadow_names.cache_clear()
+
+
+def test_worker_side_never_computes_the_shadow_set() -> None:
+    """Only the sandbox entry may call the shadow functions; the worker consumes grading_shadow_module only."""
+    import ast
+
+    allowed = {"grading_files.py", "openhands_sandbox_entry.py"}
+    for path in sorted(Path("services").rglob("*.py")):
+        if path.name in allowed or ".venv" in path.parts:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        names = {node.attr for node in ast.walk(tree) if isinstance(node, ast.Attribute)}
+        names |= {node.id for node in ast.walk(tree) if isinstance(node, ast.Name)}
+        names |= {alias.name for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) for alias in node.names}
+        assert not names & {"is_shadow_module", "shadow_names", "_installed_top_level"}, path

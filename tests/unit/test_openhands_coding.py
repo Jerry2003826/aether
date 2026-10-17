@@ -753,6 +753,38 @@ def test_added_shadow_module_is_deleted_and_fails_the_job(tmp_path: Path, plante
     assert "+++ b/app.py" in body["patch"]
 
 
+@pytest.mark.parametrize("added", ["utils.py", "config.py"])
+def test_added_generic_module_is_kept_and_graded(tmp_path: Path, added: str) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    # The sandbox venv stands in for the image; it must not ship a package with this name.
+    probe = subprocess.run(
+        [str(_PYTHON.absolute()), "-I", "-c", "from importlib import metadata; print(sorted(metadata.packages_distributions()))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    assert repr(added[:-3]) not in probe.stdout, f"{added[:-3]} is installed in the sandbox venv"
+    script = (
+        "import sys\n"
+        "job = sys.argv[1]\n"
+        f"open(job + '/{added}', 'w').write('ANSWER = 42\\n')\n"
+        f"open(job + '/app.py', 'w').write('from {added[:-3]} import ANSWER\\n\\ndef value():\\n    return ANSWER\\n')\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    job = tmp_path / "job"
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert body["passed"] == 1 and body["failed"] == 0
+    assert (job / added).read_text(encoding="utf-8") == "ANSWER = 42\n"
+    assert f"+++ b/{added}" in body["patch"]
+
+
 class _SocketModel:
     def __init__(
         self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
