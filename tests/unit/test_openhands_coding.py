@@ -712,7 +712,9 @@ _EDIT_SOURCES = (
 )
 
 
-def _run_tamper_job(tmp_path: Path, script: str, files: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], dict]:
+def _run_tamper_job(
+    tmp_path: Path, script: str, files: dict[str, str], *, revoke_mode: str = "ok"
+) -> tuple[subprocess.CompletedProcess[str], dict]:
     tamper = tmp_path / "tamper.py"
     tamper.write_text(script, encoding="utf-8")
     work = tmp_path / "work"
@@ -721,6 +723,7 @@ def _run_tamper_job(tmp_path: Path, script: str, files: dict[str, str]) -> tuple
     for name, text in files.items():
         (work / name).write_text(text, encoding="utf-8")
     fake = _SocketModel(terminal_command=f"{sys.executable} {tamper} {job}")
+    fake.revoke_mode = revoke_mode
     fake.start()
     protocol = Path("services/worker/aether_worker/coding_protocol.py")
     env = os.environ.copy()
@@ -1069,6 +1072,9 @@ class _SocketModel:
         self.tool_names: set[str] = set()
         self.models: list[str] = []
         self.revoked = False
+        # How the fake answers the entry's revoke: ok (200, socket removed), status (500), drop (closes
+        # without answering), hang (answers after the entry's timeout), keep (200, socket left in place).
+        self.revoke_mode = "ok"
         self._calls = 0
         self._server = _UnixServer(str(self.path), _Handler)
         self._server.model = self
@@ -1173,10 +1179,19 @@ class _Handler(socketserver.StreamRequestHandler):
         _method, path, headers, raw = parsed
         if path == "/aether/revoke":
             # Like the host proxy: the job token ends the channel and the socket goes away.
-            self.server.model.revoked = headers.get("authorization", "") == "Bearer job-token-unit"
+            model = self.server.model
+            mode = model.revoke_mode
+            if mode == "drop":
+                return
+            if mode == "hang":
+                time.sleep(8)
+            if mode == "status":
+                self.wfile.write(b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+                return
+            model.revoked = headers.get("authorization", "") == "Bearer job-token-unit"
             self.wfile.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
-            if self.server.model.revoked:
-                self.server.model.path.unlink(missing_ok=True)
+            if model.revoked and mode != "keep":
+                model.path.unlink(missing_ok=True)
             return
         payload = self.server.model.reply(raw, headers.get("authorization", ""))
         encoded = json.dumps(payload).encode()
@@ -1391,3 +1406,25 @@ def test_candidate_code_cannot_use_the_model_channel_during_grading(tmp_path: Pa
         {"name": "test_app.test_no_model_channel", "verdict": "PASS", "detail": ""},
         {"name": "test_app.test_value", "verdict": "PASS", "detail": ""},
     ], completed.stdout + completed.stderr
+
+
+@pytest.mark.parametrize("mode", ["status", "drop", "hang", "keep"])
+def test_grading_does_not_run_unless_the_model_channel_is_confirmed_closed(tmp_path: Path, mode: str) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    marker = tmp_path / "candidate-ran"
+    script = "import sys\nopen(sys.argv[1] + '/app.py', 'a').write('\\ndef value():\\n    return 42\\n')\n"
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            # Any import of the candidate module during grading leaves the marker behind.
+            "app.py": f"open({str(marker)!r}, 'w').write('ran')\n\ndef value():\n    return 0\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+        revoke_mode=mode,
+    )
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "model_channel_open"}], body
+    assert not marker.exists(), "candidate code ran although the model channel was still open"
+    assert body["agent_completed"] is True
+    assert "app.py" in body["patch"]

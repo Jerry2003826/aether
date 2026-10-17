@@ -8,6 +8,7 @@ import socket
 import subprocess
 import sys
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
@@ -160,3 +161,126 @@ def test_only_the_job_token_can_revoke(proxy: CodingModelProxy) -> None:
     assert _send(proxy.socket_path, "/aether/revoke", "not-the-job-token") == 401
     assert proxy.socket_path.exists()
     assert _chat(proxy.socket_path) == 200
+
+
+def test_the_token_is_compared_in_constant_time_for_chat_and_revoke(
+    proxy: CodingModelProxy, monkeypatch
+) -> None:
+    import hmac
+    import types
+
+    from aether_worker import coding_model_proxy
+
+    calls: list[tuple[str, str]] = []
+
+    def compare(presented, expected):
+        calls.append((presented, expected))
+        return hmac.compare_digest(presented, expected)
+
+    monkeypatch.setattr(
+        coding_model_proxy, "hmac", types.SimpleNamespace(compare_digest=compare)
+    )
+    assert _send(proxy.socket_path, "/aether/revoke", "wrong") == 401
+    assert _chat(proxy.socket_path) == 200
+    assert calls == [
+        ("Bearer wrong", f"Bearer {_JOB}"),
+        (f"Bearer {_JOB}", f"Bearer {_JOB}"),
+    ]
+
+
+def test_concurrent_and_repeated_revokes_unlink_and_close_exactly_once(
+    proxy: CodingModelProxy, monkeypatch
+) -> None:
+    unlinks: list[Path] = []
+    real_unlink = Path.unlink
+
+    def unlink(self: Path, missing_ok: bool = False) -> None:
+        if self == proxy.socket_path:
+            unlinks.append(self)
+        real_unlink(self, missing_ok=missing_ok)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    closes: list[int] = []
+    real_close = proxy._server.server_close
+
+    def server_close() -> None:
+        closes.append(1)
+        real_close()
+
+    monkeypatch.setattr(proxy._server, "server_close", server_close)
+    start = threading.Barrier(8)
+    answers: list[object] = []
+
+    def by_host() -> None:
+        start.wait()
+        proxy.revoke()
+
+    def by_sandbox() -> None:
+        start.wait()
+        try:
+            answers.append(_send(proxy.socket_path, "/aether/revoke", _JOB))
+        except (
+            OSError
+        ) as exc:  # the socket may already be gone; that is a closed channel too
+            answers.append(type(exc).__name__)
+
+    threads = [threading.Thread(target=by_host) for _ in range(4)] + [
+        threading.Thread(target=by_sandbox) for _ in range(4)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(10)
+    assert proxy.revoked
+    assert not proxy.socket_path.exists()
+    proxy.revoke()
+    assert proxy.drain(timeout=1) == 0
+    proxy.close()
+    proxy.revoke()
+    assert len(unlinks) == 1
+    assert closes == [1]
+    assert all(
+        answer in {200, "FileNotFoundError", "ConnectionRefusedError"}
+        for answer in answers
+    ), answers
+
+
+def test_a_call_in_flight_at_revoke_still_answers_and_drains(monkeypatch) -> None:
+    release = threading.Event()
+    entered = threading.Event()
+
+    class _Slow(_Gateway):
+        def do_POST(self) -> None:
+            entered.set()
+            release.wait(10)
+            super().do_POST()
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Slow)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    monkeypatch.setenv(
+        "AETHER_GATEWAY_BASE", f"http://127.0.0.1:{server.server_address[1]}"
+    )
+    monkeypatch.setenv("AETHER_LOOPBACK_TOKEN", "loopback-model-channel")
+    made = CodingModelProxy(cast(Database, object()), job_token=_JOB)
+    statuses: list[int] = []
+    try:
+        caller = threading.Thread(
+            target=lambda: statuses.append(_chat(made.socket_path))
+        )
+        caller.start()
+        assert entered.wait(5)
+        started = time.monotonic()
+        made.revoke()
+        assert time.monotonic() - started < 2, (
+            "revoke must not wait for calls in flight"
+        )
+        assert made.active_connections == 1
+        release.set()
+        caller.join(10)
+        assert statuses == [200]
+        assert made.drain(timeout=5) == 0
+    finally:
+        release.set()
+        made.close()
+        server.shutdown()
+        server.server_close()
