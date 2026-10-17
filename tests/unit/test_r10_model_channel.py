@@ -9,6 +9,7 @@ import subprocess
 import sys
 import threading
 import time
+import types
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
@@ -284,3 +285,38 @@ def test_a_call_in_flight_at_revoke_still_answers_and_drains(monkeypatch) -> Non
         made.close()
         server.shutdown()
         server.server_close()
+
+
+def test_a_call_not_yet_forwarded_when_revoke_returns_is_never_forwarded(
+    monkeypatch,
+) -> None:
+    """Revoke is atomic with registering a call: no window between the revoked check and forwarding."""
+    from aether_worker import coding_model_proxy
+
+    forwarded: list[dict] = []
+    monkeypatch.setattr(
+        CodingModelProxy,
+        "_forward",
+        lambda _proxy, body: forwarded.append(body) or {"id": "x", "usage": {}},
+    )
+    made = CodingModelProxy(cast(Database, object()), job_token=_JOB)
+    real_loads = json.loads
+
+    def loads(text, *args, **kwargs):
+        # The revoke lands while the request is being read, after any up-front revoked check.
+        made.revoke() if hasattr(made, "revoke") else made._revoke()
+        return real_loads(text, *args, **kwargs)
+
+    monkeypatch.setattr(
+        coding_model_proxy,
+        "json",
+        types.SimpleNamespace(
+            loads=loads, dumps=json.dumps, JSONDecodeError=json.JSONDecodeError
+        ),
+    )
+    try:
+        status = _chat(made.socket_path)
+    finally:
+        made.close()
+    assert forwarded == []
+    assert status == 401
