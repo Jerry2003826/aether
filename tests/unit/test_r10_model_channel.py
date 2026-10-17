@@ -231,6 +231,7 @@ def test_concurrent_and_repeated_revokes_unlink_and_close_exactly_once(
         thread.start()
     for thread in threads:
         thread.join(10)
+        assert not thread.is_alive(), "a revoke is stuck (deadlock?)"
     assert proxy.revoked
     assert not proxy.socket_path.exists()
     proxy.revoke()
@@ -285,6 +286,7 @@ def test_a_call_in_flight_at_revoke_still_answers_and_drains(monkeypatch) -> Non
         release.set()
         caller.join(10)
         drainer.join(10)
+        assert not caller.is_alive() and not drainer.is_alive(), "call or drain is stuck (deadlock?)"
         assert statuses == [200]
         assert drained == [0]
         assert made.forwarding_calls == 0
@@ -382,7 +384,36 @@ def test_repeated_revokes_shut_the_listener_down_once(proxy: CodingModelProxy, m
         thread.start()
     for thread in threads:
         thread.join(10)
+        assert not thread.is_alive(), "a revoke is stuck (deadlock?)"
     proxy.drain(timeout=1)
     proxy.close()
     proxy.revoke()
     assert shutdowns == [1]
+
+
+def test_forwarding_calls_returns_to_zero_when_forward_raises(proxy: CodingModelProxy, monkeypatch) -> None:
+    def broken(_proxy, _body):
+        raise OSError("upstream down")
+
+    monkeypatch.setattr(CodingModelProxy, "_forward", broken)
+    assert _chat(proxy.socket_path) == 502
+    assert proxy.forwarding_calls == 0
+    assert proxy.drain(timeout=1) == 0
+
+
+def test_a_non_ascii_authorization_header_is_unauthorized(proxy: CodingModelProxy) -> None:
+    raw = json.dumps({"model": "coder", "messages": []}).encode()
+    request = (
+        b"POST /v1/chat/completions HTTP/1.1\r\nauthorization: Bearer " + _JOB.encode() + "\u00e9".encode("utf-8")
+        + f"\r\ncontent-length: {len(raw)}\r\nconnection: close\r\n\r\n".encode()
+        + raw
+    )
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(5)
+        sock.connect(str(proxy.socket_path))
+        sock.sendall(request)
+        answer = b""
+        while block := sock.recv(65536):
+            answer += block
+    assert answer.split(b" ", 2)[1] == b"401"
+    assert proxy.forwarding_calls == 0
