@@ -532,9 +532,9 @@ class ModelGateway:
         if not _alias_matches(model, aliases):
             raise GatewayDenied("alias_denied")
         alias = model.removeprefix("openai/") or model
-        if not self.upstream_base:
-            # No upstream means no model. Nothing scripted answers in its place, so no
-            # file is changed and the job fails as model_unavailable instead of passing.
+        if not self.upstream_base or not self.provider_key:
+            # No upstream or no provider key means no model. Nothing scripted answers in its
+            # place, so no file is changed and the job fails as model_unavailable instead of passing.
             self._note_admission_block(grant, "model_unavailable")
             self._log_relay(
                 project_id=str(grant["project_id"]),

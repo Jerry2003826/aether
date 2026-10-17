@@ -24,7 +24,7 @@ def main() -> None:
     database = Database(worker_url)
 
     def health() -> dict[str, object]:
-        return {"role": "gateway", "configured": True}
+        return gateway_health(provider_key=key, upstream_base=base)
 
     def post(path: str, body: dict) -> tuple[int, dict]:
         gateway = ModelGateway(database, upstream_base=base, provider_key=key, timeout=gateway_timeout(path, body))
@@ -46,6 +46,13 @@ def main() -> None:
         return 200, result
 
     serve_role(token, health, post)
+
+
+def gateway_health(*, provider_key: str, upstream_base: str) -> dict[str, object]:
+    """Available only with both a provider key and an upstream; otherwise model_unavailable, as relay_chat answers."""
+    if provider_key and upstream_base:
+        return {"role": "gateway", "configured": True, "status": "available"}
+    return {"role": "gateway", "configured": False, "status": "unavailable", "error": "model_unavailable"}
 
 
 def _handoff() -> dict:
