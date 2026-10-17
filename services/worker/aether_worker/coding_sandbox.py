@@ -192,17 +192,23 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
 
 
 def _cli_logs(target: str, *, limit: int) -> dict[str, str]:
-    """`docker logs`, one stream per run so neither pipe can block the other; only the tail is kept."""
+    """`docker logs`, one stream per run so neither pipe can block the other; only the tail is kept.
+
+    Both runs share one CLI_LOGS_TIMEOUT_SECONDS deadline: the second gets only what the first left.
+    """
     cli = shutil.which("docker")
     if cli is None:
         return {"stdout": "", "stderr": ""}
-    return {
-        "stdout": _cli_stream(cli, target, limit, stdout=True),
-        "stderr": _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False),
-    }
+    deadline = time.monotonic() + CLI_LOGS_TIMEOUT_SECONDS
+    stdout = _cli_stream(cli, target, limit, stdout=True, deadline=deadline)
+    stderr = _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False, deadline=deadline)
+    return {"stdout": stdout, "stderr": stderr}
 
 
-def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool) -> str:
+def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool, deadline: float) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return ""
     try:
         process = subprocess.Popen(
             [cli, "logs", target],
@@ -217,7 +223,7 @@ def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool) -> str:
         process.kill()
         process.wait()
         return ""
-    timer = threading.Timer(CLI_LOGS_TIMEOUT_SECONDS, process.kill)
+    timer = threading.Timer(remaining, process.kill)
     timer.start()
     try:
         return read_bounded_tail(stream, limit)
