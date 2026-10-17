@@ -28,7 +28,14 @@ _CALL = 1000
 class _Harness:
     """One coding job run through _run_one with a real proxy and an in-memory ledger."""
 
-    def __init__(self, monkeypatch: pytest.MonkeyPatch, *, first_call: tuple[int, int] | None, release_after: float | None) -> None:
+    def __init__(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        first_call: tuple[int, int] | None,
+        release_after: float | None,
+        fails: BaseException | None = None,
+    ) -> None:
         self.db = FakeLedgerDatabase()
         self.db.add_account(_PROJECT, _TASK)
         self.entered = threading.Event()
@@ -38,6 +45,8 @@ class _Harness:
         self.first_call = first_call
         self.release_after = release_after
         self.timers: list[threading.Timer] = []
+        self.fails = fails
+        self.at_close: list[tuple[bool, dict[str, Any]]] = []
         harness = self
         row = {"id": _JOB, "fencing_token": _FENCE, "task_id": _TASK, "operation_id": "op-1", "base_artifact_id": "a-1"}
         monkeypatch.setattr(coding_jobs, "_claim", lambda *_a, **_k: dict(row))
@@ -56,6 +65,15 @@ class _Harness:
         monkeypatch.setattr(coding_jobs, "_fail", lambda *_a, **_k: None)
         monkeypatch.setattr(coding_jobs, "run_coding_sandbox", self.sandbox)
         real_settle = coding_jobs._settle
+        self.real_settle = real_settle
+        real_close = CodingModelProxy.close
+
+        def close(proxy: CodingModelProxy) -> None:
+            detail = dict(harness.db.request(_PROJECT, _TASK, _KEY)["usage_detail"])
+            harness.at_close.append((harness.forward_done.is_set(), detail))
+            real_close(proxy)
+
+        monkeypatch.setattr(CodingModelProxy, "close", close)
 
         def settle(*args: Any, **kwargs: Any) -> None:
             harness.done_at_settle.append(harness.forward_done.is_set())
@@ -100,6 +118,8 @@ class _Harness:
             timer = threading.Timer(self.release_after, self.release.set)
             self.timers.append(timer)
             timer.start()
+        if self.fails is not None:
+            raise self.fails
         # The agent process is gone; its last model call is still being forwarded.
         return {
             "exit_code": 0,
@@ -183,3 +203,78 @@ def test_the_drain_default_outlasts_one_forwarded_call(monkeypatch: pytest.Monke
     assert 30 < DEFAULT_DRAIN_SECONDS <= 120
     monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "2.5")
     assert drain_seconds() == 2.5
+
+
+def _settle_later(harness: _Harness) -> None:
+    """Whatever settles the abandoned reservation later reads what the job left on the row."""
+    assert harness.forward_done.wait(10)
+    harness.real_settle(
+        coding_jobs.BudgetLedger(cast(Database, harness.db)),
+        owner_id=_OWNER,
+        project_id=_PROJECT,
+        task_id=_TASK,
+        request_key=_KEY,
+        reserved=True,
+        result=None,
+    )
+
+
+def test_an_unexpected_sandbox_error_still_waits_for_a_call_in_flight_before_closing(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "20")
+    harness = _Harness(monkeypatch, first_call=None, release_after=0.5, fails=RuntimeError("sandbox broke"))
+    with pytest.raises(RuntimeError, match="sandbox broke"):
+        harness.run()
+    assert len(harness.at_close) == 1
+    finished, detail = harness.at_close[0]
+    assert finished is True
+    assert (detail["measured_input_tokens"], detail["measured_output_tokens"]) == (120, 30)
+    assert detail["pending_tokens"] == 0
+    _settle_later(harness)
+    row = harness.db.request(_PROJECT, _TASK, _KEY)
+    account = harness.db.account(_PROJECT, _TASK)
+    assert (row["input_tokens"], row["output_tokens"]) == (120, 30)
+    assert account["spent_micro_usd"] == 150
+    assert account["tokens_used"] == 150
+    assert account["held_micro_usd"] == 0
+    assert account["tokens_held"] == 0
+
+
+def test_an_unexpected_sandbox_error_charges_a_call_outlasting_the_drain_at_its_reservation(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "0.3")
+    harness = _Harness(monkeypatch, first_call=(100, 50), release_after=None, fails=RuntimeError("sandbox broke"))
+    with pytest.raises(RuntimeError, match="sandbox broke"):
+        harness.run()
+    assert len(harness.at_close) == 1
+    finished, detail = harness.at_close[0]
+    assert finished is False
+    assert detail["unknown_usage_calls"] == 1
+    assert detail["unknown_reserved_tokens"] == _CALL
+    assert detail["pending_tokens"] == 0
+    _settle_later(harness)
+    row = harness.db.request(_PROJECT, _TASK, _KEY)
+    account = harness.db.account(_PROJECT, _TASK)
+    assert (row["input_tokens"], row["output_tokens"]) == (100, 50)
+    assert account["spent_micro_usd"] == 150 + _CALL
+    assert account["tokens_used"] == 150 + _CALL
+    assert account["held_micro_usd"] == 0
+    assert account["tokens_held"] == 0
+
+
+@pytest.mark.parametrize("fails", [None, "sandbox_error"])
+def test_the_proxy_is_drained_once_per_job(monkeypatch: pytest.MonkeyPatch, fails: str | None) -> None:
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "20")
+    error = coding_jobs.CodingSandboxError("sandbox_failed") if fails else None
+    harness = _Harness(monkeypatch, first_call=None, release_after=0.2, fails=error)
+    drains: list[int] = []
+    real_drain = CodingModelProxy.drain
+
+    def drain(proxy: CodingModelProxy, **kwargs: Any) -> int:
+        drains.append(1)
+        return real_drain(proxy, **kwargs)
+
+    monkeypatch.setattr(CodingModelProxy, "drain", drain)
+    monkeypatch.setattr(coding_jobs, "_sandbox_stop", lambda *_a, **_k: {"coding_job_id": _JOB, "state": "FAILED"})
+    harness.run()
+    assert drains == [1]
+    assert len(harness.at_close) == 1
+    assert harness.at_close[0][0] is True
