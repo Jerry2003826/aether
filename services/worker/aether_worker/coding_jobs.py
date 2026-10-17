@@ -1195,8 +1195,8 @@ def _coding_terminal(
 
     A budget rejection or a blank report (the agent raised before it finished)
     is FAILED even when the files on disk already pass. A conversation that
-    finishes without changing any file (empty or missing patch, including the
-    scripted no-upstream finish) is FAILED/agent_no_change: candidate files that
+    finishes without changing any source file (empty or missing patch; grading
+    files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
     terminal-only change shows up in the patch.
     """

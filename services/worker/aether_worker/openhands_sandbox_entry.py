@@ -207,9 +207,12 @@ def _lines(value: str) -> list[str]:
 
 
 def _patch(before: dict[str, str], root: Path) -> str:
+    """The agent's source change. Grading files and caches are grading input, never part of it."""
     after = _snapshot(root)
     chunks: list[str] = []
     for name in sorted(set(before) | set(after)):
+        if grading_files.is_grading_path(name) or grading_files.is_cache_path(name):
+            continue
         old = before.get(name, "")
         new = after.get(name, "")
         if old == new:

@@ -683,7 +683,10 @@ def test_tampered_support_files_are_restored_before_grading(tmp_path: Path) -> N
     line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
     assert line, completed.stdout + completed.stderr
     body = json.loads(line[len("RESULT ") :])
-    assert "return 0" in body["patch"]
+    # The agent only touched grading files and caches: none of that is a code change, so the
+    # published patch is empty (the job still fails on the added startup hooks below).
+    assert body["patch"] == ""
+    assert {"name": "runner", "verdict": "FAIL", "detail": "grading_startup_hook"} in body["cases"]
     assert (job / "oracle.py").read_text(encoding="utf-8") == oracle
     assert (job / "conftest.py").read_text(encoding="utf-8") == conftest
     assert not (job / "sitecustomize.py").exists()
