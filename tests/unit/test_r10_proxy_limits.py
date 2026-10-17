@@ -121,6 +121,10 @@ def test_trickling_client_is_cut_off_by_the_request_deadline(proxy) -> None:
                     break
             except TimeoutError:
                 pass
+            except OSError:
+                # A reset from the server is also the connection being cut.
+                cut = True
+                break
     finally:
         sock.close()
     assert cut, "a client that never finishes its request kept the connection for 3s"
