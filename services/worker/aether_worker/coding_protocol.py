@@ -847,6 +847,10 @@ _FS_READ_DIR = 1 << 3
 _FS_REFER = 1 << 13  # ABI 2
 _FS_TRUNCATE = 1 << 14  # ABI 3
 _FS_IOCTL_DEV = 1 << 15  # ABI 5
+# ABI 6 scopes: no connecting to abstract unix sockets, and no signals, outside the candidate's domain
+# (the test process, the grader, the sandbox entry).
+_SCOPE_ABSTRACT_UNIX_SOCKET = 1 << 0
+_SCOPE_SIGNAL = 1 << 1
 _FS_FILE_ONLY = _FS_EXECUTE | _FS_WRITE_FILE | _FS_READ_FILE | _FS_TRUNCATE | _FS_IOCTL_DEV
 # Read and run: the interpreter, its libraries and the system. Never /tmp (job workspaces live there).
 _READ_PATHS = ("/usr", "/lib", "/lib32", "/lib64", "/libx32", "/bin", "/sbin", "/etc", "/opt", "/proc")
@@ -888,7 +892,8 @@ def _sandbox_rules(write: list[str], deny: list[str]) -> list[tuple[str, int]]:
 
 
 def _landlock(write: list[str], deny: list[str]) -> None:
-    """Lock this process (and everything it starts) to the system, the interpreter and `write`.
+    """Lock this process (and everything it starts) to the system, the interpreter and `write`; with
+    Landlock ABI 6 it also cannot signal, or reach abstract unix sockets of, any process outside its domain.
 
     Raises OSError when Landlock is unavailable; the caller then runs no candidate code at all.
     """
@@ -905,8 +910,16 @@ def _landlock(write: list[str], deny: list[str]) -> None:
 
     abi = check(syscall(ctypes.c_long(_LANDLOCK_CREATE_RULESET), None, ctypes.c_size_t(0), ctypes.c_uint32(_LANDLOCK_CREATE_RULESET_VERSION)), "abi")
     handled = _handled_access(abi)
-    attr = ctypes.create_string_buffer(struct.pack("=Q", handled), 8)
-    ruleset = check(syscall(ctypes.c_long(_LANDLOCK_CREATE_RULESET), attr, ctypes.c_size_t(8), ctypes.c_uint32(0)), "create_ruleset")
+    if abi >= 6:
+        # handled_access_fs, handled_access_net (none: the sandbox has no network), scoped.
+        packed = struct.pack("=QQQ", handled, 0, _SCOPE_ABSTRACT_UNIX_SOCKET | _SCOPE_SIGNAL)
+    else:
+        # Older kernels: the filesystem lock only; the candidate can still signal same-uid processes.
+        packed = struct.pack("=Q", handled)
+    attr = ctypes.create_string_buffer(packed, len(packed))
+    ruleset = check(
+        syscall(ctypes.c_long(_LANDLOCK_CREATE_RULESET), attr, ctypes.c_size_t(len(packed)), ctypes.c_uint32(0)), "create_ruleset"
+    )
     try:
         for path, rights in rules:
             try:
