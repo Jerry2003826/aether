@@ -150,6 +150,7 @@ class ImageUnavailable(LookupError):
     image_pull_failed        the pull was tried and failed, and build was not allowed
     image_build_unsupported  build was allowed but this module can only build the OpenHands sandbox tag
     image_build_failed       the build was tried and failed
+    image_label_mismatch     a freshly built sandbox image lacks the expected context-hash label
     """
 
     def __init__(self, reason: str, tag: str) -> None:
@@ -158,35 +159,62 @@ class ImageUnavailable(LookupError):
         self.tag = tag
 
 
+def _labels(image: Any) -> dict[str, str]:
+    labels = getattr(image, "labels", None)
+    return dict(labels) if isinstance(labels, dict) else {}
+
+
 def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build: bool = True) -> str:
     """Image id for tag: the local image if present, else a pull (allow_pull), else a build (allow_build).
 
     Only ImageNotFound on the local lookup counts as missing; any other Docker error
     (daemon unreachable) propagates. A pull that fails for any Docker reason (not found,
     access denied, registry down) falls through to the build. Only the current OpenHands
-    sandbox tag can be built. When nothing yields an image this raises ImageUnavailable.
-    Call it before anything waits on a readiness timeout: a first build takes minutes.
+    sandbox tag can be built. For that tag every image, local, pulled or built, must carry
+    HASH_LABEL equal to the current context hash; a local or pulled image without it counts
+    as absent. When nothing yields an image this raises ImageUnavailable. Call it before
+    anything waits on a readiness timeout: a first build takes minutes.
     """
+    sandbox = tag == sandbox_tag()
+    expected = context_hash() if sandbox else None
+
+    def acceptable(image: Any) -> bool:
+        return expected is None or _labels(image).get(HASH_LABEL) == expected
+
     try:
-        return str(client.images.get(tag).id)
+        local = client.images.get(tag)
     except ImageNotFound:
-        pass
-    pull_error: DockerException | None = None
+        local = None
+    if local is not None and acceptable(local):
+        return str(local.id)
+    pull_error: BaseException | None = None
     if allow_pull:
         try:
-            return str(client.images.pull(tag).id)
+            pulled = client.images.pull(tag)
         except DockerException as exc:
             pull_error = exc
+        else:
+            if acceptable(pulled):
+                return str(pulled.id)
+            pull_error = ImageUnavailable("image_label_mismatch", tag)
     if not allow_build:
         raise ImageUnavailable("image_pull_failed" if allow_pull else "image_unavailable", tag) from pull_error
-    if tag != sandbox_tag():
+    if not sandbox:
         raise ImageUnavailable("image_build_unsupported", tag) from pull_error
     try:
-        return build_openhands_sandbox()
+        built = build_openhands_sandbox()
+        image = client.images.get(built)
     except (DockerException, OSError) as exc:
         raise ImageUnavailable("image_build_failed", tag) from exc
+    if not acceptable(image):
+        raise ImageUnavailable("image_label_mismatch", tag)
+    return str(image.id)
 
 
 def ensure_openhands_sandbox(client: Any | None = None) -> str:
-    """The OpenHands sandbox image for the current context hash: local, pulled, or built here."""
-    return ensure_image(docker_client() if client is None else client, sandbox_tag())
+    """The OpenHands sandbox image for the current context hash, local or built here.
+
+    It is never pulled: the tag only exists on hosts that built it, and a registry image
+    under that name is not this context.
+    """
+    return ensure_image(docker_client() if client is None else client, sandbox_tag(), allow_pull=False)
