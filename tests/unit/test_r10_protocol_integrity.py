@@ -290,3 +290,54 @@ def test_test_files_created_during_the_run_are_never_graded(tmp_path: Path) -> N
     code, body = _grade(tmp_path)
     assert {case["name"] for case in body["cases"]} == {"test_a.test_a", "tests.test_b.test_b"}, body
     assert (code, body["passed"], body["failed"]) == (0, 2, 0), body
+
+
+def test_same_named_helpers_in_two_test_dirs_resolve_to_each_tests_own_dir(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            # Plain (non-package) dirs: a/helpers.py and b/helpers.py are both importable as `helpers`.
+            "a/helpers.py": "WHICH = 'a'\n",
+            "a/test_x.py": "import helpers\n\ndef test_x():\n    assert helpers.WHICH == 'a'\n",
+            "b/helpers.py": "WHICH = 'b'\n",
+            "b/test_y.py": "import helpers\n\ndef test_y():\n    assert helpers.WHICH == 'b'\n",
+            # The same under tests/, where the helpers are grading files rather than candidate code.
+            "tests/c/helpers.py": "WHICH = 'c'\n",
+            "tests/c/test_c.py": "import helpers\n\ndef test_c():\n    assert helpers.WHICH == 'c'\n",
+            "tests/d/helpers.py": "WHICH = 'd'\n",
+            "tests/d/test_d.py": "import helpers\n\ndef test_d():\n    assert helpers.WHICH == 'd'\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    verdicts = {case["name"]: case["verdict"] for case in body["cases"]}
+    assert verdicts == {
+        "a.test_x.test_x": "PASS",
+        "b.test_y.test_y": "PASS",
+        "tests.c.test_c.test_c": "PASS",
+        "tests.d.test_d.test_d": "PASS",
+    }, body
+    assert (code, body["passed"], body["failed"]) == (0, 4, 0), body
+
+
+def test_generator_tests_are_rejected_not_passed_unrun(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            # Calling either returns a generator object without running the body, so the failing
+            # assertion would never execute.
+            "test_gen.py": (
+                "import app\n\n"
+                "async def test_async_gen():\n    assert app.value() == 42\n    yield\n\n"
+                "def test_sync_gen():\n    assert app.value() == 42\n    yield\n\n"
+                "def test_plain():\n    assert app.value() == 0\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    cases = {case["name"]: (case["verdict"], case["detail"]) for case in body["cases"]}
+    assert cases["test_gen.test_async_gen"] == ("FAIL", "unsupported_async_generator"), body
+    assert cases["test_gen.test_sync_gen"] == ("FAIL", "unsupported_generator"), body
+    assert cases["test_gen.test_plain"] == ("PASS", ""), body
+    assert (code, body["passed"], body["failed"]) == (1, 1, 2), body

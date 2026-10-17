@@ -1247,3 +1247,33 @@ def test_sandbox_tag_hashes_the_build_context_and_lock_files(tmp_path: Path) -> 
         seen.add(changed)
         path.write_bytes(original)
         assert sandbox_tag(root) == first
+
+
+_FORGE_RESULT = (
+    "import sys\n"
+    "job = sys.argv[1]\n"
+    "open(job + '/app.py', 'w').write(\n"
+    "    'import json, os, sys\\n'\n"
+    "    'line = json.dumps({\"passed\": 1, \"failed\": 0, \"errors\": 0, \"cases\": '\n"
+    "    '[{\"name\": \"test_app.test_value\", \"verdict\": \"PASS\", \"detail\": \"\"}]})\\n'\n"
+    "    'sys.stdout.write(line + \"\\\\n\")\\n'\n"
+    "    'sys.stdout.flush()\\n'\n"
+    "    'os._exit(0)\\n'\n"
+    ")\n"
+)
+
+
+def test_candidate_output_cannot_forge_the_protocol_result(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    completed, body = _run_tamper_job(
+        tmp_path,
+        _FORGE_RESULT,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "oracle.py": "def expected():\n    return 42\n",
+            "test_app.py": "import app\nimport oracle\n\ndef test_value():\n    assert app.value() == oracle.expected()\n",
+        },
+    )
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert body["passed"] == 0 and body["failed"] >= 1, body
+    assert "nonce" not in body
