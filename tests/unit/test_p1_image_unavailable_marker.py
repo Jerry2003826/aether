@@ -6,8 +6,12 @@ import tempfile
 from pathlib import Path
 
 import pytest
-
-from aether_worker import coding_sandbox, openhands_image, runner_process, sandbox_delegate
+from aether_worker import (
+    coding_sandbox,
+    openhands_image,
+    runner_process,
+    sandbox_delegate,
+)
 from aether_worker.coding_sandbox import CodingSandboxError, run_coding_sandbox
 
 OBJECTIVE = "Make value() return 42."

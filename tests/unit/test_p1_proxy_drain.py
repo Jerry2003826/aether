@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any, cast
 
 import pytest
-
 from aether_gateway.model import ModelGateway
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
