@@ -241,3 +241,24 @@ def test_the_live_harness_isolation_probe_drops_all_capabilities_and_forbids_new
     assert _pairs(args, "--security-opt") == ["no-new-privileges"], args
     run = _parse_run(args[1:])
     assert run["kwargs"]["cap_drop"] == ["ALL"] and run["kwargs"]["security_opt"] == ["no-new-privileges"], run
+
+
+def test_the_protocol_budget_comes_from_the_baseline_workspace_not_the_agents_copy() -> None:
+    import ast
+
+    source = Path("services/worker/aether_worker/openhands_sandbox_entry.py").read_text(encoding="utf-8")
+    calls = [
+        node
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "grading_steps"
+    ]
+    assert calls, "the entry must size the protocol budget with grading_steps"
+    # WORK is the read-only baseline the job was copied from; the agent never wrote to it.
+    assert all(ast.unparse(call.args[0]) == "WORK" for call in calls), [ast.unparse(call) for call in calls]
+
+
+def test_the_sandbox_container_outlasts_the_agent_and_the_protocol_cap_with_margin() -> None:
+    from aether_worker.coding_sandbox import CODING_SANDBOX_TIMEOUT_SECONDS
+
+    # 80 s agent share + protocol cap + the entry's 5 s kill margin + 30 s for start-up and the result.
+    assert CODING_SANDBOX_TIMEOUT_SECONDS == 80 + grading_files.PROTOCOL_CAP_SECONDS + 5 + 30

@@ -422,3 +422,72 @@ def test_passing_a_callback_into_candidate_code_is_reported_as_unsupported(tmp_p
         "test_apply.test_apply",
         "callable_passed_to_candidate",
     )
+
+
+# A test that swallows the unsupported-object error must not pass without candidate code running.
+_APPLY = "def apply(fn, value):\n    return fn(value)\n"
+
+
+def test_swallowing_the_unsupported_error_with_except_typeerror_still_fails(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": _APPLY,
+            "test_apply.py": (
+                "import app\n\n"
+                "def test_apply():\n"
+                "    try:\n        app.apply(lambda n: n + 1, 1)\n    except TypeError:\n        pass\n"
+            ),
+        },
+        "test_apply.test_apply",
+        "callable_passed_to_candidate",
+    )
+
+
+def test_swallowing_the_unsupported_error_with_except_exception_still_fails(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": "class Box:\n    pass\ndef make():\n    return Box()\n",
+            "test_box.py": (
+                "import app\n\n"
+                "def test_box():\n"
+                "    try:\n        assert not isinstance(app.make(), app.Box)\n    except Exception:\n        pass\n"
+            ),
+        },
+        "test_box.test_box",
+        "isinstance_candidate_class",
+    )
+
+
+def test_swallowing_the_unsupported_error_with_pytest_raises_still_fails(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": _APPLY,
+            "test_apply.py": (
+                "import pytest\nimport app\n\n"
+                "def test_apply():\n"
+                "    with pytest.raises(TypeError):\n        app.apply(lambda n: n + 1, 1)\n"
+            ),
+        },
+        "test_apply.test_apply",
+        "callable_passed_to_candidate",
+    )
+
+
+def test_swallowing_the_unsupported_error_in_a_testcase_still_fails(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": _APPLY,
+            "test_apply.py": (
+                "import unittest\nimport app\n\n"
+                "class ApplyCase(unittest.TestCase):\n"
+                "    def test_apply(self):\n"
+                "        with self.assertRaises(TypeError):\n            app.apply(lambda n: n + 1, 1)\n"
+            ),
+        },
+        "test_apply.ApplyCase.test_apply",
+        "callable_passed_to_candidate",
+    )

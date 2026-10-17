@@ -450,3 +450,74 @@ def test_inherited_test_methods_are_collected_for_each_class(tmp_path: Path) -> 
         "test_inherit.TestStricter.test_value": ("FAIL", "AssertionError"),
     }, body
     assert code == 1, body
+
+
+def test_class_and_module_fixtures_run_so_a_correct_solution_passes(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "test_case_fixtures.py": (
+                "import unittest\nimport app\n\n"
+                "EXPECTED = {}\n\n"
+                "def setUpModule():\n    EXPECTED['module'] = 42\n\n"
+                "class ValueCase(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls):\n        cls.expected = 42\n\n"
+                "    def test_class_fixture(self):\n        self.assertEqual(app.value(), self.expected)\n\n"
+                "    def test_module_fixture(self):\n        self.assertEqual(app.value(), EXPECTED['module'])\n"
+            ),
+            "test_plain_fixtures.py": (
+                "import app\n\n"
+                "STATE = {}\n\n"
+                "def setup_module(module):\n    STATE['expected'] = 42\n\n"
+                "def test_module_fixture():\n    assert app.value() == STATE['expected']\n\n"
+                "class TestValue:\n"
+                "    @classmethod\n"
+                "    def setup_class(cls):\n        cls.expected = 42\n\n"
+                "    def test_class_fixture(self):\n        assert app.value() == self.expected\n\n"
+                "    def test_module_fixture(self):\n        assert app.value() == STATE['expected']\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert _verdicts(body) == {
+        "test_case_fixtures.ValueCase.test_class_fixture": ("PASS", ""),
+        "test_case_fixtures.ValueCase.test_module_fixture": ("PASS", ""),
+        "test_plain_fixtures.test_module_fixture": ("PASS", ""),
+        "test_plain_fixtures.TestValue.test_class_fixture": ("PASS", ""),
+        "test_plain_fixtures.TestValue.test_module_fixture": ("PASS", ""),
+    }, body
+    assert (code, body["passed"], body["failed"]) == (0, 5, 0), body
+
+
+def test_a_failing_class_or_module_fixture_fails_the_test(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "test_broken_fixtures.py": (
+                "import unittest\nimport app\n\n"
+                "class BrokenClass(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def setUpClass(cls):\n        raise RuntimeError('class fixture')\n\n"
+                "    def test_value(self):\n        self.assertEqual(app.value(), 42)\n\n"
+                "class BrokenTeardown(unittest.TestCase):\n"
+                "    @classmethod\n"
+                "    def tearDownClass(cls):\n        raise RuntimeError('class teardown')\n\n"
+                "    def test_value(self):\n        self.assertEqual(app.value(), 42)\n"
+            ),
+            "test_broken_module.py": (
+                "import app\n\n"
+                "def teardown_module(module):\n    raise RuntimeError('module teardown')\n\n"
+                "def test_value():\n    assert app.value() == 42\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert _verdicts(body) == {
+        "test_broken_fixtures.BrokenClass.test_value": ("FAIL", "RuntimeError"),
+        "test_broken_fixtures.BrokenTeardown.test_value": ("FAIL", "RuntimeError"),
+        "test_broken_module.test_value": ("FAIL", "RuntimeError"),
+    }, body
+    assert code == 1, body
