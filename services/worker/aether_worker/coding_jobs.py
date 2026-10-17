@@ -1133,7 +1133,22 @@ def _job_objective(row: dict[str, Any]) -> str:
     return objective
 
 
+# Case details the sandbox entry reports when the agent tampered with grading (exit code 1).
+GRADING_VIOLATIONS = frozenset({"grading_startup_hook"})
+
+
+def _grading_violation(sandbox: dict[str, Any]) -> str | None:
+    result = sandbox.get("result")
+    if not isinstance(result, dict) or sandbox.get("exit_code") != 1:
+        return None
+    for case in result.get("cases") or []:
+        if isinstance(case, dict) and case.get("name") == "runner" and case.get("detail") in GRADING_VIOLATIONS:
+            return str(case["detail"])
+    return None
+
+
 def _agent_patch(sandbox: dict[str, Any]) -> str | None:
+    """The agent's diff. Kept when it used file_editor, or when it tampered with grading (for review)."""
     result = sandbox.get("result")
     if not isinstance(result, dict):
         return None
@@ -1142,7 +1157,7 @@ def _agent_patch(sandbox: dict[str, Any]) -> str | None:
     except (TypeError, ValueError):
         return None
     patch = result.get("patch")
-    if edits > 0 and isinstance(patch, str) and patch.startswith("--- "):
+    if (edits > 0 or _grading_violation(sandbox)) and isinstance(patch, str) and patch.startswith("--- "):
         return patch
     return None
 
@@ -1187,6 +1202,9 @@ def _coding_terminal(
         return "FAILED", "credential_present"
     if body.get("network_errno") == 0:
         return "FAILED", "network_open"
+    violation = _grading_violation(sandbox)
+    if violation:
+        return "FAILED", violation
     if admission_error:
         return "FAILED", admission_error
     if not _agent_completed(body):

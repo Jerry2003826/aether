@@ -431,7 +431,15 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-class StartupHookAdded(RuntimeError):
+class GradingViolation(RuntimeError):
+    """The agent tampered with grading in a way that fails the job. `detail` is the case detail."""
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(detail)
+        self.detail = detail
+
+
+class StartupHookAdded(GradingViolation):
     """The agent added sitecustomize.py, usercustomize.py or a .pth file. It is deleted and the job fails."""
 
 
@@ -528,11 +536,12 @@ def main() -> None:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
-    except StartupHookAdded as exc:
-        # The hook is already deleted. The patch stays in the result so the attempt can be reviewed.
-        failure = _failure(str(exc))
+    except GradingViolation as exc:
+        # The offending file is already deleted. Exit 1 (a graded failure, not a runner crash) so the
+        # worker records the job as FAILED and keeps the agent's patch for review.
+        failure = _failure(exc.detail)
         failure.update(agent_report)
-        emit(failure, 2)
+        emit(failure, 1)
     except Exception as exc:
         emit(_failure(type(exc).__name__), 2)
     payload.update(agent_report)
