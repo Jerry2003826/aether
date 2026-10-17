@@ -6,11 +6,14 @@ import io
 import json
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, BinaryIO
+
+from docker.errors import DockerException
 
 from aether_worker.container_runtime import container_logs
 from aether_worker.openhands_image import IMAGE_UNAVAILABLE, launch_image
@@ -27,6 +30,8 @@ from aether_worker.sandbox_delegate import (
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
 LOG_CAPTURE_LIMIT = 65536
+# The CLI log fallback is killed after this long so a wedged `docker logs` cannot hold the job.
+CLI_LOGS_TIMEOUT_SECONDS = 60
 # The RESULT line carries the whole patch. The sandbox entry caps the patch at MAX_PATCH_BYTES,
 # so the final line always fits inside this stdout window.
 MAX_PATCH_BYTES = 2_097_152
@@ -175,13 +180,55 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
             return remote_logs(target, limit, timeout=60)
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
-    if shutil.which("docker") is None:
-        return {"stdout": "", "stderr": ""}
-    stdout, stderr = container_logs(target, limit=limit)
+    try:
+        stdout, stderr = container_logs(target, limit=limit)
+    except DockerException:
+        # The SDK cannot reach the daemon; the docker CLI, if present, is the fallback.
+        return _cli_logs(target, limit=limit)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
         "stderr": read_bounded_tail(io.BytesIO(stderr), min(limit, LOG_CAPTURE_LIMIT)),
     }
+
+
+def _cli_logs(target: str, *, limit: int) -> dict[str, str]:
+    """`docker logs`, one stream per run so neither pipe can block the other; only the tail is kept."""
+    cli = shutil.which("docker")
+    if cli is None:
+        return {"stdout": "", "stderr": ""}
+    return {
+        "stdout": _cli_stream(cli, target, limit, stdout=True),
+        "stderr": _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False),
+    }
+
+
+def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool) -> str:
+    try:
+        process = subprocess.Popen(
+            [cli, "logs", target],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if stdout else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL if stdout else subprocess.PIPE,
+        )
+    except OSError:
+        return ""
+    stream = process.stdout if stdout else process.stderr
+    if stream is None:
+        process.kill()
+        process.wait()
+        return ""
+    timer = threading.Timer(CLI_LOGS_TIMEOUT_SECONDS, process.kill)
+    timer.start()
+    try:
+        return read_bounded_tail(stream, limit)
+    finally:
+        timer.cancel()
+        stream.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
 
 
 def container_log_tails(job_id: str) -> dict[str, str]:
