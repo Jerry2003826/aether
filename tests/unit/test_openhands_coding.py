@@ -301,7 +301,8 @@ def test_rewritten_tests_cannot_pass(tmp_path: Path) -> None:
     assert body["passed"] == 0
     assert body["failed"] >= 1
     assert body["edit_calls"] >= 1
-    assert "assert True" in body["patch"]
+    # A test edit is grading input, not a code change: it never enters the published patch.
+    assert body["patch"] == ""
     assert graded == baseline
     assert "assert True" not in graded
     assert any(case["name"] == "test_app.test_value" and case["verdict"] == "FAIL" for case in body["cases"])
@@ -877,6 +878,81 @@ def test_added_generic_module_is_kept_and_graded(tmp_path: Path, added: str) -> 
     assert body["passed"] == 1 and body["failed"] == 0
     assert (job / added).read_text(encoding="utf-8") == "ANSWER = 42\n"
     assert f"+++ b/{added}" in body["patch"]
+
+
+def test_only_grading_and_cache_edits_leave_an_empty_patch_and_no_change(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    job = tmp_path / "job"
+    command = (
+        f"cd {job} && printf 'import pytest\\n' > conftest.py && "
+        "printf 'import app\\n\\ndef test_value():\\n    assert True\\n' > test_app.py && "
+        "mkdir -p .pytest_cache/v/cache tests && printf '{}' > .pytest_cache/v/cache/lastfailed && "
+        "printf '' > tests/__init__.py && printf '[pytest]\\n' > pytest.ini && "
+        f"touch {tmp_path / 'command-ran'}"
+    )
+    fake = _SocketModel(terminal_command=command)
+    fake.start()
+    env = _entry_env(tmp_path, fake, AETHER_OBJECTIVE="Make value() return 42.")
+    try:
+        completed = _run_entry(tmp_path, env)
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    assert (tmp_path / "command-ran").is_file(), completed.stdout + completed.stderr
+    # The agent's grading-only files were removed or restored before grading.
+    assert not (job / "conftest.py").exists() and not (job / ".pytest_cache").exists()
+    assert not (job / "pytest.ini").exists() and not (job / "tests" / "__init__.py").exists()
+    assert body["agent_completed"] is True
+    assert body["patch"] == ""
+    assert ".pytest_cache" not in body["patch"]
+    from aether_worker.coding_jobs import _coding_terminal
+
+    sandbox = {"exit_code": 0, "result": {**body, "model_requests": 2}}
+    assert _coding_terminal(sandbox, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+        "FAILED",
+        "agent_no_change",
+    )
+
+
+def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_path: Path) -> None:
+    """A change to a non-grading file besides app.py, and a new source file, are both in the patch."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    job = tmp_path / "job"
+    command = (
+        f"cd {job} && printf 'FACTOR = 6\\n' > util.py && "
+        "printf 'def helper():\\n    return 7\\n' > helper.py && "
+        "printf 'import pytest\\n' > conftest.py && "
+        "mkdir -p .pytest_cache && printf '{}' > .pytest_cache/lastfailed"
+    )
+    fake = _SocketModel(terminal_command=command)
+    fake.start()
+    env = _entry_env(tmp_path, fake, AETHER_OBJECTIVE="Make value() return 42.")
+    work = tmp_path / "work"
+    (work / "util.py").write_text("FACTOR = 1\n", encoding="utf-8")
+    try:
+        completed = _run_entry(tmp_path, env)
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    assert body["agent_completed"] is True
+    graded_util = (job / "util.py").read_text(encoding="utf-8")
+    graded_helper = (job / "helper.py").read_text(encoding="utf-8")
+    assert graded_util == "FACTOR = 6\n"
+    assert graded_helper == "def helper():\n    return 7\n"
+    expected = "".join(
+        [
+            *difflib.unified_diff([], graded_helper.splitlines(keepends=True), fromfile="a/helper.py", tofile="b/helper.py"),
+            *difflib.unified_diff(
+                ["FACTOR = 1\n"], graded_util.splitlines(keepends=True), fromfile="a/util.py", tofile="b/util.py"
+            ),
+        ]
+    )
+    # Exactly the graded source changes: no conftest.py, no cache.
+    assert body["patch"] == expected
 
 
 class _SocketModel:
