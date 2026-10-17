@@ -12,12 +12,19 @@ Interface (`rel` is a path relative to the workspace root, POSIX or native separ
     is_startup_hook(rel)                 sitecustomize.py, usercustomize.py, *.pth. An agent that
                                          adds one fails the job.
     is_cache_path(rel)                   paths inside cache/build dirs; never part of a baseline.
+    is_shadow_module(rel)                True when rel is (inside) a top-level module or package whose
+                                         name is a stdlib module, an installed top-level package, or a
+                                         SHADOW_ROOTS name (mirrors verification._SHADOW_ROOTS). An agent
+                                         that ADDS one fails the job.
     grading_paths(root, editable=None)   relative POSIX paths of grading files under root (.git skipped).
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Collection
+from functools import cache
+from importlib import metadata
 from pathlib import Path, PurePosixPath
 
 CACHE_DIRS = frozenset(
@@ -54,6 +61,10 @@ SUPPORT_FILES = frozenset(
 )
 STARTUP_HOOKS = frozenset({"sitecustomize.py", "usercustomize.py"})
 IGNORED_DIRS = frozenset({".git"})
+# Mirrors aether_worker.verification._SHADOW_ROOTS (F14), as import names. Kept even where the
+# package is not installed (pytest is not in the sandbox image) so a later grader is covered.
+SHADOW_ROOTS = frozenset({"pytest", "_pytest", "pluggy", "sitecustomize", "usercustomize"})
+_EXTENSION_SUFFIXES = (".py", ".pyc", ".so", ".pyd")
 
 
 def _parts(relative: str | PurePosixPath) -> tuple[str, ...]:
@@ -90,6 +101,33 @@ def is_grading_path(relative: str | PurePosixPath, editable: Collection[str] | N
     if editable is not None and _normal(relative) in {_normal(item) for item in editable}:
         return False
     return _is_test_file(parts) or parts[-1] in SUPPORT_FILES
+
+
+@cache
+def shadow_names() -> frozenset[str]:
+    """Import names an added top-level module must not take: stdlib, installed packages, SHADOW_ROOTS."""
+    try:
+        installed = set(metadata.packages_distributions())
+    except Exception:  # noqa: BLE001 - a broken dist-info must not disable the check
+        installed = set()
+    return frozenset(SHADOW_ROOTS | set(sys.stdlib_module_names) | set(sys.builtin_module_names) | installed)
+
+
+def _top_level_name(parts: tuple[str, ...]) -> str | None:
+    if len(parts) > 1:
+        return parts[0]
+    name = parts[0]
+    if name.endswith(_EXTENSION_SUFFIXES):
+        return name.split(".", 1)[0]
+    return None
+
+
+def is_shadow_module(relative: str | PurePosixPath) -> bool:
+    parts = _parts(relative)
+    if not parts:
+        return False
+    top = _top_level_name(parts)
+    return top is not None and top in shadow_names()
 
 
 def grading_paths(root: Path, editable: Collection[str] | None = None) -> set[str]:

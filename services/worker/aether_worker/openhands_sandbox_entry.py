@@ -443,6 +443,24 @@ class StartupHookAdded(GradingViolation):
     """The agent added sitecustomize.py, usercustomize.py or a .pth file. It is deleted and the job fails."""
 
 
+class ShadowModuleAdded(GradingViolation):
+    """The agent added a top-level module or package named like stdlib or an installed package."""
+
+
+def _remove_added_shadow_modules(work: Path, job: Path) -> list[str]:
+    """Delete every NEW top-level entry of job that would shadow an import. Baseline names are kept."""
+    removed: list[str] = []
+    for path in sorted(job.iterdir()):
+        name = path.name
+        if os.path.lexists(work / name):
+            continue
+        probe = name if not path.is_dir() or path.is_symlink() else f"{name}/__init__.py"
+        if grading_files.is_shadow_module(probe):
+            _remove(path)
+            removed.append(name)
+    return removed
+
+
 def _baseline_files(work: Path, editable: Collection[str] | None) -> dict[str, bytes]:
     """Every grading file of the job-creation workspace, by content. Caches are never baseline."""
     found: dict[str, bytes] = {}
@@ -470,12 +488,15 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     conftest.py, pytest.ini, pyproject.toml, setup.cfg, tox.ini, startup hooks, caches).
     Grading files that existed at baseline are rewritten from it; grading files the agent
     added are deleted, and so is every symlink. Other source files keep the agent's edits
-    and additions. The grading set is then verified against the baseline SHA-256 hashes.
-    An added startup hook raises StartupHookAdded after the cleanup.
+    and additions, except NEW top-level modules or packages that shadow stdlib, installed
+    packages or verification._SHADOW_ROOTS names, which are deleted. The grading set is then
+    verified against the baseline SHA-256 hashes. After the cleanup an added startup hook
+    raises StartupHookAdded and an added shadow module raises ShadowModuleAdded.
     """
     baseline = _baseline_files(work, editable)
     expected = {name: _digest(data) for name, data in baseline.items()}
     hooks: list[str] = []
+    shadows = _remove_added_shadow_modules(work, job)
     for path in sorted(job.rglob("*"), key=lambda item: len(item.parts), reverse=True):
         if not os.path.lexists(path):
             continue
@@ -500,6 +521,8 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     _verify_grading_directory(job, expected, editable)
     if hooks:
         raise StartupHookAdded("grading_startup_hook")
+    if shadows:
+        raise ShadowModuleAdded("grading_shadow_module")
 
 
 def _verify_grading_directory(job: Path, expected: dict[str, str], editable: Collection[str] | None) -> None:
