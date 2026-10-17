@@ -13,9 +13,15 @@ Interface (`rel` is a path relative to the workspace root, POSIX or native separ
                                          adds one fails the job.
     is_cache_path(rel)                   paths inside cache/build dirs; never part of a baseline.
     is_shadow_module(rel)                True when rel is (inside) a top-level module or package whose
-                                         name is a stdlib module, an installed top-level package, or a
-                                         SHADOW_ROOTS name (mirrors verification._SHADOW_ROOTS). An agent
-                                         that ADDS one fails the job.
+                                         name is in shadow_names(). SANDBOX ONLY, see below. An agent
+                                         that ADDS one fails the job with grading_shadow_module.
+
+shadow_names() / is_shadow_module() reflect the interpreter they run in: the stdlib and builtin
+module names of that interpreter, the top-level packages installed in its environment, and
+SHADOW_ROOTS (mirrors verification._SHADOW_ROOTS). They must only be called inside the sandbox
+(openhands_sandbox_entry.py, running in the sandbox image), where that interpreter is the one
+that grades. Worker-side code must not call them, because the worker environment has a different
+package set; the worker only consumes the grading_shadow_module case detail.
     grading_paths(root, editable=None)   relative POSIX paths of grading files under root (.git skipped).
 """
 
@@ -103,14 +109,21 @@ def is_grading_path(relative: str | PurePosixPath, editable: Collection[str] | N
     return _is_test_file(parts) or parts[-1] in SUPPORT_FILES
 
 
+def _installed_top_level() -> frozenset[str]:
+    """Top-level import names installed in the running interpreter's environment (the sandbox image)."""
+    try:
+        return frozenset(metadata.packages_distributions())
+    except Exception:  # noqa: BLE001 - a broken dist-info must not disable the check
+        return frozenset()
+
+
 @cache
 def shadow_names() -> frozenset[str]:
-    """Import names an added top-level module must not take: stdlib, installed packages, SHADOW_ROOTS."""
-    try:
-        installed = set(metadata.packages_distributions())
-    except Exception:  # noqa: BLE001 - a broken dist-info must not disable the check
-        installed = set()
-    return frozenset(SHADOW_ROOTS | set(sys.stdlib_module_names) | set(sys.builtin_module_names) | installed)
+    """Import names an added top-level module must not take. SANDBOX ONLY: reflects the running interpreter.
+
+    = packages installed in this interpreter's environment + its stdlib/builtin modules + SHADOW_ROOTS.
+    """
+    return SHADOW_ROOTS | frozenset(sys.stdlib_module_names) | frozenset(sys.builtin_module_names) | _installed_top_level()
 
 
 def _top_level_name(parts: tuple[str, ...]) -> str | None:
@@ -123,6 +136,7 @@ def _top_level_name(parts: tuple[str, ...]) -> str | None:
 
 
 def is_shadow_module(relative: str | PurePosixPath) -> bool:
+    """SANDBOX ONLY (see shadow_names). True for a top-level module/package that would shadow an import."""
     parts = _parts(relative)
     if not parts:
         return False
