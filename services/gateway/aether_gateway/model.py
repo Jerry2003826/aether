@@ -1079,6 +1079,10 @@ class ModelGateway:
             if row is None:
                 return
             detail = _object_detail(row["usage_detail"])
+            if detail.get("proxy_drained") is True:
+                # The job stopped waiting and already charged this call at its reservation.
+                _logger().info("relay_late_answer_ignored project=%s", _public(project_id, self.provider_key))
+                return
             detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
             if counted is None:
                 detail["usage_missing"] = True
@@ -1128,6 +1132,9 @@ class ModelGateway:
             if row is None:
                 return
             detail = _object_detail(row["usage_detail"])
+            if detail.get("proxy_drained") is True:
+                # Already charged at its reservation when the job stopped waiting for it.
+                return
             detail["upstream_error"] = exc.code
             if exc.upstream_status is not None:
                 detail["upstream_status"] = exc.upstream_status
