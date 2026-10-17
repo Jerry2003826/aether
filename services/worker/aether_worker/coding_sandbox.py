@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import re
 import shutil
 import subprocess
 import threading
@@ -56,11 +57,14 @@ CODING_MEMORY_BYTES = 805306368
 # while the container runs, so a longer container time does not let it lapse.
 CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
-# The proxy (directory, job token) each container this process started is wired to, by job id.
-# A run always gets a fresh proxy directory and token, so a container found under any other
-# key was started by a worker whose proxy and socket are gone.
-_STARTED_ON: dict[str, tuple[str, str]] = {}
+# The proxy (directory, job token) each container this process started is wired to, and the id
+# `docker run -d` answered for it ("" if it named none), by job id. A run always gets a fresh proxy
+# directory and token, so a container found under any other key was started by a worker whose
+# proxy and socket are gone.
+_STARTED_ON: dict[str, tuple[str, str, str]] = {}
 _STARTED_LOCK = threading.Lock()
+# What `docker run -d` prints on success: the new container's id (64 hex characters from the CLI).
+_STARTED_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}")
 
 
 class CodingSandboxError(Exception):
@@ -326,17 +330,38 @@ def _cli_stream_beating(
     return box.get("text", "")
 
 
-def container_log_tails(job_id: str) -> dict[str, str]:
-    found = coding_container_ids(job_id)
-    target = found[0] if found else container_name(job_id)
+def _listed(container_id: str, listing: list[str]) -> bool:
+    """`docker ps -q` prints 12-character short ids; `docker run -d` printed the full one."""
+    return any(item and (container_id.startswith(item) or item.startswith(container_id)) for item in listing)
+
+
+def container_log_tails(job_id: str, container_id: str | None = None) -> dict[str, str]:
+    if container_id:
+        target = container_id
+    else:
+        found = coding_container_ids(job_id)
+        target = found[0] if found else container_name(job_id)
     logs = _bounded_logs(target, limit=LOG_CAPTURE_LIMIT)
     return {"stdout": logs["stdout"][-LOG_TAIL_LIMIT:], "stderr": logs["stderr"][-LOG_TAIL_LIMIT:]}
 
 
-def confirm_coding_stop(job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS) -> bool:
-    """True only when a second listing shows no container for this job."""
+def confirm_coding_stop(
+    job_id: str, *, grace_seconds: int = CANCEL_GRACE_SECONDS, container_id: str | None = None
+) -> bool:
+    """True only when a second listing shows no container for this job.
+
+    With container_id (the one this worker started), only that container is stopped and removed,
+    and True means the listing no longer shows it. Another worker may have taken the job over and
+    started its own under the same name and labels; that one is left running. Without it (the
+    reaper, or a claim that stops a due job before starting one), every container of the job goes.
+    """
     if coding_container_ids(job_id) is None:
         return False
+    if container_id:
+        _sandbox_docker(["stop", "-t", str(grace_seconds), container_id])
+        _sandbox_docker(["rm", "-f", container_id])
+        remaining = coding_container_ids(job_id)
+        return remaining is not None and not _listed(container_id, remaining)
     for command in stop_arguments(job_id, grace_seconds=grace_seconds):
         if command[0] != "ps":
             _sandbox_docker(command)
@@ -378,9 +403,10 @@ def run_coding_sandbox(
         raise CodingSandboxError("sandbox_unavailable")
     text = checked_objective(objective)
     chosen = job_id or str(uuid.uuid4())
-    _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token, objective=text)
+    started = _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token, objective=text)
     return _wait_until_stopped(
         chosen,
+        container_id=started,
         timeout_seconds=timeout_seconds,
         stop_requested=stop_requested,
         deadline_reached=deadline_reached,
@@ -399,19 +425,24 @@ def _ensure_started(
     proxy_dir: Path | None,
     job_token: str | None,
     objective: str,
-) -> None:
+) -> str | None:
+    """Start the job's container, or attach to the one this run already started; return its id.
+
+    The id is None only when Docker named none; the stop paths then fall back to the job's name.
+    """
     existing = coding_container_ids(job_id)
     if existing is None:
         raise CodingSandboxError("sandbox_unavailable")
     wired = (str(proxy_dir.resolve()) if proxy_dir is not None else "", job_token or "")
     if existing:
         with _STARTED_LOCK:
-            ours = _STARTED_ON.get(job_id) == wired
-        if ours:
-            return
+            record = _STARTED_ON.get(job_id)
+        if record is not None and record[:2] == wired and (not record[2] or _listed(record[2], existing)):
+            return record[2] or None
         # Left by a worker that died: it still talks to that worker's socket, which nothing serves.
         # Its usage so far is already on the job's reservation row; the agent reruns from the base
-        # artifact on this run's proxy, and the publish stays fenced.
+        # artifact on this run's proxy, and the publish stays fenced. This takeover is the only
+        # place a container is removed by the job's name and labels rather than by its own id.
         _LOG.warning("coding_stale_container_replaced job=%s", job_id)
         release_coding_container(job_id)
         if coding_container_ids(job_id) != []:
@@ -443,11 +474,26 @@ def _ensure_started(
             if part != "--rm"
         ]
         launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
-    if launched.returncode != 0 and not coding_container_ids(job_id):
+    listing = None if launched.returncode == 0 else coding_container_ids(job_id)
+    if launched.returncode != 0 and not listing:
         raise CodingSandboxError("sandbox_failed")
+    started = _started_id(launched.stdout if launched.returncode == 0 else "")
+    if started is None:
+        # `docker run -d` created the container but named no id (or failed after creating it):
+        # right after the replacement above, the one container listed for the job is this one.
+        listing = coding_container_ids(job_id) if listing is None else listing
+        started = listing[0] if listing is not None and len(listing) == 1 else None
     if launched.returncode == 0:
         with _STARTED_LOCK:
-            _STARTED_ON[job_id] = wired
+            _STARTED_ON[job_id] = (*wired, started or "")
+    return started
+
+
+def _started_id(stdout: str | None) -> str | None:
+    lines = [line.strip() for line in (stdout or "").splitlines() if line.strip()]
+    if not lines or _STARTED_ID.fullmatch(lines[-1]) is None:
+        return None
+    return lines[-1]
 
 
 def _wait_until_stopped(
@@ -460,8 +506,16 @@ def _wait_until_stopped(
     grace_seconds: int,
     poll_seconds: float,
     heartbeat: Callable[[], None] | None = None,
+    container_id: str | None = None,
 ) -> dict[str, Any]:
-    name = container_name(job_id)
+    """Poll the container this run started until it exits, is stopped, or the run gives up.
+
+    container_id is the id _ensure_started returned. Every status read, log read and removal here
+    targets that id, never the job's name or labels: a worker that lost its lease may still be
+    polling after another worker replaced its container and started one under the same name.
+    Without an id (Docker named none) the name and labels are the fallback, as before.
+    """
+    target = container_id or container_name(job_id)
     deadline = time.monotonic() + timeout_seconds
     while True:
         if on_poll is not None:
@@ -469,37 +523,52 @@ def _wait_until_stopped(
                 on_poll()
             except BaseException:
                 # The caller gave up the run (its lease is gone): the agent must not keep working.
-                _remove_coding_container(job_id)
+                _remove_coding_container(job_id, container_id)
                 raise
         if stop_requested is not None and stop_requested():
-            _raise_after_stop(job_id, grace_seconds, "cancelled", "cancel_unconfirmed")
+            _raise_after_stop(job_id, grace_seconds, "cancelled", "cancel_unconfirmed", container_id=container_id)
         if deadline_reached is not None and deadline_reached():
-            _raise_after_stop(job_id, grace_seconds, "deadline_exceeded", "deadline_unconfirmed")
-        status = _container_status(name)
+            _raise_after_stop(job_id, grace_seconds, "deadline_exceeded", "deadline_unconfirmed", container_id=container_id)
+        status = _container_status(target)
         if status in {"exited", "dead"}:
-            return _collect_exit(name, heartbeat=heartbeat)
-        if status is None and coding_container_ids(job_id) == []:
-            logs = container_log_tails(job_id)
+            return _collect_exit(target, heartbeat=heartbeat)
+        if status is None and _gone(job_id, container_id):
+            logs = container_log_tails(job_id, container_id)
             raise CodingSandboxError("timeout", logs)
         if time.monotonic() >= deadline:
-            logs = container_log_tails(job_id)
-            if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):
+            logs = container_log_tails(job_id, container_id)
+            if not confirm_coding_stop(job_id, grace_seconds=grace_seconds, container_id=container_id):
                 raise CodingSandboxError("timeout_unconfirmed", logs)
             raise CodingSandboxError("timeout", logs)
         time.sleep(poll_seconds)
 
 
-def _remove_coding_container(job_id: str) -> None:
-    """Best effort: a failure here must not replace the error that stopped the run."""
+def _gone(job_id: str, container_id: str | None) -> bool:
+    listing = coding_container_ids(job_id)
+    if not container_id:
+        return listing == []
+    return listing is not None and not _listed(container_id, listing)
+
+
+def _remove_coding_container(job_id: str, container_id: str | None = None) -> None:
+    """Best effort: a failure here must not replace the error that stopped the run.
+
+    With container_id only that container goes; another worker's container for the job stays.
+    """
     try:
-        release_coding_container(job_id)
+        if container_id:
+            _sandbox_docker(["rm", "-f", container_id])
+        else:
+            release_coding_container(job_id)
     except Exception:  # noqa: BLE001 - best effort, the caller's error is the one that matters
         _LOG.warning("coding_container_remove_failed job=%s", job_id, exc_info=True)
 
 
-def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pending_code: str) -> None:
-    logs = container_log_tails(job_id)
-    if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):
+def _raise_after_stop(
+    job_id: str, grace_seconds: int, confirmed_code: str, pending_code: str, *, container_id: str | None = None
+) -> None:
+    logs = container_log_tails(job_id, container_id)
+    if not confirm_coding_stop(job_id, grace_seconds=grace_seconds, container_id=container_id):
         raise CodingSandboxError(pending_code, logs)
     raise CodingSandboxError(confirmed_code, logs)
 
