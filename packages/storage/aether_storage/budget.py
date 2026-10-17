@@ -50,6 +50,19 @@ def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_i
     )
 
 
+def _unknown_charge(unknown_tokens: int, *, actual: int, reserved_tokens: int, reserved_cost: int) -> tuple[int, int]:
+    """Tokens and micro-USD to book for calls whose usage is unknown.
+
+    Each unknown call is charged what was reserved for it, at the reservation's
+    micro-USD per token, but only out of the hold left after the measured tokens.
+    """
+    if unknown_tokens <= 0 or reserved_tokens <= 0:
+        return 0, 0
+    tokens = min(unknown_tokens, max(0, reserved_tokens - actual))
+    micro = min(-(-tokens * reserved_cost // reserved_tokens), max(0, reserved_cost - actual))
+    return tokens, micro
+
+
 class BudgetError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -245,14 +258,30 @@ class BudgetLedger:
                 },
             )
 
-    def settle_measured(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, actual: int, input_tokens: int, output_tokens: int) -> str:
+    def settle_measured(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        actual: int,
+        input_tokens: int,
+        output_tokens: int,
+        unknown_tokens: int = 0,
+    ) -> str:
         """Book known token usage and release the hold, including a measured overrun.
 
-        Missing usage does not belong here: that stays mark_unknown and keeps the hold.
-        settle() still rejects a bill above its reservation. This path is for a measured
-        coding attempt whose tokens are already known.
+        A row with no measured usage at all does not belong here: that stays mark_unknown
+        and keeps the hold. settle() still rejects a bill above its reservation. This path
+        is for a measured coding attempt whose tokens are already known.
+
+        unknown_tokens is what was reserved for calls of this attempt whose usage never
+        arrived (a timeout after sending, an answer without usage). That part is charged
+        at the reservation's rate rather than released, and only out of what is still
+        held after the measured tokens: the estimate never pushes the bill past the hold.
         """
-        if actual < 0 or input_tokens < 0 or output_tokens < 0 or actual != input_tokens + output_tokens:
+        if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or actual != input_tokens + output_tokens:
             raise BudgetError("invalid_amount")
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             account = conn.execute(
@@ -268,7 +297,7 @@ class BudgetLedger:
             ).mappings().one()
             detail = _detail(request["usage_detail"])
             if request["usage_status"] == "known":
-                if request["actual_micro_usd"] != actual:
+                if request["actual_micro_usd"] != actual + int(detail.get("unknown_charged_micro_usd") or 0):
                     raise BudgetError("conflicting_settlement")
                 return str(detail.get("book_result") or "settled")
             if request["usage_status"] == "unknown":
@@ -277,6 +306,9 @@ class BudgetLedger:
                 raise BudgetError("not_reserved")
             reserved_cost = int(request["reserved_micro_usd"])
             reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            unknown_charge_tokens, unknown_charge_micro = _unknown_charge(
+                unknown_tokens, actual=actual, reserved_tokens=reserved_tokens, reserved_cost=reserved_cost
+            )
             overrun_micro = max(0, actual - reserved_cost)
             overrun_tokens = max(0, actual - reserved_tokens)
             book_result = "overrun" if overrun_micro or overrun_tokens else "settled"
@@ -286,6 +318,9 @@ class BudgetLedger:
             if book_result == "overrun":
                 detail["overrun_micro_usd"] = overrun_micro
                 detail["overrun_tokens"] = overrun_tokens
+            if unknown_tokens:
+                detail["unknown_charged_tokens"] = unknown_charge_tokens
+                detail["unknown_charged_micro_usd"] = unknown_charge_micro
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = :actual, input_tokens = :input_tokens, "
@@ -293,7 +328,7 @@ class BudgetLedger:
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
                 ),
                 {
-                    "actual": actual,
+                    "actual": actual + unknown_charge_micro,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
                     "detail": json.dumps(detail),
@@ -309,9 +344,9 @@ class BudgetLedger:
                 ),
                 {
                     "reserved": reserved_cost,
-                    "actual": actual,
+                    "actual": actual + unknown_charge_micro,
                     "reserved_tokens": reserved_tokens,
-                    "tokens": actual,
+                    "tokens": actual + unknown_charge_tokens,
                     "id": account["id"],
                 },
             )

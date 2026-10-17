@@ -996,6 +996,7 @@ class ModelGateway:
             detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
             if counted is None:
                 detail["usage_missing"] = True
+                self._note_unknown_call(detail)
             else:
                 incoming, outgoing = counted
                 detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
@@ -1048,6 +1049,9 @@ class ModelGateway:
                 detail["provider_error"] = exc.provider_error
             if release_pending:
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
+                if exc.sent and exc.upstream_status is None:
+                    # Sent but no answer (a timeout): the provider may bill it, so its hold is charged at settlement.
+                    self._note_unknown_call(detail)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1087,6 +1091,14 @@ class ModelGateway:
                             "request_key": self._coding_child_key,
                         },
                     )
+
+    def _note_unknown_call(self, detail: dict[str, Any]) -> None:
+        """Count a call whose usage never arrived and keep its reservation for settlement.
+
+        These counters only grow: a later call that reports usage does not erase them.
+        """
+        detail["unknown_usage_calls"] = _count(detail.get("unknown_usage_calls")) + 1
+        detail["unknown_reserved_tokens"] = _count(detail.get("unknown_reserved_tokens")) + self._coding_call_tokens
 
     def _write_child_observation(
         self,

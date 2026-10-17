@@ -1300,25 +1300,6 @@ def _successful_model_requests(
     return int(count or 0)
 
 
-def _measured_usage(
-    ledger: BudgetLedger,
-    *,
-    owner_id: str,
-    project_id: str,
-    task_id: str,
-    request_key: str,
-) -> tuple[int, int] | None:
-    return _measured_from_detail(
-        _request_detail(
-            ledger,
-            owner_id=owner_id,
-            project_id=project_id,
-            task_id=task_id,
-            request_key=request_key,
-        )
-    )
-
-
 def _log_job(
     *,
     job_id: str,
@@ -1365,13 +1346,14 @@ def _settle(
 ) -> None:
     if not reserved:
         return
-    usage = _measured_usage(
+    detail = _request_detail(
         ledger,
         owner_id=owner_id,
         project_id=project_id,
         task_id=task_id,
         request_key=request_key,
     )
+    usage = _measured_from_detail(detail)
     if usage is None:
         usage = _usage(result)
     if usage is None:
@@ -1394,12 +1376,28 @@ def _settle(
             actual=incoming + outgoing,
             input_tokens=incoming,
             output_tokens=outgoing,
+            unknown_tokens=_unknown_reserved_tokens(detail),
         )
     except BudgetError as exc:
         if exc.code not in {"unknown_not_zero", "not_reserved", "conflicting_settlement"}:
             raise
     except NoResultFound:
         return
+
+
+def _unknown_reserved_tokens(detail: dict[str, Any]) -> int:
+    """Reserved tokens of calls whose usage never arrived; the ledger charges them, capped at the hold.
+
+    A row flagged usage_missing without the per-call amount (written before the gateway
+    recorded it) cannot say how much was unknown, so the whole hold stays charged.
+    """
+    recorded = detail.get("unknown_reserved_tokens")
+    if type(recorded) is int and recorded > 0:
+        return recorded
+    if detail.get("usage_missing") is True:
+        held = detail.get("reserved_tokens")
+        return held if type(held) is int and held > 0 else 0
+    return 0
 
 
 def _release_hold(
