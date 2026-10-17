@@ -98,6 +98,20 @@ def test_run_and_pull_use_the_sdk_and_not_subprocess(tmp_path: Path, monkeypatch
     assert JOB_IMAGE.startswith("python@sha256:")
 
 
+def test_the_sdk_receives_the_objective_unchanged(tmp_path: Path) -> None:
+    objective = "say \"hi\"\nthen $(id) `id` ${HOME} {x} a=b=c 中文"
+    client = _Client()
+    set_docker_client(client)
+    try:
+        args = container_arguments(tmp_path, "python:3.12-alpine", objective=objective)
+        execute_docker(["run", "-d", "--name", "aether-code-objective", *args[1:]])
+    finally:
+        set_docker_client(None)
+    environment = client.containers.kwargs["environment"]
+    assert isinstance(environment, dict)
+    assert environment["AETHER_OBJECTIVE"] == objective
+
+
 class _StreamContainer:
     def __init__(self) -> None:
         self.command: list[str] | None = None

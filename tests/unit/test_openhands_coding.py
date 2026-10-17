@@ -141,6 +141,7 @@ def test_agent_calls_the_model_socket_edits_the_file_and_strips_the_secret(tmp_p
             "OH_SECRET_KEY": "should-not-pass",
             "AETHER_SANDBOX_WORK": str(work),
             "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": f"Edit {job / 'app.py'} so value() returns 42.",
             "AETHER_SANDBOX_PROTOCOL": str(protocol),
             "AETHER_MODEL_SOCKET": str(fake.path),
             "AETHER_JOB_TOKEN": "job-token-unit",
@@ -218,6 +219,7 @@ def test_a_finish_call_leaves_the_candidate_file_unchanged(tmp_path: Path) -> No
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "AETHER_SANDBOX_WORK": str(work),
             "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": f"Edit {job / 'app.py'} so value() returns 42.",
             "AETHER_SANDBOX_PROTOCOL": str(protocol),
             "AETHER_MODEL_SOCKET": str(fake.path),
             "AETHER_JOB_TOKEN": "job-token-unit",
@@ -267,6 +269,7 @@ def test_rewritten_tests_cannot_pass(tmp_path: Path) -> None:
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "AETHER_SANDBOX_WORK": str(work),
             "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": f"Edit {job / 'app.py'} so value() returns 42.",
             "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
             "AETHER_MODEL_SOCKET": str(fake.path),
             "AETHER_JOB_TOKEN": "job-token-unit",
@@ -378,6 +381,7 @@ def test_background_process_cannot_rewrite_tests_after_restore(tmp_path: Path) -
             "OPENHANDS_SUPPRESS_BANNER": "1",
             "AETHER_SANDBOX_WORK": str(work),
             "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": f"Edit {job / 'app.py'} so value() returns 42.",
             "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
             "AETHER_MODEL_SOCKET": str(fake.path),
             "AETHER_JOB_TOKEN": "job-token-unit",
@@ -412,6 +416,107 @@ def test_background_process_cannot_rewrite_tests_after_restore(tmp_path: Path) -
         fake.close()
         if pid and _alive(pid):
             os.kill(pid, 9)
+
+
+_OBJECTIVE = (
+    "Rename \"value\" to 'answer' in app.py\n"
+    "then $(touch /tmp/pwned) && `id`; echo ${HOME} {target} {0} %s \\n 中文\n\n  trailing  "
+)
+
+
+def _message_text(message: dict) -> str:
+    content = message.get("content")
+    if isinstance(content, str):
+        return content
+    assert isinstance(content, list), message
+    return "".join(part["text"] for part in content if isinstance(part, dict) and part.get("type") == "text")
+
+
+def _entry_env(tmp_path: Path, fake: _SocketModel, **extra: str) -> dict[str, str]:
+    protocol = tmp_path / "protocol.py"
+    protocol.write_text(
+        "import json, sys\n"
+        "sys.stdout.write(json.dumps({'passed': 1, 'failed': 0, 'errors': 0, 'cases': []}) + '\\n')\n",
+        encoding="utf-8",
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if key != "AETHER_OBJECTIVE"}
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(tmp_path / "job"),
+            "AETHER_SANDBOX_PROTOCOL": str(protocol),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            **extra,
+        }
+    )
+    return env
+
+
+def _run_entry(tmp_path: Path, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_agent_receives_the_objective_verbatim_as_its_only_user_message(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    fake = _SocketModel(finish_only=True)
+    fake.start()
+    try:
+        completed = _run_entry(tmp_path, _entry_env(tmp_path, fake, AETHER_OBJECTIVE=_OBJECTIVE))
+    finally:
+        fake.close()
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert fake.bodies, completed.stdout + completed.stderr
+    for raw in fake.bodies:
+        messages = json.loads(raw)["messages"]
+        users = [_message_text(item) for item in messages if item.get("role") == "user"]
+        assert users == [_OBJECTIVE]
+        systems = [_message_text(item) for item in messages if item.get("role") == "system"]
+        assert len(systems) == 1
+        assert _OBJECTIVE not in systems[0]
+        assert "{target}" not in systems[0] and "pwned" not in systems[0]
+        assert "42" not in systems[0]
+        assert str(tmp_path / "job") in systems[0]
+    assert not Path("/tmp/pwned").exists()
+
+
+def test_entry_fails_without_an_objective_and_never_calls_the_model(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    fake = _SocketModel()
+    fake.start()
+    try:
+        missing = _run_entry(tmp_path / "a", _entry_env(_mkdir(tmp_path / "a"), fake))
+        blank = _run_entry(tmp_path / "b", _entry_env(_mkdir(tmp_path / "b"), fake, AETHER_OBJECTIVE=" \n\t "))
+    finally:
+        fake.close()
+    for completed in (missing, blank):
+        line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+        assert line, completed.stdout + completed.stderr
+        body = json.loads(line[len("RESULT ") :])
+        assert completed.returncode == 2
+        assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "objective_missing"}]
+        assert body["model_requests"] == 0
+        assert body["patch"] == ""
+    assert fake.bodies == []
+
+
+def _mkdir(path: Path) -> Path:
+    path.mkdir()
+    return path
 
 
 class _SocketModel:
