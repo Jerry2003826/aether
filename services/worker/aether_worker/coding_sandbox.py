@@ -267,11 +267,14 @@ def _ensure_started(
             )
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
+        if launched.returncode != 0 and (launched.stderr or "").strip() == "image_unavailable":
+            # Image prep failed before the roles started; the runner has no sandbox image to run.
+            raise CodingSandboxError("image_unavailable")
     else:
         try:
             runtime_image = launch_image(image, JOB_IMAGE)
         except LookupError as exc:
-            raise CodingSandboxError("sandbox_unavailable") from exc
+            raise CodingSandboxError("image_unavailable") from exc
         args = [
             part
             for part in container_arguments(
