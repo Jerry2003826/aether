@@ -76,3 +76,26 @@ def test_the_f26_verify_container_drops_all_capabilities_and_forbids_new_privile
     monkeypatch.setattr(f26_acceptance.subprocess, "run", run)
     f26_acceptance._docker_check(tmp_path, "")
     assert seen and all(_locked(command) for command in seen), seen
+
+
+def test_the_grader_container_adds_back_exactly_the_capabilities_its_root_pid_1_needs(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # The grader runs as root (PID 1) over a host-owned 0700 bind mount and drops probes to nobody:
+    # it must read /work (DAC_OVERRIDE), chown the child home (CHOWN), setuid/setgid/setgroups to
+    # nobody (SETUID, SETGID) and reap nobody's leftovers with kill(-1) (KILL). Nothing else.
+    seen: list[list[str]] = []
+
+    def docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
+        seen.append(list(args))
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+    monkeypatch.setattr(verification, "_docker", docker)
+    verification.run_grader_container(tmp_path, timeout_seconds=None)
+    (command,) = [args for args in seen if args[:1] == ["run"]]
+    assert _locked(command), command
+    added = sorted(command[index + 1] for index, part in enumerate(command) if part == "--cap-add")
+    assert added == ["CHOWN", "DAC_OVERRIDE", "KILL", "SETGID", "SETUID"], command
+    assert "--privileged" not in command and "--user" not in command, command
+    # Every --cap-add comes after the --cap-drop ALL it narrows.
+    assert all(command.index("--cap-drop") < index for index, part in enumerate(command) if part == "--cap-add"), command
