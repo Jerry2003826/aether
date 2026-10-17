@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import struct
+import subprocess
 from typing import Any
 
 import docker
@@ -83,7 +84,9 @@ class _API(docker.APIClient):
 
     def create_container(self, image: str, command: Any = None, **kwargs: Any) -> dict:
         name = kwargs["name"]
-        self.created[name] = {"image": image, "command": command, **kwargs}
+        # The Engine API body docker-py would send, built by docker-py itself.
+        body = self.create_container_config(image, command, **{key: value for key, value in kwargs.items() if key != "name"})
+        self.created[name] = {"image": image, "command": command, "body": body, **kwargs}
         self.calls.append(("create_container", name))
         return {"Id": name}
 
@@ -135,7 +138,8 @@ def sdk_only(monkeypatch: pytest.MonkeyPatch):
             raise FileNotFoundError(2, "No such file or directory", "docker")
         raise AssertionError(f"unexpected subprocess {argv!r}")
 
-    monkeypatch.setattr(threat_launch.subprocess, "run", no_cli)
+    monkeypatch.setattr(subprocess, "run", no_cli)
+    monkeypatch.setattr(subprocess, "Popen", no_cli)
     monkeypatch.setattr(threat_launch.time, "sleep", lambda _s: None)
 
     def install(api: _API) -> _API:
@@ -169,7 +173,9 @@ def test_direct_visit_runs_on_the_sdk_with_every_flag_mapped(sdk_only) -> None:
     assert ("create_network", f"{name}-egress", {"driver": "bridge", "internal": False, "check_duplicate": True}) in api.calls
     assert created["image"] == BROWSER
     assert created["command"] == ["python3", "-m", ENTRYPOINT]
-    assert created["stdin_open"] is True and created["stdin_once"] is True and created["tty"] is False
+    assert created["stdin_open"] is True and created["tty"] is False
+    assert created["body"]["OpenStdin"] is True and created["body"]["StdinOnce"] is True
+    assert created["body"]["AttachStdin"] is True and created["body"]["Tty"] is False
     assert created["user"] == "pwuser"
     assert created["labels"] == {"aether.role": "threat-browser"}
     env = dict(item.split("=", 1) for item in created["environment"])
