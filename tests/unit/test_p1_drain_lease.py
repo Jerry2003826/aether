@@ -180,3 +180,65 @@ def test_renew_lease_reports_whether_the_lease_was_still_held(rowcount: int, exp
     )
     assert renewed is expected
     assert database.statements and database.statements[0].startswith("UPDATE operations")
+
+
+def _sandbox_reading_logs(job: _Job, *, seconds: float, step: float):
+    """A sandbox whose exit-log read takes `seconds` on the fake clock and beats the heartbeat it was handed."""
+
+    def sandbox(_root: Path, **kwargs: Any) -> dict[str, Any]:
+        heartbeat = kwargs.get("heartbeat")
+        assert heartbeat is not None, "run_coding_sandbox must get a lease heartbeat for the exit-log read"
+        end = job.clock.now + seconds
+        while job.clock.now + step < end:
+            job.clock.now += step
+            heartbeat()
+        job.clock.now = end
+        return {"exit_code": 0, "result": {"passed": 1, "failed": 0, "agent_completed": True, "patch": ""}}
+
+    return sandbox
+
+
+def test_the_lease_has_no_gap_from_the_exit_log_read_into_the_drain(monkeypatch: pytest.MonkeyPatch) -> None:
+    job = _Job(monkeypatch)
+    log_seconds = 60.0
+    monkeypatch.setattr(coding_jobs, "run_coding_sandbox", _sandbox_reading_logs(job, seconds=log_seconds, step=10.0))
+    outcome = job.run()
+    assert outcome == {"coding_job_id": _JOB, "state": "FINISHED"}
+    end = log_seconds + DEFAULT_DRAIN_SECONDS
+    assert job.clock.now == pytest.approx(end)
+    marks = [0.0, *[moment for moment in job.renewed_at if 0 < moment <= end], end]
+    gaps = [later - earlier for earlier, later in itertools.pairwise(marks)]
+    assert max(gaps) < coding_jobs.LEASE_SECONDS, gaps
+    assert job.settled == [pytest.approx(end)]
+
+
+def test_a_lease_lost_while_the_exit_logs_are_read_is_not_settled(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The claim-time renewal holds; the first heartbeat during the log read finds the lease gone.
+    job = _Job(monkeypatch, renewals=[True, False])
+    monkeypatch.setattr(coding_jobs, "run_coding_sandbox", _sandbox_reading_logs(job, seconds=60.0, step=10.0))
+    outcome = job.run()
+    assert outcome == {"coding_job_id": _JOB, "state": "ACTIVE", "error_code": "fence_lost"}
+    assert job.settled == []
+    assert job.released == []
+    assert job.published == []
+    assert job.stopped == []
+    assert job.closed == 1
+
+
+def test_a_lease_lost_in_the_final_drain_after_an_unexpected_error_is_fence_lost(monkeypatch: pytest.MonkeyPatch) -> None:
+    job = _Job(monkeypatch, renewals=[True, False])
+    failed: list[str] = []
+    monkeypatch.setattr(coding_jobs, "_fail", lambda *_a, **_k: failed.append("fail"))
+
+    def sandbox(_root: Path, **_kwargs: Any) -> dict[str, Any]:
+        raise RuntimeError("unexpected")
+
+    monkeypatch.setattr(coding_jobs, "run_coding_sandbox", sandbox)
+    outcome = job.run()
+    assert outcome == {"coding_job_id": _JOB, "state": "ACTIVE", "error_code": "fence_lost"}
+    assert job.settled == []
+    assert job.released == []
+    assert job.published == []
+    assert failed == []
+    assert job.drains == 1
+    assert job.closed == 1
