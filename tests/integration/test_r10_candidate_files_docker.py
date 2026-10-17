@@ -21,6 +21,8 @@ from tests.unit.test_r10_candidate_files import (
     _HELPER_FILES,
     _HELPER_LEAKS,
     _LEAKS,
+    _SIGNAL_APP,
+    _SIGNAL_TESTS,
     _TESTS,
 )
 
@@ -93,3 +95,18 @@ def test_grading_helpers_are_not_readable_in_the_coding_sandbox(tmp_path: Path) 
     for name in _HELPER_LEAKS:
         assert verdicts.get(name) == "FAIL", (name, body)
     assert verdicts.get("tests.test_helper.test_helper_is_denied") == "PASS", body
+
+
+def test_candidate_cannot_signal_outside_its_sandbox_in_the_coding_sandbox(tmp_path: Path) -> None:
+    for name, text in {"app.py": _SIGNAL_APP, "test_signal.py": _SIGNAL_TESTS}.items():
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    for path in [tmp_path, *tmp_path.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    code, body = _grade_in_sandbox(tmp_path)
+    verdicts = {case["name"]: case["verdict"] for case in body["cases"]}
+    assert verdicts == {
+        "test_signal.test_cannot_signal_the_test_process": "PASS",
+        "test_signal.test_cannot_signal_the_grader": "PASS",
+        "test_signal.test_can_signal_its_own_children": "PASS",
+    }, body
+    assert code == 0, body

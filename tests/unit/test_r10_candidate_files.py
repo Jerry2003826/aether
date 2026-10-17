@@ -218,3 +218,58 @@ def test_grading_helpers_next_to_tests_are_not_readable(tmp_path: Path) -> None:
     for name in _HELPER_LEAKS:
         assert verdicts.get(name) == "FAIL", (name, body)
     assert verdicts.get("tests.test_helper.test_helper_is_denied") == "PASS", body
+
+
+_SIGNAL_APP = (
+    "import os\n"
+    "import signal\n"
+    "import subprocess\n"
+    "import sys\n"
+    "\n"
+    "def _send(pid, sig):\n"
+    "    try:\n"
+    "        os.kill(pid, sig)\n"
+    "    except PermissionError:\n"
+    "        return 'denied'\n"
+    "    return 'sent'\n"
+    "\n"
+    "def kill_test_process():\n"
+    "    return _send(os.getppid(), signal.SIGKILL)\n"
+    "\n"
+    "def probe_grader():\n"
+    "    with open(f'/proc/{os.getppid()}/status') as handle:\n"
+    "        grader = int(next(line for line in handle if line.startswith('PPid:')).split()[1])\n"
+    "    return _send(grader, 0)\n"
+    "\n"
+    "def kill_own_child():\n"
+    "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+    "    result = _send(child.pid, signal.SIGKILL)\n"
+    "    child.wait()\n"
+    "    return result\n"
+)
+_SIGNAL_TESTS = (
+    "import app\n"
+    "\n"
+    "def test_cannot_signal_the_test_process():\n"
+    "    assert app.kill_test_process() == 'denied'\n"
+    "\n"
+    "def test_cannot_signal_the_grader():\n"
+    "    assert app.probe_grader() == 'denied'\n"
+    "\n"
+    "def test_can_signal_its_own_children():\n"
+    "    assert app.kill_own_child() == 'sent'\n"
+)
+
+
+def test_candidate_cannot_signal_the_test_or_grader_process(tmp_path: Path) -> None:
+    # Landlock ABI 6 signal scoping (this host and the sandbox image have ABI 6).
+    _write(tmp_path, {"app.py": _SIGNAL_APP, "test_signal.py": _SIGNAL_TESTS})
+    code, body, output = _grade(tmp_path)
+    assert body is not None, output
+    verdicts = {case["name"]: (case["verdict"], case["detail"]) for case in body["cases"]}
+    assert verdicts == {
+        "test_signal.test_cannot_signal_the_test_process": ("PASS", ""),
+        "test_signal.test_cannot_signal_the_grader": ("PASS", ""),
+        "test_signal.test_can_signal_its_own_children": ("PASS", ""),
+    }, body
+    assert code == 0, body
