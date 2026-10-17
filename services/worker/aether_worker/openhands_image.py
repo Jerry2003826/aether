@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from pathlib import Path
 
 from aether_worker.container_runtime import build_context, image_id_with_label
@@ -22,15 +23,61 @@ def repository_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _copy_sources(dockerfile: str) -> list[str]:
-    """Source paths of every COPY/ADD in the Dockerfile, relative to the build context."""
+def _instructions(dockerfile: str) -> list[str]:
+    """Logical Dockerfile instructions: comments dropped, backslash continuations joined."""
     found: list[str] = []
+    pending = ""
     for raw in dockerfile.splitlines():
-        words = raw.split()
-        if len(words) < 3 or words[0].upper() not in {"COPY", "ADD"}:
+        stripped = raw.strip()
+        if not pending and (not stripped or stripped.startswith("#")):
             continue
-        args = [word for word in words[1:] if not word.startswith("--")]
-        found.extend(item.rstrip("/") for item in args[:-1])
+        if pending and stripped.startswith("#"):
+            continue
+        if stripped.endswith("\\"):
+            pending += stripped[:-1] + " "
+            continue
+        found.append(pending + stripped)
+        pending = ""
+    if pending:
+        found.append(pending)
+    return found
+
+
+def _copy_sources(dockerfile: str) -> list[str]:
+    """Source paths of every build-context COPY/ADD, relative to the build context.
+
+    Handles flags, backslash-continued lines and the JSON-array form. `--from=` copies come
+    from another stage and are skipped. Heredocs, URLs, malformed JSON and a missing
+    destination raise ValueError so the hash never silently misses an input.
+    """
+    found: list[str] = []
+    for line in _instructions(dockerfile):
+        keyword, _, rest = line.partition(" ")
+        if keyword.upper() not in {"COPY", "ADD"}:
+            continue
+        words = rest.split()
+        flags = [word for word in words if word.startswith("--")]
+        if any(flag.startswith("--from") for flag in flags):
+            continue
+        body = rest.strip()
+        while body.startswith("--"):
+            body = body.split(None, 1)[1] if len(body.split(None, 1)) > 1 else ""
+        if body.startswith("["):
+            try:
+                args = json.loads(body)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"unparsed {keyword}: {line}") from exc
+            if not isinstance(args, list) or not all(isinstance(item, str) for item in args):
+                raise ValueError(f"unparsed {keyword}: {line}")
+        else:
+            args = body.split()
+        if len(args) < 2:
+            raise ValueError(f"{keyword} without source and destination: {line}")
+        sources = args[:-1]
+        for item in sources:
+            if item.startswith("<<") or "://" in item:
+                raise ValueError(f"unsupported {keyword} source: {item}")
+        found.extend(item.rstrip("/") for item in sources)
     return found
 
 
