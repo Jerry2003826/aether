@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import subprocess
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +13,18 @@ import requests
 from docker.errors import BuildError, DockerException, ImageNotFound, NotFound
 from docker.utils import parse_repository_tag
 
+from aether_worker.output_bounds import (
+    LOG_CAPTURE_LIMIT,
+    RESULT_CAPTURE_LIMIT,
+    tail_bytes,
+)
+
 _CLIENT: object | None = None
-_LOG_STREAM_LIMIT = 65536
+_LOG_STREAM_LIMIT = LOG_CAPTURE_LIMIT
+# A foreground run's stdout carries its result (the grader's ISOLATION and GRADE lines, the GRADE
+# line holding up to the candidate's values), so it gets the result window; stderr is only a log.
+_RUN_STDOUT_LIMIT = RESULT_CAPTURE_LIMIT
+_RUN_STDERR_LIMIT = LOG_CAPTURE_LIMIT
 
 
 def set_docker_client(client: object | None) -> None:
@@ -74,9 +85,29 @@ def container_logs(name: str, *, limit: int = _LOG_STREAM_LIMIT) -> tuple[bytes,
         container = client.containers.get(name)
     except (NotFound, DockerException):
         return b"", b""
-    stdout = _tail_stream(container.logs(stdout=True, stderr=False, stream=True, follow=False), limit)
-    stderr = _tail_stream(container.logs(stdout=False, stderr=True, stream=True, follow=False), limit)
-    return stdout, stderr
+    return _read_tails(container, stdout_limit=limit, stderr_limit=limit)
+
+
+def _read_tails(container: Any, *, stdout_limit: int, stderr_limit: int) -> tuple[bytes, bytes]:
+    """Stream both log streams at once, stderr on a helper thread, keeping only each bounded tail."""
+    found: dict[str, Any] = {}
+
+    def read_stderr() -> None:
+        try:
+            chunks = container.logs(stdout=False, stderr=True, stream=True, follow=False)
+            found["stderr"] = _tail_stream(chunks, stderr_limit)
+        except Exception as exc:  # noqa: BLE001 - re-raised on the caller's thread below
+            found["error"] = exc
+
+    reader = threading.Thread(target=read_stderr, name="docker-logs-stderr", daemon=True)
+    reader.start()
+    try:
+        stdout = _tail_stream(container.logs(stdout=True, stderr=False, stream=True, follow=False), stdout_limit)
+    finally:
+        reader.join()
+    if "error" in found:
+        raise found["error"]
+    return stdout, found.get("stderr", b"")
 
 
 def image_id_with_label(label: str) -> str | None:
@@ -222,8 +253,10 @@ def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProce
                     pass
                 raise subprocess.TimeoutExpired(["docker", "run", parsed["image"]], timeout) from exc
             return _failed(str(exc))
-        stdout = _as_bytes(container.logs(stdout=True, stderr=False) or b"").decode("utf-8", "replace")
-        stderr = _as_bytes(container.logs(stdout=False, stderr=True) or b"").decode("utf-8", "replace")
+        stdout_tail, stderr_tail = _read_tails(container, stdout_limit=_RUN_STDOUT_LIMIT, stderr_limit=_RUN_STDERR_LIMIT)
+        stdout = stdout_tail.decode("utf-8", "replace")
+        stderr = stderr_tail.decode("utf-8", "replace")
+        del stdout_tail, stderr_tail
         code = int((status or {}).get("StatusCode", 1))
         return subprocess.CompletedProcess(["docker", "run"], code, stdout, stderr)
     finally:
@@ -483,17 +516,11 @@ def _positional(args: list[str], *, skip: set[str]) -> str:
 def _tail_stream(chunks: Any, limit: int) -> bytes:
     if limit < 1:
         return b""
+    if chunks is None:
+        return b""
     if isinstance(chunks, (bytes, str)):
         return _as_bytes(chunks)[-limit:]
-    kept = bytearray()
-    for chunk in chunks:
-        piece = _as_bytes(chunk)
-        if not piece:
-            continue
-        kept.extend(piece)
-        if len(kept) > limit:
-            del kept[:-limit]
-    return bytes(kept)
+    return tail_bytes(chunks, limit)
 
 
 def _as_bytes(value: bytes | str) -> bytes:

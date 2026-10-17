@@ -11,7 +11,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
 from docker.errors import DockerException
 
@@ -21,6 +21,12 @@ from aether_worker.openhands_image import (
     IMAGE_UNAVAILABLE,
     RUN_IMAGE_REASONS,
     launch_image,
+)
+from aether_worker.output_bounds import (  # shared with container_runtime; callers still import them from here
+    LOG_CAPTURE_LIMIT,
+    MAX_PATCH_BYTES,  # noqa: F401
+    RESULT_CAPTURE_LIMIT,
+    read_bounded_tail,
 )
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
@@ -34,13 +40,8 @@ from aether_worker.sandbox_delegate import (
 
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
-LOG_CAPTURE_LIMIT = 65536
 # The CLI log fallback is killed after this long so a wedged `docker logs` cannot hold the job.
 CLI_LOGS_TIMEOUT_SECONDS = 60
-# The RESULT line carries the whole patch. The sandbox entry caps the patch at MAX_PATCH_BYTES,
-# so the final line always fits inside this stdout window.
-MAX_PATCH_BYTES = 2_097_152
-RESULT_CAPTURE_LIMIT = 4 * MAX_PATCH_BYTES
 POLL_SECONDS = 0.25
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
 CODING_MEMORY_BYTES = 805306368
@@ -165,21 +166,6 @@ def coding_container_ids(job_id: str) -> list[str] | None:
     if completed.returncode != 0:
         return None
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
-
-
-def read_bounded_tail(stream: BinaryIO, limit: int) -> str:
-    """Keep only the last `limit` bytes. The host does not retain the rest."""
-    if limit < 1:
-        return ""
-    kept = bytearray()
-    while True:
-        chunk = stream.read(8192)
-        if not chunk:
-            break
-        kept.extend(chunk)
-        if len(kept) > limit:
-            del kept[:-limit]
-    return kept.decode("utf-8", errors="replace")
 
 
 def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
