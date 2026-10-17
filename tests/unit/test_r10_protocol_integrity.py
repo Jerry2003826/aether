@@ -158,3 +158,44 @@ def test_deleting_or_changing_a_grading_file_is_still_tampering(tmp_path: Path) 
         code, body = _grade(root)
         assert code == 1, body
         assert {"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"} in body["cases"], body
+
+
+def test_a_candidate_package_named_env_or_venv_is_tamper_checked(tmp_path: Path) -> None:
+    for index, package in enumerate(("env", "venv", ".venv")):
+        root = tmp_path / str(index)
+        root.mkdir()
+        _write(
+            root,
+            {
+                f"{package}/__init__.py": "",
+                f"{package}/core.py": "def value():\n    return 42\n",
+                "test_a.py": (
+                    "import pathlib\n\ndef test_a():\n"
+                    f"    pathlib.Path('{package}/core.py').write_text('def value():\\n    return 0\\n')\n"
+                ),
+                "test_b.py": "def test_b():\n    pass\n",
+            },
+        )
+        code, body = _grade(root)
+        assert code == 1, (package, body)
+        assert {"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"} in body["cases"], (package, body)
+
+
+def test_a_real_virtualenv_with_pyvenv_cfg_is_skipped(tmp_path: Path) -> None:
+    for index, venv in enumerate(("env", "venv", ".venv")):
+        root = tmp_path / str(index)
+        root.mkdir()
+        _write(
+            root,
+            {
+                f"{venv}/pyvenv.cfg": "home = /usr/bin\n",
+                f"{venv}/lib/python3/site-packages/dep.py": "x = 1\n",
+                "test_a.py": (
+                    "import pathlib\n\ndef test_a():\n"
+                    f"    pathlib.Path('{venv}/lib/python3/site-packages/dep.py').write_text('x = 2\\n')\n"
+                    f"    pathlib.Path('{venv}/pyvenv.cfg').write_text('home = /tmp\\n')\n"
+                ),
+            },
+        )
+        code, body = _grade(root)
+        assert (code, body["passed"], body["failed"]) == (0, 1, 0), (venv, body)
