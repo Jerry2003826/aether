@@ -14,6 +14,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Collection
 from pathlib import Path
 
 os.environ["OPENHANDS_SUPPRESS_BANNER"] = "1"
@@ -430,10 +431,14 @@ def _digest(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
 
 
-def _baseline_files(work: Path) -> dict[str, bytes]:
+class StartupHookAdded(RuntimeError):
+    """The agent added sitecustomize.py, usercustomize.py or a .pth file. It is deleted and the job fails."""
+
+
+def _baseline_files(work: Path, editable: Collection[str] | None) -> dict[str, bytes]:
     """Every grading file of the job-creation workspace, by content. Caches are never baseline."""
     found: dict[str, bytes] = {}
-    for name in sorted(grading_files.grading_paths(work)):
+    for name in sorted(grading_files.grading_paths(work, editable)):
         path = work / name
         if grading_files.is_cache_path(name) or path.is_symlink() or not path.is_file():
             continue
@@ -450,16 +455,19 @@ def _remove(path: Path) -> None:
     path.rmdir()
 
 
-def restore_grading_directory(work: Path, job: Path) -> None:
-    """Make every grading path of the job directory match the baseline, file by file.
+def restore_grading_directory(work: Path, job: Path, editable: Collection[str] | None = None) -> None:
+    """Make every grading file of the job directory match the baseline, file by file.
 
-    Grading paths are defined by aether_worker.grading_files (everything except
-    CANDIDATE_FILES). A changed file (tests, oracle.py, conftest.py, pytest.ini, .pth, ...)
-    is rewritten from the baseline; a file, directory, cache or symlink the agent added is
-    deleted. The result is verified against the baseline SHA-256 hashes.
+    Grading files are the denylist in aether_worker.grading_files (tests, oracle.py,
+    conftest.py, pytest.ini, pyproject.toml, setup.cfg, tox.ini, startup hooks, caches).
+    Grading files that existed at baseline are rewritten from it; grading files the agent
+    added are deleted, and so is every symlink. Other source files keep the agent's edits
+    and additions. The grading set is then verified against the baseline SHA-256 hashes.
+    An added startup hook raises StartupHookAdded after the cleanup.
     """
-    baseline = _baseline_files(work)
+    baseline = _baseline_files(work, editable)
     expected = {name: _digest(data) for name, data in baseline.items()}
+    hooks: list[str] = []
     for path in sorted(job.rglob("*"), key=lambda item: len(item.parts), reverse=True):
         if not os.path.lexists(path):
             continue
@@ -467,16 +475,11 @@ def restore_grading_directory(work: Path, job: Path) -> None:
         if path.is_symlink():
             path.unlink()
         elif path.is_dir():
-            prefix = name + "/"
-            keep = not grading_files.is_cache_path(name) and (
-                any(item.startswith(prefix) for item in expected)
-                or any(item.startswith(prefix) for item in grading_files.CANDIDATE_FILES)
-            )
-            if not keep:
+            if grading_files.is_cache_path(name):
                 _remove(path)
-        elif not grading_files.is_grading_path(name):
-            continue
-        elif name not in expected or not path.is_file():
+        elif grading_files.is_grading_path(name, editable) and name not in expected:
+            if grading_files.is_startup_hook(name):
+                hooks.append(name)
             _remove(path)
     for name, data in baseline.items():
         target = job / name
@@ -486,11 +489,13 @@ def restore_grading_directory(work: Path, job: Path) -> None:
             _remove(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    _verify_grading_directory(job, expected)
+    _verify_grading_directory(job, expected, editable)
+    if hooks:
+        raise StartupHookAdded("grading_startup_hook")
 
 
-def _verify_grading_directory(job: Path, expected: dict[str, str]) -> None:
-    present = grading_files.grading_paths(job)
+def _verify_grading_directory(job: Path, expected: dict[str, str], editable: Collection[str] | None) -> None:
+    present = grading_files.grading_paths(job, editable)
     if any((job / name).is_symlink() for name in present):
         raise RuntimeError("grading_symlink")
     if present != set(expected):
@@ -502,6 +507,7 @@ def _verify_grading_directory(job: Path, expected: dict[str, str]) -> None:
 
 def main() -> None:
     started = time.monotonic()
+    agent_report = _blank_report()
     try:
         become_subreaper()
         objective = job_objective()
@@ -522,6 +528,11 @@ def main() -> None:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
+    except StartupHookAdded as exc:
+        # The hook is already deleted. The patch stays in the result so the attempt can be reviewed.
+        failure = _failure(str(exc))
+        failure.update(agent_report)
+        emit(failure, 2)
     except Exception as exc:
         emit(_failure(type(exc).__name__), 2)
     payload.update(agent_report)
