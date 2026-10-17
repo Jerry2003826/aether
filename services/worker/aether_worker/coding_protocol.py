@@ -17,7 +17,12 @@ Isolation: three kinds of process, and candidate code only ever runs in the last
   candidate  started by the test process. Candidate modules there are proxies: attribute access and
              calls cross a pipe and only data comes back (builtin values, or opaque handles that refuse
              comparison and truth), so candidate code can neither reach the test's frames, oracle or
-             result, nor hand back an object that compares equal to everything.
+             result, nor hand back an object that compares equal to everything. It sees only candidate
+             files: its cwd is a fresh directory the grader fills with the workspace's non-grading files
+             for that one test, and before any candidate code runs it locks itself (Landlock) to that
+             directory, a private temp dir and the system/interpreter paths, so the grading workspace,
+             tests and oracle are unreadable by any path (relative, absolute, /proc/<pid>/cwd). Without
+             Landlock no candidate code runs: candidate_isolation_unavailable.
 Limits (grading_files): a candidate call < a test process < the whole run, which grows with the
 number of tests under a hard cap. Unsupported uses of candidate objects (isinstance on a candidate
 class, except on a candidate exception class, a callback passed into candidate code, comparing a
@@ -30,6 +35,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import ctypes
 import hashlib
 import importlib.abc
 import importlib.machinery
@@ -38,10 +44,13 @@ import inspect
 import json
 import os
 import select
+import shutil
 import signal
+import stat
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import unittest
@@ -279,8 +288,11 @@ class _Session:
         bases: list[str],
         timeout: float,
         declared: frozenset[str] | None = None,
+        sandbox: dict[str, Any] | None = None,
     ) -> None:
         self._root = root
+        # Where the candidate process runs and what it may touch; see _candidate_sandbox.
+        self._sandbox = sandbox
         self._sources = sources
         self._bases = bases
         self._timeout = timeout
@@ -292,13 +304,20 @@ class _Session:
         self._modules: dict[str, int] = {}
 
     def _start(self) -> None:
+        if self._sandbox is None:
+            # No candidate directory: never fall back to running candidate code in the grading workspace.
+            self._dead = _ISOLATION_UNAVAILABLE + ":no_candidate_dir"
+            raise CandidateError(self._dead)
         child_in, to_child = os.pipe()
         from_child, child_out = os.pipe()
         env = _child_env()
+        for name in ("TMPDIR", "TEMP", "TMP"):
+            env[name] = str(self._sandbox["tmp"])
         try:
             self._process = subprocess.Popen(  # this interpreter running this file
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--candidate", str(child_in), str(child_out), str(os.getpid())],
-                cwd=self._root,
+                # The candidate's own directory, never the grading workspace.
+                cwd=str(self._sandbox["src"]),
                 env=env,
                 stdin=subprocess.DEVNULL,
                 # Candidate output is discarded: it never reaches the grader's stdout, where the signed
@@ -314,15 +333,27 @@ class _Session:
             os.close(child_out)
         self._to, self._from = to_child, from_child
         candidates = {name: base64.b64encode(data).decode("ascii") for name, data in self._sources.items() if _is_candidate(name)}
-        self._request(
-            {
-                "op": "init",
-                "sources": candidates,
-                "bases": self._bases,
-                "all": sorted(self._sources),
-                "declared": None if self._declared is None else sorted(self._declared),
-            }
-        )
+        try:
+            self._request(
+                {
+                    "op": "init",
+                    "sources": candidates,
+                    "bases": self._bases,
+                    "all": sorted(self._sources),
+                    "declared": None if self._declared is None else sorted(self._declared),
+                    "sandbox": {
+                        "write": [str(self._sandbox["src"]), str(self._sandbox["tmp"])],
+                        "deny": [str(item) for item in self._sandbox["deny"]],
+                    },
+                }
+            )
+        except CandidateError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - the init reply is a candidate error: isolation failed
+            # The candidate refused to start without its filesystem lock; no candidate code has run.
+            self._dead = _ISOLATION_UNAVAILABLE + ":" + str(exc)[:120]
+            self.close()
+            raise CandidateError(self._dead) from None
 
     def _request(self, message: dict[str, object]) -> object:
         if self._dead is not None:
@@ -729,6 +760,173 @@ def _child_env() -> dict[str, str]:
     }
 
 
+_ISOLATION_UNAVAILABLE = "candidate_isolation_unavailable"
+# Candidate (non-grading) files copied into each candidate directory; past this the rest are left out.
+_MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
+
+
+def _candidate_files(root: Path) -> dict[str, bytes]:
+    """The workspace files candidate code may see: regular, non-grading files outside skipped dirs.
+
+    Read once, before any candidate code runs, and written into a fresh directory for every test.
+    """
+    found: dict[str, bytes] = {}
+    total = 0
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                if not _skipped(path):
+                    pending.append(path)
+                continue
+            name = path.relative_to(root).as_posix()
+            if not path.is_file() or grading_files.is_grading_path(name):
+                continue
+            try:
+                data = path.read_bytes()
+            except OSError:
+                continue
+            if total + len(data) > _MAX_CANDIDATE_BYTES:
+                continue
+            total += len(data)
+            found[name] = data
+    return found
+
+
+def _candidate_sandbox(files: dict[str, bytes], deny: list[str]) -> dict[str, Any]:
+    """A fresh directory for one test's candidate process: src/ (its cwd, the candidate files) and tmp/."""
+    top = Path(tempfile.mkdtemp(prefix="aether-candidate-"))
+    src, tmp = top / "src", top / "tmp"
+    src.mkdir(mode=0o700)
+    tmp.mkdir(mode=0o700)
+    for name, data in files.items():
+        target = src / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(data)
+    return {"top": str(top), "src": str(src), "tmp": str(tmp), "deny": deny}
+
+
+def _remove_tree(top: str) -> None:
+    """Remove a candidate directory, whatever modes candidate code left on it (it never follows links)."""
+
+    def unlock(_function: object, path: str, _error: BaseException) -> None:
+        try:
+            os.chmod(os.path.dirname(path), stat.S_IRWXU)
+            os.chmod(path, stat.S_IRWXU, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            pass
+        try:
+            if os.path.isdir(path) and not os.path.islink(path):
+                shutil.rmtree(path, ignore_errors=True)
+            else:
+                os.unlink(path)
+        except OSError:
+            pass
+
+    shutil.rmtree(top, onexc=unlock)
+
+
+# Landlock (Linux >= 5.13). Syscall numbers are the same on every architecture.
+_LANDLOCK_CREATE_RULESET = 444
+_LANDLOCK_ADD_RULE = 445
+_LANDLOCK_RESTRICT_SELF = 446
+_LANDLOCK_CREATE_RULESET_VERSION = 1
+_LANDLOCK_RULE_PATH_BENEATH = 1
+_PR_SET_NO_NEW_PRIVS = 38
+_FS_EXECUTE = 1 << 0
+_FS_WRITE_FILE = 1 << 1
+_FS_READ_FILE = 1 << 2
+_FS_READ_DIR = 1 << 3
+_FS_REFER = 1 << 13  # ABI 2
+_FS_TRUNCATE = 1 << 14  # ABI 3
+_FS_IOCTL_DEV = 1 << 15  # ABI 5
+_FS_FILE_ONLY = _FS_EXECUTE | _FS_WRITE_FILE | _FS_READ_FILE | _FS_TRUNCATE | _FS_IOCTL_DEV
+# Read and run: the interpreter, its libraries and the system. Never /tmp (job workspaces live there).
+_READ_PATHS = ("/usr", "/lib", "/lib32", "/lib64", "/libx32", "/bin", "/sbin", "/etc", "/opt", "/proc")
+
+
+def _handled_access(abi: int) -> int:
+    handled = (1 << 13) - 1
+    if abi >= 2:
+        handled |= _FS_REFER
+    if abi >= 3:
+        handled |= _FS_TRUNCATE
+    if abi >= 5:
+        handled |= _FS_IOCTL_DEV
+    return handled
+
+
+def _within(path: str, parent: str) -> bool:
+    return path == parent or path.startswith(parent.rstrip("/") + "/")
+
+
+def _sandbox_rules(write: list[str], deny: list[str]) -> list[tuple[str, int]]:
+    """(path, rights) for the candidate process. A read path that holds a denied one is refused."""
+    read = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
+    interpreter = {sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix}
+    interpreter |= {entry for entry in sys.path if entry and os.path.isabs(entry)}
+    paths = sorted({os.path.realpath(item) for item in (*_READ_PATHS, *interpreter)})
+    denied = [os.path.realpath(item) for item in deny]
+    rules: list[tuple[str, int]] = []
+    for path in paths:
+        for blocked in denied:
+            if _within(blocked, path) or _within(path, blocked):
+                # e.g. an interpreter installed inside the workspace: fail closed rather than expose it.
+                raise PermissionError(f"read path {path} overlaps the grading workspace")
+        rules.append((path, read))
+    rules.append(("/dev", read | _FS_WRITE_FILE | _FS_TRUNCATE | _FS_IOCTL_DEV))
+    rules.append(("/dev/shm", -1))
+    rules.extend((os.path.realpath(path), -1) for path in write)
+    return rules
+
+
+def _landlock(write: list[str], deny: list[str]) -> None:
+    """Lock this process (and everything it starts) to the system, the interpreter and `write`.
+
+    Raises OSError when Landlock is unavailable; the caller then runs no candidate code at all.
+    """
+    rules = _sandbox_rules(write, deny)
+    libc = ctypes.CDLL(None, use_errno=True)
+    syscall = libc.syscall
+    syscall.restype = ctypes.c_long
+
+    def check(result: int, what: str) -> int:
+        if result < 0:
+            error = ctypes.get_errno()
+            raise OSError(error, f"landlock {what}: {os.strerror(error)}")
+        return result
+
+    abi = check(syscall(ctypes.c_long(_LANDLOCK_CREATE_RULESET), None, ctypes.c_size_t(0), ctypes.c_uint32(_LANDLOCK_CREATE_RULESET_VERSION)), "abi")
+    handled = _handled_access(abi)
+    attr = ctypes.create_string_buffer(struct.pack("=Q", handled), 8)
+    ruleset = check(syscall(ctypes.c_long(_LANDLOCK_CREATE_RULESET), attr, ctypes.c_size_t(8), ctypes.c_uint32(0)), "create_ruleset")
+    try:
+        for path, rights in rules:
+            try:
+                fd = os.open(path, os.O_PATH | os.O_CLOEXEC)
+            except OSError:
+                continue  # absent on this system
+            try:
+                allowed = handled if rights < 0 else rights & handled
+                if not stat.S_ISDIR(os.fstat(fd).st_mode):
+                    allowed &= _FS_FILE_ONLY
+                beneath = ctypes.create_string_buffer(struct.pack("=Qi", allowed, fd), 12)
+                check(syscall(ctypes.c_long(_LANDLOCK_ADD_RULE), ctypes.c_int(ruleset), ctypes.c_int(_LANDLOCK_RULE_PATH_BENEATH), beneath, ctypes.c_uint32(0)), "add_rule")
+            finally:
+                os.close(fd)
+        check(libc.prctl(_PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0), "no_new_privs")
+        check(syscall(ctypes.c_long(_LANDLOCK_RESTRICT_SELF), ctypes.c_int(ruleset), ctypes.c_uint32(0)), "restrict_self")
+    finally:
+        os.close(ruleset)
+
+
 _PR_SET_PDEATHSIG = 1
 
 
@@ -765,13 +963,27 @@ def _on_signal(signum: int, _frame: object) -> None:
 _TIMED_OUT = {"kind": "result", "verdict": "FAIL", "detail": "timeout"}
 
 
-def _run_in_child(root: Path, request: dict[str, object], timeout: float) -> dict[str, object] | None:
+def _run_in_child(
+    root: Path, request: dict[str, object], timeout: float, candidate: tuple[dict[str, bytes], list[str]]
+) -> dict[str, object] | None:
     """Run one step (collect a module, or one test) in a fresh test process; its reply or None.
 
     The reply arrives on a pipe only that process holds, never on stdout. The test process runs trusted
-    test code only; candidate code runs in its own process behind it. A timeout is a FAIL "timeout"
-    result; no reply (a crash, an early exit, a malformed message) is None, also a FAIL.
+    test code only; candidate code runs in its own process behind it, in a fresh candidate directory
+    (`candidate` = its files and the paths it must not read) that is removed after the step. A timeout
+    is a FAIL "timeout" result; no reply (a crash, an early exit, a malformed message) is None, also a FAIL.
     """
+    try:
+        sandbox = _candidate_sandbox(*candidate)
+    except OSError:
+        return None
+    try:
+        return _run_test_process(root, {**request, "sandbox": sandbox}, timeout)
+    finally:
+        _remove_tree(sandbox["top"])
+
+
+def _run_test_process(root: Path, request: dict[str, object], timeout: float) -> dict[str, object] | None:
     request_read, request_write = os.pipe()
     reply_read, reply_write = os.pipe()
     try:
@@ -856,6 +1068,8 @@ def run_suite(root: Path) -> dict[str, Any]:
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
+    # What candidate code may see, read before any of it runs; and what it must never read.
+    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")])
     declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
     deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
     test_timeout = _test_timeout()
@@ -889,7 +1103,7 @@ def run_suite(root: Path) -> dict[str, Any]:
         }
         # Importing the module once on its own: an import failure fails the module, and tests the module
         # defines without a top-level def (a loop, an assignment, an imported test class) are run as well.
-        probe = _run_in_child(root, {**request, "test": None}, remaining())
+        probe = _run_in_child(root, {**request, "test": None}, remaining(), candidate)
         if probe is None or probe.get("kind") not in {"import_failed", "collected", "result"}:
             failed += 1
             cases.append(_case(label, "FAIL", "import:no_result"))
@@ -917,7 +1131,7 @@ def run_suite(root: Path) -> dict[str, Any]:
                 failed += 1
                 cases.append(_case(label + "." + name, "FAIL", "timeout"))
                 continue
-            reply = _run_in_child(root, {**request, "test": name, "required": name in declared}, budget)
+            reply = _run_in_child(root, {**request, "test": name, "required": name in declared}, budget, candidate)
             verdict = reply.get("verdict") if reply is not None and reply.get("kind") == "result" else None
             detail = str(reply.get("detail", ""))[:200] if reply is not None else ""
             if verdict == "SKIP":
@@ -971,6 +1185,8 @@ def _result(verdict: str, detail: str = "") -> dict[str, object]:
 def _failure_detail(exc: BaseException) -> str:
     if isinstance(exc, CandidateError) and str(exc) == "candidate_timeout":
         return "timeout"
+    if isinstance(exc, CandidateError) and str(exc).startswith(_ISOLATION_UNAVAILABLE):
+        return _ISOLATION_UNAVAILABLE
     if isinstance(exc, CandidateObjectUnsupported):
         return "candidate_object_unsupported:" + exc.reason
     if isinstance(exc, TypeError) and str(exc).startswith("catching classes that do not inherit from BaseException"):
@@ -1168,7 +1384,10 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
     listed = request.get("declared")
     declared = None if listed is None else frozenset(listed)
     sys.meta_path.insert(0, _GraderFinder(root, sources, _module_map(sources, bases, declared), declared))
-    _Current.session = _Session(root, sources, bases, float(request["call_timeout"]), declared)
+    sandbox = request.get("sandbox")
+    _Current.session = _Session(
+        root, sources, bases, float(request["call_timeout"]), declared, sandbox if isinstance(sandbox, dict) else None
+    )
     try:
         try:
             if import_name:
@@ -1260,6 +1479,10 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             # Appended, after the stdlib and site-packages: a workspace file the module map refuses (a
             # stdlib or dependency name) cannot come back in through the path finder.
             sys.path.extend([*(str(root / base) for base in message["bases"]), str(root)])
+            sandbox = message["sandbox"]
+            # Last, and before any candidate code: from here on only the system, the interpreter and
+            # this candidate directory exist for this process and anything it starts.
+            _landlock(list(sandbox["write"]), list(sandbox["deny"]))
             return ["n"]
         if op == "import":
             return keep(importlib.import_module(message["name"]))

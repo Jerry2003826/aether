@@ -8,6 +8,7 @@ import os
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -153,15 +154,18 @@ _HANG = (
 def _start_hung(tmp_path: Path) -> tuple[subprocess.Popen[bytes], int, int]:
     work = tmp_path / "work"
     _write(work, {"app.py": _HANG, "test_app.py": "import app\n\ndef test_hangs():\n    app.value()\n"})
+    # The candidate cannot write the workspace (it is locked to its own dir, /dev and /dev/shm), so it
+    # reports its pids through /dev/shm.
+    pids = Path(tempfile.mkdtemp(prefix="aether-pids-", dir="/dev/shm"))
     grader = subprocess.Popen(
         [sys.executable, "-I", str(_PROTOCOL)],
         cwd=work,
-        env=_env(),
+        env=_env(PIDS_DIR=str(pids)),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    marker = work / "pids"
+    marker = pids / "pids"
     deadline = time.monotonic() + 30
     while not marker.exists() and time.monotonic() < deadline:
         time.sleep(0.05)

@@ -121,3 +121,33 @@ def test_grading_support_files_are_not_readable_either(tmp_path: Path) -> None:
     assert body is not None, output
     assert code == 0, (code, body)
     assert body["passed"] == 1 and body["failed"] == 0, body
+
+
+def test_without_the_filesystem_lock_no_candidate_code_runs(tmp_path: Path, monkeypatch) -> None:
+    # A read path that would expose a denied one (here: "/work" is the interpreter's /usr) cannot be
+    # locked safely, so the candidate refuses to start: fail closed, with an explicit detail.
+    import tests.unit.test_r10_oracle_isolation as harness
+
+    marker = tmp_path / "ran.txt"
+    root = tmp_path / "job"
+    root.mkdir()
+    _write(
+        root,
+        {
+            "app.py": f"open({str(marker)!r}, 'w').write('ran')\n\ndef value():\n    return 42\n",
+            "test_value.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    real_run = harness.subprocess.run
+
+    def run(*args, **kwargs):
+        kwargs["env"] = {**kwargs["env"], "AETHER_SANDBOX_WORK": "/usr"}
+        return real_run(*args, **kwargs)
+
+    monkeypatch.setattr(harness.subprocess, "run", run)
+    code, body, output = _grade(root)
+    assert body is not None, output
+    assert code == 1, (code, body)
+    assert body["passed"] == 0, body
+    assert {case["detail"] for case in body["cases"]} == {"import:candidate_isolation_unavailable"}, body
+    assert not marker.exists()

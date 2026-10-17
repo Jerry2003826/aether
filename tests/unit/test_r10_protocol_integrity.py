@@ -75,17 +75,35 @@ def test_tampering_during_the_run_is_reported(tmp_path: Path) -> None:
     _write(
         tmp_path,
         {
+            # Candidate code cannot reach the workspace any more (its process is locked to its own
+            # directory), so its attempt through the test process's cwd fails ...
             "app.py": (
+                "import os\n"
                 "import pathlib\n"
-                "pathlib.Path(__file__).with_name('test_b.py').write_text('def test_b():\\n    pass\\n')\n"
+                "try:\n"
+                "    pathlib.Path(f'/proc/{os.getppid()}/cwd/test_b.py').write_text('def test_b():\\n    pass\\n')\n"
+                "except OSError:\n"
+                "    TAMPERED = False\n"
+                "else:\n"
+                "    TAMPERED = True\n"
                 "def value():\n    return 42\n"
             ),
-            "test_a.py": "import app\n\ndef test_a():\n    assert app.value() == 42\n",
+            # ... and the check still catches a grading file that changes during the run, whoever
+            # changes it (here the trusted test itself stands in for any writer outside the sandbox).
+            "test_a.py": (
+                "import pathlib\n"
+                "import app\n\n"
+                "def test_a():\n"
+                "    assert app.TAMPERED is False\n"
+                "    pathlib.Path('test_b.py').write_text('def test_b():\\n    pass\\n')\n"
+                "    assert app.value() == 42\n"
+            ),
             "test_b.py": "import app\n\ndef test_b():\n    assert app.value() == 42\n",
         },
     )
     code, body = _grade(tmp_path)
     assert code == 1, body
+    assert {"name": "test_a.test_a", "verdict": "PASS", "detail": ""} in body["cases"], body
     assert {"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"} in body["cases"]
 
 
