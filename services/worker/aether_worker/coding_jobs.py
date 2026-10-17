@@ -1175,11 +1175,12 @@ def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, An
 
 
 def _agent_completed(body: dict[str, Any]) -> bool:
-    flag = body.get("agent_completed")
-    if isinstance(flag, bool):
-        return flag
-    requests = body.get("model_requests")
-    return isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
+    """Only an explicit true from the entry means the conversation reached FINISHED.
+
+    The entry always writes the flag; a missing or non-boolean value is treated as interrupted,
+    not inferred from the request count.
+    """
+    return body.get("agent_completed") is True
 
 
 def _coding_terminal(
@@ -1190,11 +1191,14 @@ def _coding_terminal(
     usage_missing: bool,
     admission_error: str | None = None,
 ) -> tuple[str, str | None]:
-    """FINISHED needs a completed agent and a passing protocol.
+    """FINISHED needs a completed agent, an agent change and a passing protocol.
 
     A budget rejection or a blank report (the agent raised before it finished)
-    is FAILED even when the files on disk already pass. A scripted finish that
-    completes without editing still lets an already-correct candidate pass.
+    is FAILED even when the files on disk already pass. A conversation that
+    finishes without changing any file (empty or missing patch, including the
+    scripted no-upstream finish) is FAILED/agent_no_change: candidate files that
+    already pass do not make a job FINISHED. edit_calls is not consulted; a
+    terminal-only change shows up in the patch.
     """
     result = sandbox.get("result")
     body = result if isinstance(result, dict) else {}
@@ -1218,6 +1222,8 @@ def _coding_terminal(
     called = isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
     if not called and measured is None:
         return "FAILED", "model_not_called"
+    if _agent_patch(sandbox) is None:
+        return "FAILED", "agent_no_change"
     return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
 
 
