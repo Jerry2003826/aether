@@ -432,8 +432,14 @@ def _encode_data(value: object, depth: int, nested) -> list[object]:
     return []
 
 
-class CandidateObjectUnsupported(TypeError):
-    """A test used a candidate object in a way the isolation cannot support (see ADR-F44)."""
+class CandidateObjectUnsupported(BaseException):
+    """A test used a candidate object in a way the isolation cannot support (see ADR-F44).
+
+    A BaseException, not a TypeError or Exception: `except TypeError`, `except Exception`,
+    `pytest.raises(TypeError)` and `assertRaises(TypeError)` must not turn it into a pass. Only a bare
+    `except:` or `except BaseException` can catch it, and that cannot help either: the first unsupported
+    use is remembered in _Current.unsupported and fails the test whatever its outcome.
+    """
 
     def __init__(self, reason: str) -> None:
         super().__init__(reason)
@@ -942,6 +948,37 @@ class _CaseResult(unittest.TestResult):
             self._note(err)
 
 
+def _takes_argument(hook: object) -> bool:
+    try:
+        return bool(inspect.signature(hook).parameters)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return False
+
+
+def _call_hook(hook: object, argument: object) -> None:
+    hook(argument) if _takes_argument(hook) else hook()  # type: ignore[operator]
+
+
+def _with_xunit(module: types.ModuleType, setup: str, teardown: str, argument: object, run) -> dict[str, object]:
+    """pytest-style setup_<x>/teardown_<x> around `run`. A failing setup fails the test (and its
+    teardown does not run, as with pytest); a failing teardown fails a test that had passed."""
+    hook = vars(module).get(setup)
+    if hook is not None and _trusted_test(hook):
+        try:
+            _call_hook(hook, argument)
+        except BaseException as exc:  # noqa: BLE001 - a failing fixture fails the test
+            return _result("FAIL", _failure_detail(exc))
+    outcome = run()
+    closer = vars(module).get(teardown)
+    if closer is not None and _trusted_test(closer):
+        try:
+            _call_hook(closer, argument)
+        except BaseException as exc:  # noqa: BLE001 - a failing teardown fails the test
+            if outcome["verdict"] == "PASS":
+                outcome = _result("FAIL", _failure_detail(exc))
+    return outcome
+
+
 def _run_case_method(cls: type, method: str) -> dict[str, object]:
     fn = getattr(cls, method, None)
     if not issubclass(cls, unittest.IsolatedAsyncioTestCase):
@@ -956,7 +993,9 @@ def _run_case_method(cls: type, method: str) -> dict[str, object]:
     except BaseException as exc:  # noqa: BLE001 - a case that cannot be built fails
         return _result("FAIL", _failure_detail(exc))
     outcome = _CaseResult()
-    case.run(outcome)
+    # Through a suite, so setUpModule/setUpClass and tearDownClass/tearDownModule run as with unittest;
+    # case.run() alone would skip them. The suite finds module fixtures through sys.modules.
+    unittest.TestSuite([case]).run(outcome)
     if outcome.detail:
         return _result("FAIL", outcome.detail)
     if outcome.skipped:
@@ -1024,6 +1063,28 @@ def _collect(module: types.ModuleType) -> dict[str, object]:
     return {"kind": "collected", "names": sorted(names), "unsupported": unsupported}
 
 
+def _run_test(module: types.ModuleType, name: str, required: bool) -> dict[str, object]:
+    owner, _, method = name.rpartition(".")
+    if owner:
+        cls = vars(module).get(owner)
+        if not _trusted_class(cls):
+            return _result("FAIL", "not_a_test")
+        if issubclass(cls, unittest.TestCase):
+            return _run_case_method(cls, method)
+        return _with_xunit(module, "setup_module", "teardown_module", module, lambda: _run_class_method(cls, method))
+    fn = vars(module).get(name)
+    if not _trusted_test(fn) or isinstance(fn, type):
+        # A declared test that is gone or became a candidate object fails; a non-test name is skipped.
+        return _result("FAIL" if required else "SKIP", "not_a_test")
+    return _with_xunit(
+        module,
+        "setup_module",
+        "teardown_module",
+        module,
+        lambda: _with_xunit(module, "setup_function", "teardown_function", fn, lambda: _call_test(fn)),
+    )
+
+
 def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
@@ -1045,19 +1106,11 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
         name = request["test"]
         if name is None:
             return _collect(module)
-        owner, _, method = name.rpartition(".")
-        if owner:
-            cls = vars(module).get(owner)
-            if not _trusted_class(cls):
-                return _result("FAIL", "not_a_test")
-            if issubclass(cls, unittest.TestCase):
-                return _run_case_method(cls, method)
-            return _run_class_method(cls, method)
-        fn = vars(module).get(name)
-        if not _trusted_test(fn) or isinstance(fn, type):
-            # A declared test that is gone or became a candidate object fails; a non-test name is skipped.
-            return _result("FAIL" if request.get("required") else "SKIP", "not_a_test")
-        return _call_test(fn)
+        outcome = _run_test(module, name, bool(request.get("required")))
+        if outcome["verdict"] != "SKIP" and _Current.unsupported is not None:
+            # Any unsupported use of a candidate object fails the test, even if the test caught the error.
+            return _result("FAIL", "candidate_object_unsupported:" + _Current.unsupported)
+        return outcome
     finally:
         _Current.session.close()
         _Current.session = None

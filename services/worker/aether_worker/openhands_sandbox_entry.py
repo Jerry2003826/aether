@@ -614,8 +614,9 @@ def main() -> None:
         nonce = secrets.token_hex(16)
         secret = _nonce_file(nonce)
         # The limit grows with the suite (one fresh process per test), under a hard cap; the protocol
-        # gets the same budget and stops starting tests just before it, so it still reports.
-        budget = grading_files.protocol_timeout_seconds(grading_files.grading_steps(job))
+        # gets the same budget and stops starting tests just before it, so it still reports. Counted
+        # in the read-only baseline WORK, never in the agent's copy, so the agent cannot inflate it.
+        budget = grading_files.protocol_timeout_seconds(grading_files.grading_steps(WORK))
         try:
             workspace = LocalWorkspace(working_dir=str(job))
             result = workspace.execute_command(

@@ -44,9 +44,11 @@ RESULT_CAPTURE_LIMIT = 4 * MAX_PATCH_BYTES
 POLL_SECONDS = 0.25
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
 CODING_MEMORY_BYTES = 805306368
-# The agent's share (80 s, unchanged) plus the grading protocol's hard cap and the entry's kill margin:
-# the protocol limit now grows with the suite (ADR-F44), so the container must outlast its cap.
-CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5
+# The agent's share (80 s, unchanged) plus the grading protocol's hard cap, the entry's 5 s kill margin
+# and 30 s for container start-up and writing the result: the protocol limit now grows with the suite
+# (ADR-F44), so the container must outlast its cap. The job lease (30 s) is renewed on every 0.25 s poll
+# while the container runs, so a longer container time does not let it lapse.
+CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
 
 
