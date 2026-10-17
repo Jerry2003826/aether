@@ -25,7 +25,7 @@ class _Process:
 
     def __init__(self, args: list[str], **kwargs: Any) -> None:
         self.killed = False
-        pipe = io.BytesIO(b"x" * 100 + b'\n{"passed": 1}\n')
+        pipe = io.BytesIO(b"x" * 100 + b'\nRESULT {"passed": 1}\n')
         self.stdout = pipe if kwargs.get("stdout") is not None and kwargs["stdout"] != -3 else None
         self.stderr = io.BytesIO(b"err") if self.stdout is None else None
 
@@ -57,7 +57,8 @@ class _World:
                     self.target()
 
             def join(self, timeout: float | None = None) -> None:
-                if world.processes and world.processes[-1].killed:
+                # Before any `docker logs` runs, the thread is the SDK read, which fails at once.
+                if not world.processes or world.processes[-1].killed:
                     self._finish()
                     return
                 assert timeout is not None, "an unbounded join would really wait"

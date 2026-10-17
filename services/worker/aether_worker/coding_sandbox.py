@@ -44,6 +44,8 @@ LOG_TAIL_LIMIT = 4096
 # The CLI log fallback is killed after this long so a wedged `docker logs` cannot hold the job.
 CLI_LOGS_TIMEOUT_SECONDS = 60
 POLL_SECONDS = 0.25
+# With a heartbeat, a blocking log read is cut into waits of at most this long (LEASE_SECONDS / 3).
+LOG_HEARTBEAT_SECONDS = 10.0
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
 CODING_MEMORY_BYTES = 805306368
 # The agent's share (80 s, unchanged) plus the grading protocol's hard cap, the entry's 5 s kill margin
@@ -169,27 +171,58 @@ def coding_container_ids(job_id: str) -> list[str] | None:
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
-def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
-    """Both streams come back from the Docker SDK. An empty stream is b'', not a missing pipe."""
+def _with_heartbeat(work: Callable[[], Any], heartbeat: Callable[[], None] | None) -> Any:
+    """Run a blocking call; with a heartbeat, run it on a reader thread and beat between join slices.
+
+    The call keeps its own timeout. An exception from the heartbeat propagates at once and the
+    daemon reader is left to finish on its own; it only reads logs, so nothing is written.
+    """
+    if heartbeat is None:
+        return work()
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    reader = threading.Thread(target=run, daemon=True)
+    reader.start()
+    while True:
+        reader.join(LOG_HEARTBEAT_SECONDS)
+        if not reader.is_alive():
+            break
+        heartbeat()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
+
+
+def _bounded_logs(target: str, *, limit: int, heartbeat: Callable[[], None] | None = None) -> dict[str, str]:
+    """Both streams come back from the Docker SDK. An empty stream is b'', not a missing pipe.
+
+    With a heartbeat, it runs at most every LOG_HEARTBEAT_SECONDS while the logs are read.
+    """
     if worker_delegates():
         try:
-            return remote_logs(target, limit, timeout=60)
+            return _with_heartbeat(lambda: remote_logs(target, limit, timeout=60), heartbeat)
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
     try:
-        stdout, stderr = container_logs(target, limit=limit)
+        stdout, stderr = _with_heartbeat(lambda: container_logs(target, limit=limit), heartbeat)
     except (DockerException, requests.RequestException):
         # The SDK cannot reach the daemon, or reached it but could not serve this container's
         # logs (containers.get or logs failed, or the connection dropped mid-stream, which
         # requests raises outside DockerException); the docker CLI, if present, is the fallback.
-        return _cli_logs(target, limit=limit)
+        return _cli_logs(target, limit=limit, heartbeat=heartbeat)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
         "stderr": read_bounded_tail(io.BytesIO(stderr), min(limit, LOG_CAPTURE_LIMIT)),
     }
 
 
-def _cli_logs(target: str, *, limit: int) -> dict[str, str]:
+def _cli_logs(target: str, *, limit: int, heartbeat: Callable[[], None] | None = None) -> dict[str, str]:
     """`docker logs`, one stream per run so neither pipe can block the other; only the tail is kept.
 
     Both runs share one CLI_LOGS_TIMEOUT_SECONDS deadline: the second gets only what the first left.
@@ -198,12 +231,20 @@ def _cli_logs(target: str, *, limit: int) -> dict[str, str]:
     if cli is None:
         return {"stdout": "", "stderr": ""}
     deadline = time.monotonic() + CLI_LOGS_TIMEOUT_SECONDS
-    stdout = _cli_stream(cli, target, limit, stdout=True, deadline=deadline)
-    stderr = _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False, deadline=deadline)
+    stdout = _cli_stream(cli, target, limit, stdout=True, deadline=deadline, heartbeat=heartbeat)
+    stderr = _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False, deadline=deadline, heartbeat=heartbeat)
     return {"stdout": stdout, "stderr": stderr}
 
 
-def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool, deadline: float) -> str:
+def _cli_stream(
+    cli: str,
+    target: str,
+    limit: int,
+    *,
+    stdout: bool,
+    deadline: float,
+    heartbeat: Callable[[], None] | None = None,
+) -> str:
     remaining = deadline - time.monotonic()
     if remaining <= 0:
         return ""
@@ -221,6 +262,8 @@ def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool, deadline: fl
         process.kill()
         process.wait()
         return ""
+    if heartbeat is not None:
+        return _cli_stream_beating(process, stream, limit, deadline=deadline, heartbeat=heartbeat)
     timer = threading.Timer(remaining, process.kill)
     timer.start()
     try:
@@ -233,6 +276,47 @@ def _cli_stream(cli: str, target: str, limit: int, *, stdout: bool, deadline: fl
         except subprocess.TimeoutExpired:
             process.kill()
             process.wait()
+
+
+def _cli_stream_beating(
+    process: subprocess.Popen[bytes],
+    stream: Any,
+    limit: int,
+    *,
+    deadline: float,
+    heartbeat: Callable[[], None],
+) -> str:
+    """The kill timer of _cli_stream as join slices: same deadline, a heartbeat between slices.
+
+    At the deadline the process is killed, its pipe closes and the reader returns the tail it has.
+    If the heartbeat raises, the process is killed the same way and the exception propagates.
+    """
+    box: dict[str, str] = {}
+    reader = threading.Thread(target=lambda: box.update(text=read_bounded_tail(stream, limit)), daemon=True)
+    reader.start()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                break
+            reader.join(min(LOG_HEARTBEAT_SECONDS, remaining))
+            if not reader.is_alive():
+                break
+            if deadline - time.monotonic() > 0:
+                heartbeat()
+    except BaseException:
+        process.kill()
+        raise
+    finally:
+        reader.join()
+        stream.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    return box.get("text", "")
 
 
 def container_log_tails(job_id: str) -> dict[str, str]:
@@ -276,9 +360,11 @@ def run_coding_sandbox(
     stop_requested: Callable[[], bool] | None = None,
     deadline_reached: Callable[[], bool] | None = None,
     on_poll: Callable[[], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
     grace_seconds: int = CANCEL_GRACE_SECONDS,
     poll_seconds: float = POLL_SECONDS,
 ) -> dict[str, Any]:
+    """heartbeat, if given, keeps the caller's lease alive while the exit logs are read; it may raise."""
     if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
         raise CodingSandboxError("sandbox_unavailable")
     text = checked_objective(objective)
@@ -290,6 +376,7 @@ def run_coding_sandbox(
         stop_requested=stop_requested,
         deadline_reached=deadline_reached,
         on_poll=on_poll,
+        heartbeat=heartbeat,
         grace_seconds=grace_seconds,
         poll_seconds=poll_seconds,
     )
@@ -349,6 +436,7 @@ def _wait_until_stopped(
     on_poll: Callable[[], None] | None,
     grace_seconds: int,
     poll_seconds: float,
+    heartbeat: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     name = container_name(job_id)
     deadline = time.monotonic() + timeout_seconds
@@ -361,7 +449,7 @@ def _wait_until_stopped(
             _raise_after_stop(job_id, grace_seconds, "deadline_exceeded", "deadline_unconfirmed")
         status = _container_status(name)
         if status in {"exited", "dead"}:
-            return _collect_exit(name)
+            return _collect_exit(name, heartbeat=heartbeat)
         if status is None and coding_container_ids(job_id) == []:
             logs = container_log_tails(job_id)
             raise CodingSandboxError("timeout", logs)
@@ -380,8 +468,8 @@ def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pend
     raise CodingSandboxError(confirmed_code, logs)
 
 
-def _collect_exit(name: str) -> dict[str, Any]:
-    captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT)
+def _collect_exit(name: str, *, heartbeat: Callable[[], None] | None = None) -> dict[str, Any]:
+    captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT, heartbeat=heartbeat)
     logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
     code = _exit_code(name)
     _sandbox_docker(["rm", "-f", name])

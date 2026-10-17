@@ -239,24 +239,23 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             proxy: CodingModelProxy | None = None
             drained = False
 
+            def keep_lease() -> None:
+                if not _renew_lease(
+                    database,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    operation_id=str(row["operation_id"]),
+                    job_id=job_id,
+                    fencing_token=fencing,
+                ):
+                    raise _LeaseLost(job_id)
+
             def drain_once() -> None:
                 # Settle and close only after calls still in flight finished; at most once per job.
                 nonlocal drained
                 if proxy is None or drained:
                     return
                 drained = True
-
-                def keep_lease() -> None:
-                    if not _renew_lease(
-                        database,
-                        owner_id=owner_id,
-                        project_id=project_id,
-                        operation_id=str(row["operation_id"]),
-                        job_id=job_id,
-                        fencing_token=fencing,
-                    ):
-                        raise _LeaseLost(job_id)
-
                 _drain_proxy(
                     proxy,
                     ledger,
@@ -294,6 +293,8 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                             job_id=job_id,
                             fencing_token=fencing,
                         ),
+                        # Reading the exit logs can take CLI_LOGS_TIMEOUT_SECONDS; keep the lease meanwhile.
+                        heartbeat=keep_lease,
                     )
                 except CodingSandboxError as exc:
                     drain_once()
@@ -328,6 +329,11 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 if proxy is not None:
                     try:
                         drain_once()
+                    except _LeaseLost:
+                        # The lease is gone: whatever got us here, this worker must not settle or fail
+                        # the job, so the lost lease replaces the pending error and returns fence_lost.
+                        _LOG.warning("coding_lease_lost_in_final_drain job=%s fencing=%s", job_id, fencing, exc_info=True)
+                        raise
                     except Exception:  # noqa: BLE001 - keep the error that got us here
                         _LOG.exception("coding_proxy_drain_failed job=%s", job_id)
                     finally:
