@@ -257,6 +257,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                         ),
                     )
                 except CodingSandboxError as exc:
+                    _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
                     stopped = _sandbox_stop(
                         database,
                         store,
@@ -272,6 +273,8 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     if stopped is not None:
                         return stopped
                     raise
+                # A call can still be forwarding after the agent exits; settle only once it is done.
+                _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
                 _settle(
                     ledger,
                     owner_id=owner_id,
@@ -1332,6 +1335,53 @@ def _logger() -> logging.Logger:
         handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
         _LOG.addHandler(handler)
     return _LOG
+
+
+def _drain_proxy(
+    proxy: CodingModelProxy,
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> None:
+    """Wait for in-flight model calls; one that outlasts the drain is charged at its reservation.
+
+    The tokens still pending on the reservation belong to calls that were admitted but never
+    answered. They move to unknown_reserved_tokens, which _settle charges like a timeout.
+    proxy_drained tells the gateway not to book a late answer on top of that charge.
+    """
+    unfinished = proxy.drain()
+    if unfinished <= 0:
+        return
+    _LOG.warning("coding_proxy_drain_timeout job_request=%s unfinished=%s", request_key, unfinished)
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+        if raw is None:
+            return
+        detail = dict(raw) if isinstance(raw, dict) else dict(json.loads(raw) or {})
+        pending = detail.get("pending_tokens")
+        pending = pending if type(pending) is int and pending > 0 else 0
+        detail["proxy_drained"] = True
+        detail["drain_unfinished"] = unfinished
+        if pending:
+            detail["unknown_usage_calls"] = int(detail.get("unknown_usage_calls") or 0) + unfinished
+            detail["unknown_reserved_tokens"] = int(detail.get("unknown_reserved_tokens") or 0) + pending
+            detail["pending_tokens"] = 0
+        conn.execute(
+            text(
+                "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+            ),
+            {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+        )
 
 
 def _settle(

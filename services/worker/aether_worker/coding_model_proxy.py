@@ -42,6 +42,10 @@ READ_TIMEOUT_ENV = "AETHER_CODING_PROXY_READ_TIMEOUT_SECONDS"
 MAX_CONNECTIONS_ENV = "AETHER_CODING_PROXY_MAX_CONNECTIONS"
 DEFAULT_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_CONNECTIONS = 8
+# After the sandbox exits, a call may still be on its way through this proxy. The job waits
+# this long for it before settling; the default outlasts one forwarded call (30 s).
+DRAIN_ENV = "AETHER_CODING_PROXY_DRAIN_SECONDS"
+DEFAULT_DRAIN_SECONDS = 35.0
 
 
 def proxy_limits() -> tuple[float, int]:
@@ -61,6 +65,17 @@ def proxy_limits() -> tuple[float, int]:
     return timeout, limit
 
 
+def drain_seconds() -> float:
+    """AETHER_CODING_PROXY_DRAIN_SECONDS, or the default when unset or not a finite positive number."""
+    try:
+        value = float(os.environ.get(DRAIN_ENV, ""))
+    except ValueError:
+        return DEFAULT_DRAIN_SECONDS
+    if not math.isfinite(value) or value <= 0:
+        return DEFAULT_DRAIN_SECONDS
+    return value
+
+
 class CodingModelProxy:
     """Host-side OpenAI chat relay. The container presents only the job token."""
 
@@ -68,6 +83,7 @@ class CodingModelProxy:
         self.database = database
         self.job_token = job_token
         self._closed = False
+        self._listening = True
         self.directory = Path(tempfile.mkdtemp(prefix="aether-model-"))
         try:
             _grant_directory(self.directory)
@@ -100,13 +116,29 @@ class CodingModelProxy:
         with self._server.changed:
             return self._server.changed.wait_for(lambda: self._server.active == count, timeout=timeout)
 
+    def drain(self, *, timeout: float | None = None) -> int:
+        """Stop accepting connections, then wait for the ones in flight. Returns how many are left.
+
+        The listener is closed first, so nothing new starts while we wait. Handler threads
+        are not interrupted: a call that is still forwarding keeps going and may still answer.
+        0 means every in-flight call finished (its usage is recorded) within the timeout.
+        """
+        self._stop_listening()
+        self.wait_until_active(0, timeout=drain_seconds() if timeout is None else timeout)
+        return self.active_connections
+
     def close(self) -> None:
         if self._closed:
             return
         self._closed = True
-        self._server.shutdown()
-        self._server.server_close()
+        self._stop_listening()
         shutil.rmtree(self.directory, ignore_errors=True)
+
+    def _stop_listening(self) -> None:
+        if self._listening:
+            self._listening = False
+            self._server.shutdown()
+            self._server.server_close()
 
     def respond(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
         if method != "POST" or path not in _CHAT_PATHS:
