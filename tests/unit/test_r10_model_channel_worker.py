@@ -154,7 +154,8 @@ def test_the_entry_failure_code_is_its_own_terminal_error() -> None:
         },
     }
     assert _coding_terminal(
-        sandbox, upstream_error=None, measured=(3, 4), usage_missing=False
+        sandbox, upstream_error=None, measured=(3, 4), usage_missing=False,
+        channel_revoked=True,
     ) == ("FAILED", "model_channel_open")
     assert "model_channel_open" not in coding_jobs.GRADING_VIOLATIONS
 

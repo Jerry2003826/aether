@@ -74,7 +74,8 @@ def test_a_patch_that_json_escaping_inflates_still_yields_a_whole_result_line(
     assert result["patch_omitted"] == "too_large"
     sandbox = {"exit_code": 0, "result": result}
     assert _coding_terminal(
-        sandbox, upstream_error=None, measured=(3, 4), usage_missing=False
+        sandbox, upstream_error=None, measured=(3, 4), usage_missing=False,
+        channel_revoked=True,
     ) == ("FAILED", "patch_too_large")
 
 

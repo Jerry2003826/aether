@@ -1271,8 +1271,8 @@ def _coding_terminal(
     upstream_error: str | None,
     measured: tuple[int, int] | None,
     usage_missing: bool,
+    channel_revoked: bool,
     admission_error: str | None = None,
-    channel_revoked: bool | None = None,
 ) -> tuple[str, str | None]:
     """FINISHED needs a completed agent, an agent change and a passing protocol.
 
@@ -1281,9 +1281,9 @@ def _coding_terminal(
     finishes without changing any source file (empty or missing patch; grading
     files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
-    terminal-only change shows up in the patch. channel_revoked is whether the
-    proxy saw the sandbox revoke the model channel (None: not known, not checked);
-    graded results without it are FAILED/model_channel_open.
+    terminal-only change shows up in the patch. channel_revoked (required, so
+    no caller can skip the check by forgetting it) is whether the proxy saw the sandbox
+    revoke the model channel; graded results without it are FAILED/model_channel_open.
     """
     result = sandbox.get("result")
     body = result if isinstance(result, dict) else {}
@@ -1293,8 +1293,8 @@ def _coding_terminal(
     if body.get("network_errno") == 0:
         return "FAILED", "network_open"
     # The sandbox could not confirm the model channel closed and skipped grading; or (channel_revoked
-    # False: the proxy saw no in-band revoke) it reports grading that ran with the channel open.
-    if MODEL_CHANNEL_OPEN in _runner_details(sandbox) or (channel_revoked is False and _graded(body)):
+    # false: the proxy saw no in-band revoke) it reports grading that ran with the channel open.
+    if MODEL_CHANNEL_OPEN in _runner_details(sandbox) or (not channel_revoked and _graded(body)):
         return "FAILED", MODEL_CHANNEL_OPEN
     violation = _grading_violation(sandbox)
     if violation:

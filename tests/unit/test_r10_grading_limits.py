@@ -98,7 +98,7 @@ def test_grading_timeout_is_its_own_failure_code_and_never_a_violation() -> None
             "credential_present": False,
         },
     }
-    assert _coding_terminal(sandbox, upstream_error=None, measured=(3, 4), usage_missing=False) == ("FAILED", "grading_timeout")
+    assert _coding_terminal(sandbox, upstream_error=None, measured=(3, 4), usage_missing=False, channel_revoked=True) == ("FAILED", "grading_timeout")
 
 
 # ---------------------------------------------------------------------------------------------

@@ -925,7 +925,7 @@ def test_only_grading_and_cache_edits_leave_an_empty_patch_and_no_change(tmp_pat
 
     result = {**body, "model_requests": 2, "credential_present": False, "network_errno": 101}
     sandbox = {"exit_code": 0, "result": result}
-    assert _coding_terminal(sandbox, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(sandbox, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "agent_no_change",
     )

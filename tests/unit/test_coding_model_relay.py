@@ -184,6 +184,7 @@ def test_a_model_unavailable_job_fails_even_when_the_files_pass() -> None:
         measured=None,
         usage_missing=False,
         admission_error="model_unavailable",
+        channel_revoked=True,
     ) == ("FAILED", "model_unavailable")
 
 

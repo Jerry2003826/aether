@@ -88,13 +88,13 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
     assert _patch_source(untouched) == "candidate_files"
     assert b"return 42" in _published_patch(parsed, untouched)
     done = _finished()
-    assert _coding_terminal(done, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
+    assert _coding_terminal(done, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == ("FINISHED", None)
     blank = _sandbox(1, requests=0)
-    assert _coding_terminal(blank, upstream_error=None, measured=None, usage_missing=False) == ("FAILED", "agent_interrupted")
-    assert _coding_terminal(blank, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FAILED", "agent_interrupted")
+    assert _coding_terminal(blank, upstream_error=None, measured=None, usage_missing=False, channel_revoked=True) == ("FAILED", "agent_interrupted")
+    assert _coding_terminal(blank, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == ("FAILED", "agent_interrupted")
     interrupted = _sandbox(1, requests=2, patch=_AGENT_PATCH)
     interrupted["result"]["agent_completed"] = False
-    assert _coding_terminal(interrupted, upstream_error=None, measured=(5626, 243), usage_missing=False) == (
+    assert _coding_terminal(interrupted, upstream_error=None, measured=(5626, 243), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "agent_interrupted",
     )
@@ -104,13 +104,14 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
         measured=(5626, 243),
         usage_missing=False,
         admission_error="budget_exceeded",
+        channel_revoked=True,
     ) == ("FAILED", "budget_exceeded")
-    assert _coding_terminal(done, upstream_error="upstream_http_400", measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(done, upstream_error="upstream_http_400", measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "upstream_http_400",
     )
-    assert _coding_terminal(done, upstream_error=None, measured=None, usage_missing=True) == ("FAILED", "usage_missing")
-    assert _coding_terminal(_finished(0, requests=1), upstream_error=None, measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(done, upstream_error=None, measured=None, usage_missing=True, channel_revoked=True) == ("FAILED", "usage_missing")
+    assert _coding_terminal(_finished(0, requests=1), upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "test_failed",
     )
@@ -124,14 +125,14 @@ def test_a_passing_candidate_without_an_agent_change_cannot_finish() -> None:
             del unchanged["result"]["patch"]
         else:
             unchanged["result"]["patch"] = patch
-        assert _coding_terminal(unchanged, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+        assert _coding_terminal(unchanged, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
             "FAILED",
             "agent_no_change",
         )
     # The scripted no-upstream finish: one call, 8/4 usage, no edit.
     scripted = _finished(requests=1, patch="")
     scripted["result"]["edit_calls"] = 0
-    assert _coding_terminal(scripted, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(scripted, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "agent_no_change",
     )
@@ -140,7 +141,7 @@ def test_a_passing_candidate_without_an_agent_change_cannot_finish() -> None:
 def test_an_unfinished_conversation_cannot_finish_even_with_a_patch_and_passing_tests() -> None:
     stopped = _finished()
     stopped["result"]["agent_completed"] = False
-    assert _coding_terminal(stopped, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(stopped, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FAILED",
         "agent_interrupted",
     )
@@ -151,7 +152,7 @@ def test_an_unfinished_conversation_cannot_finish_even_with_a_patch_and_passing_
             del unknown["result"]["agent_completed"]
         else:
             unknown["result"]["agent_completed"] = flag
-        assert _coding_terminal(unknown, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+        assert _coding_terminal(unknown, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
             "FAILED",
             "agent_interrupted",
         )
