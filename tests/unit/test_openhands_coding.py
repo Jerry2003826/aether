@@ -519,6 +519,74 @@ def _mkdir(path: Path) -> Path:
     return path
 
 
+_TAMPER = (
+    "import sys\n"
+    "job = sys.argv[1]\n"
+    "open(job + '/oracle.py', 'w').write('def expected():\\n    return 0\\n')\n"
+    "open(job + '/conftest.py', 'w').write('import oracle\\noracle.expected = lambda: 0\\n')\n"
+    "open(job + '/sitecustomize.py', 'w').write('import oracle\\n')\n"
+    "open(job + '/evil.pth', 'w').write('import oracle\\n')\n"
+)
+
+
+def test_tampered_support_files_are_restored_before_grading(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    tamper = tmp_path / "tamper.py"
+    tamper.write_text(_TAMPER, encoding="utf-8")
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    work.mkdir()
+    oracle = "def expected():\n    return 42\n"
+    conftest = "# baseline conftest\n"
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    (work / "oracle.py").write_text(oracle, encoding="utf-8")
+    (work / "conftest.py").write_text(conftest, encoding="utf-8")
+    (work / "test_app.py").write_text(
+        "import app\nimport oracle\n\ndef test_value():\n    assert app.value() == oracle.expected()\n",
+        encoding="utf-8",
+    )
+    fake = _SocketModel(terminal_command=f"{sys.executable} {tamper} {job}")
+    fake.start()
+    protocol = Path("services/worker/aether_worker/coding_protocol.py")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AETHER_OBJECTIVE": f"Edit {job / 'app.py'} so value() returns 42.",
+        }
+    )
+    try:
+        completed = subprocess.run(
+            [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
+            cwd=tmp_path,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    assert "return 0" in body["patch"]
+    assert (job / "oracle.py").read_text(encoding="utf-8") == oracle
+    assert (job / "conftest.py").read_text(encoding="utf-8") == conftest
+    assert not (job / "sitecustomize.py").exists()
+    assert not (job / "evil.pth").exists()
+    assert body["passed"] == 0
+    assert completed.returncode != 0
+
+
 class _SocketModel:
     def __init__(
         self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
