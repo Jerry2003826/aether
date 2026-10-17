@@ -1148,16 +1148,17 @@ def _grading_violation(sandbox: dict[str, Any]) -> str | None:
 
 
 def _agent_patch(sandbox: dict[str, Any]) -> str | None:
-    """The agent's diff. Kept when it used file_editor, or when it tampered with grading (for review)."""
+    """The snapshot diff of the agent's workspace, however it was edited.
+
+    edit_calls only counts file_editor calls; a change made through the terminal is in
+    the diff too, so the count is logged but does not gate publication. A grading
+    violation keeps the patch for review as well.
+    """
     result = sandbox.get("result")
     if not isinstance(result, dict):
         return None
-    try:
-        edits = int(result.get("edit_calls") or 0)
-    except (TypeError, ValueError):
-        return None
     patch = result.get("patch")
-    if (edits > 0 or _grading_violation(sandbox)) and isinstance(patch, str) and patch.startswith("--- "):
+    if isinstance(patch, str) and patch.startswith("--- "):
         return patch
     return None
 
