@@ -159,16 +159,24 @@ def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.Comp
 
 
 def probe_docker_daemon() -> dict[str, str]:
-    """Enable the runner only when the daemon reports a server version."""
+    """Enable the runner only when the daemon reports a server version.
+
+    Every runner Docker call goes through the SDK (container_runtime), so the SDK reaching the daemon
+    is enough; an image with the SDK and a mounted socket but no docker CLI is enabled. `cli_missing`
+    is reported only when the SDK cannot reach a daemon and there is no CLI either.
+    """
     if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
         return _runtime(_UNSUPPORTED, "docker_forbidden")
+    try:
+        completed = _docker(["info", "--format", "{{.ServerVersion}}"])
+    except OSError:
+        completed = subprocess.CompletedProcess(["docker", "info"], 1, "", "sdk_unreachable")
+    version = completed.stdout.strip()
+    if completed.returncode == 0 and version:
+        return {_RUNTIME: _ENABLED, "server_version": version}
     if shutil.which("docker") is None:
         return _runtime(_UNSUPPORTED, "cli_missing")
-    completed = _docker(["info", "--format", "{{.ServerVersion}}"])
-    version = completed.stdout.strip()
-    if completed.returncode != 0 or not version:
-        return _runtime(_UNSUPPORTED, "daemon_unreachable")
-    return {_RUNTIME: _ENABLED, "server_version": version}
+    return _runtime(_UNSUPPORTED, "daemon_unreachable")
 
 
 def _runtime(state: str, reason: str) -> dict[str, str]:

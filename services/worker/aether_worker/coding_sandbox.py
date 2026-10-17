@@ -365,7 +365,9 @@ def run_coding_sandbox(
     poll_seconds: float = POLL_SECONDS,
 ) -> dict[str, Any]:
     """heartbeat, if given, keeps the caller's lease alive while the exit logs are read; it may raise."""
-    if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
+    # Starting, polling and stopping all go through the Docker SDK (or the runner when delegated); the
+    # docker CLI is only a best-effort log fallback, so its absence does not make the sandbox unavailable.
+    if not docker_available():
         raise CodingSandboxError("sandbox_unavailable")
     text = checked_objective(objective)
     chosen = job_id or str(uuid.uuid4())

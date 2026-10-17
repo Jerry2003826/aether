@@ -36,6 +36,8 @@ def _request() -> CodingJobRequest:
 def test_missing_cli_is_unsupported(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("AETHER_PROCESS_ROLE", raising=False)
     monkeypatch.setattr(shutil, "which", lambda _name: None)
+    # cli_missing means the SDK could not reach a daemon either; do not depend on the host's socket.
+    monkeypatch.setattr("aether_worker.runner._docker", lambda _args: subprocess.CompletedProcess(["docker"], 1, "", "no socket"))
     probed = probe_docker_daemon()
     assert probed["runtime"] == "unsupported"
     assert probed["reason"] == "cli_missing"
