@@ -22,6 +22,16 @@ def _detail(value: object) -> dict:
     return {}
 
 
+def _reservation_detail(tokens: int, extra: dict | None) -> dict:
+    detail = {"reserved_tokens": tokens}
+    if not extra:
+        return detail
+    for key, value in extra.items():
+        if key != "reserved_tokens":
+            detail[key] = value
+    return detail
+
+
 def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_id: str, request_key: str, amount: int, detail: dict) -> None:
     reserved_tokens = int(detail.get("reserved_tokens") or 0)
     detail["dispatch_state"] = "cancelled_before_dispatch"
@@ -40,10 +50,97 @@ def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_i
     )
 
 
+def _unknown_charge(unknown_tokens: int, *, actual: int, reserved_tokens: int, reserved_cost: int) -> tuple[int, int]:
+    """Tokens and micro-USD to book for calls whose usage is unknown.
+
+    Each unknown call is charged what was reserved for it, at the reservation's
+    micro-USD per token, but only out of the hold left after the measured tokens.
+    """
+    if unknown_tokens <= 0 or reserved_tokens <= 0:
+        return 0, 0
+    tokens = min(unknown_tokens, max(0, reserved_tokens - actual))
+    micro = min(-(-tokens * reserved_cost // reserved_tokens), max(0, reserved_cost - actual))
+    return tokens, micro
+
+
+def _replay_matches(existing, amount: int) -> bool:
+    """True when amount is what this row was first reserved with, before any top-up.
+
+    A replay (another worker re-running the same request_key) compares against that,
+    so a top-up does not turn the replay into idempotency_mismatch and strand the
+    enlarged hold. A row topped up before extended_micro_usd was recorded has no
+    exact figure; the request digest, which covers the original amount, decides it
+    as long as the row still holds at least that much.
+    """
+    reserved = int(existing["reserved_micro_usd"])
+    detail = _detail(existing["usage_detail"])
+    if not int(detail.get("reservation_extensions") or 0):
+        return reserved == amount
+    if "extended_micro_usd" in detail:
+        return reserved - int(detail.get("extended_micro_usd") or 0) == amount
+    return reserved >= amount
+
+
 class BudgetError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def reservation_can_grow(account: dict, *, amount: int, tokens: int) -> bool:
+    """True when this task can hold another non-verification reservation.
+
+    The ceiling matches reserve(): verification keeps its fraction, and a coding
+    top-up uses the remainder. Growing does not admit another request.
+    """
+    if amount < 0 or tokens < 0:
+        raise BudgetError("invalid_amount")
+    fraction = float(account["verification_reserve_fraction"])
+    money_ceiling = int(account["limit_micro_usd"] * (1 - fraction))
+    token_ceiling = int(account["token_limit"] * (1 - fraction))
+    spent = int(account["spent_micro_usd"]) + int(account["held_micro_usd"]) + amount
+    held_tokens = int(account["tokens_used"]) + int(account["tokens_held"]) + tokens
+    return spent <= money_ceiling and held_tokens <= token_ceiling
+
+
+def apply_reservation_extension(
+    conn,
+    *,
+    account_id: object,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    amount: int,
+    tokens: int,
+    detail: dict,
+) -> None:
+    """Add to a reserved row already locked by the caller. The account row is locked too."""
+    if amount < 0 or tokens < 1:
+        raise BudgetError("invalid_amount")
+    detail["reserved_tokens"] = int(detail.get("reserved_tokens") or 0) + tokens
+    detail["reservation_extensions"] = int(detail.get("reservation_extensions") or 0) + 1
+    detail["extended_micro_usd"] = int(detail.get("extended_micro_usd") or 0) + amount
+    detail["extended_tokens"] = int(detail.get("extended_tokens") or 0) + tokens
+    conn.execute(
+        text(
+            "UPDATE model_requests SET reserved_micro_usd = reserved_micro_usd + :amount, usage_detail = CAST(:detail AS jsonb) "
+            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+        ),
+        {
+            "amount": amount,
+            "detail": json.dumps(detail),
+            "project_id": project_id,
+            "task_id": task_id,
+            "request_key": request_key,
+        },
+    )
+    conn.execute(
+        text(
+            "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, "
+            "version = version + 1 WHERE id = :id"
+        ),
+        {"amount": amount, "tokens": tokens, "id": account_id},
+    )
 
 
 class BudgetLedger:
@@ -70,7 +167,7 @@ class BudgetLedger:
                 },
             )
 
-    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None, model_alias: str | None = None) -> bool:
+    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None, model_alias: str | None = None, extra_detail: dict | None = None) -> bool:
         if amount < 0 or tokens < 0:
             raise BudgetError("invalid_amount")
         digest = sha256_text(json.dumps({
@@ -98,7 +195,7 @@ class BudgetLedger:
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
             ).mappings().first()
             if existing is not None:
-                if existing["reserved_micro_usd"] != amount or existing["request_sha256"] != digest:
+                if existing["request_sha256"] != digest or not _replay_matches(existing, amount):
                     raise BudgetError("idempotency_mismatch")
                 return True
             fraction = float(account["verification_reserve_fraction"])
@@ -122,7 +219,7 @@ class BudgetLedger:
                         "role": role,
                         "model_alias": model_alias or role,
                         "amount": amount,
-                        "detail": json.dumps({"reserved_tokens": tokens}),
+                        "detail": json.dumps(_reservation_detail(tokens, extra_detail)),
                     },
                 )
             except IntegrityError as exc:
@@ -180,6 +277,100 @@ class BudgetLedger:
                     "id": account["id"],
                 },
             )
+
+    def settle_measured(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        actual: int,
+        input_tokens: int,
+        output_tokens: int,
+        unknown_tokens: int = 0,
+    ) -> str:
+        """Book known token usage and release the hold, including a measured overrun.
+
+        A row with no measured usage at all does not belong here: that stays mark_unknown
+        and keeps the hold. settle() still rejects a bill above its reservation. This path
+        is for a measured coding attempt whose tokens are already known.
+
+        unknown_tokens is what was reserved for calls of this attempt whose usage never
+        arrived (a timeout after sending, an answer without usage). That part is charged
+        at the reservation's rate rather than released, and only out of what is still
+        held after the measured tokens: the estimate never pushes the bill past the hold.
+        """
+        if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or actual != input_tokens + output_tokens:
+            raise BudgetError("invalid_amount")
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_status, actual_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().one()
+            detail = _detail(request["usage_detail"])
+            if request["usage_status"] == "known":
+                if request["actual_micro_usd"] != actual + int(detail.get("unknown_charged_micro_usd") or 0):
+                    raise BudgetError("conflicting_settlement")
+                return str(detail.get("book_result") or "settled")
+            if request["usage_status"] == "unknown":
+                raise BudgetError("unknown_not_zero")
+            if request["usage_status"] != "reserved":
+                raise BudgetError("not_reserved")
+            reserved_cost = int(request["reserved_micro_usd"])
+            reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            unknown_charge_tokens, unknown_charge_micro = _unknown_charge(
+                unknown_tokens, actual=actual, reserved_tokens=reserved_tokens, reserved_cost=reserved_cost
+            )
+            overrun_micro = max(0, actual - reserved_cost)
+            overrun_tokens = max(0, actual - reserved_tokens)
+            book_result = "overrun" if overrun_micro or overrun_tokens else "settled"
+            detail["book_result"] = book_result
+            detail["pending_tokens"] = 0
+            detail["reconciliation"] = "recorded" if book_result == "overrun" else "booked"
+            if book_result == "overrun":
+                detail["overrun_micro_usd"] = overrun_micro
+                detail["overrun_tokens"] = overrun_tokens
+            if unknown_tokens:
+                detail["unknown_charged_tokens"] = unknown_charge_tokens
+                detail["unknown_charged_micro_usd"] = unknown_charge_micro
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = :actual, input_tokens = :input_tokens, "
+                    "output_tokens = :output_tokens, usage_detail = CAST(:detail AS jsonb), completed_at = now() "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                ),
+                {
+                    "actual": actual + unknown_charge_micro,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": request_key,
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :reserved, spent_micro_usd = spent_micro_usd + :actual, "
+                    "tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, version = version + 1 WHERE id = :id"
+                ),
+                {
+                    "reserved": reserved_cost,
+                    "actual": actual + unknown_charge_micro,
+                    "reserved_tokens": reserved_tokens,
+                    "tokens": actual + unknown_charge_tokens,
+                    "id": account["id"],
+                },
+            )
+        return book_result
 
     def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:

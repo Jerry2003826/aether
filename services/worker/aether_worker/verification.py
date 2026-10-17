@@ -15,6 +15,7 @@ from sqlalchemy import text
 from aether_storage.db import Database
 from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
 from aether_worker.grader_runner import GRADER_PROGRAM as _GRADER_PROGRAM
+from aether_worker.container_runtime import build_from_dockerfile
 from aether_worker.runner import JOB_IMAGE, _docker
 from aether_worker.sandbox_image import grader_dockerfile
 from aether_worker.snapshot import SnapshotRejected, copy_tree, ensure_real_directory, read_tree
@@ -118,13 +119,7 @@ def _ensure_grader_image() -> str | None:
             pulled = _docker(["pull", JOB_IMAGE])
             if pulled.returncode != 0:
                 return None
-        built = subprocess.run(
-            ["docker", "build", "--label", f"aether.grader_dockerfile={stamp}", "-t", GRADER_IMAGE, "-"],
-            input=dockerfile,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        built = build_from_dockerfile(dockerfile, tag=GRADER_IMAGE, labels={"aether.grader_dockerfile": stamp})
         if built.returncode != 0:
             return None
         found = _image_by_stamp(stamp)
@@ -162,6 +157,8 @@ def run_grader_container(
             "--network",
             "none",
             "--read-only",
+            "--cap-drop",
+            "ALL",
             "--security-opt",
             "no-new-privileges",
             "--pids-limit",

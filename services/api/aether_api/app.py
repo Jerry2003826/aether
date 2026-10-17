@@ -16,6 +16,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from aether_api.auth_service import AuthService
+from aether_api.body_models import BootstrapBody, LoginBody, ProjectBody
 from aether_api.console_routes import register_console_routes
 from aether_api.control import register_control_routes
 from aether_api.memory_routes import register_memory_routes
@@ -66,16 +67,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def bootstrap(request: Request, body: dict[str, Any]) -> JSONResponse:
         _require_loopback(request, resolved)
         _require_origin(request, resolved)
-        _require_fields(body, "bootstrap_secret", "display_name", "passphrase")
+        parsed = BootstrapBody.model_validate(body)
         if app.state.auth is None:
             raise ApiError(503, "database_unconfigured", "数据库未配置")
-        session = app.state.auth.bootstrap(resolved.bootstrap_path, str(body["bootstrap_secret"]), str(body["display_name"]), str(body["passphrase"]))
+        session = app.state.auth.bootstrap(resolved.bootstrap_path, str(parsed.bootstrap_secret), str(parsed.display_name), str(parsed.passphrase))
         return _session_response(session, resolved, status=201)
 
     @app.post("/v1/auth/session", operation_id="login")
     def login(request: Request, body: dict[str, Any]) -> JSONResponse:
         _require_origin(request, resolved)
-        _require_fields(body, "passphrase")
+        parsed = LoginBody.model_validate(body)
         if app.state.auth is None:
             raise ApiError(503, "database_unconfigured", "数据库未配置")
         host = client_address(_client_host(request), request.headers.get("x-forwarded-for"), trust_forwarded_for=resolved.trust_forwarded_for)
@@ -83,7 +84,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if not app.state.login_throttle.acquire(host, now):
             raise ApiError(429, "rate_limited", "登录尝试过多", retryable=True)
         try:
-            session = app.state.auth.login(str(body["passphrase"]))
+            session = app.state.auth.login(str(parsed.passphrase))
         except ApiError as exc:
             if exc.status != 401:
                 app.state.login_throttle.release(host)
@@ -133,9 +134,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         key = request.headers.get("idempotency-key")
         if key is None or not 8 <= len(key) <= 128:
             raise ApiError(422, "invalid_idempotency_key", "Idempotency-Key 长度必须在 8 到 128 之间")
-        name = body.get("name")
-        if not isinstance(name, str) or not name.strip() or len(name) > 200 or set(body) - {"name"}:
-            raise ApiError(422, "invalid_project", "项目名称不合法")
+        name = ProjectBody.model_validate(body).name
         payload_hash = sha256_text(json.dumps({"name": name}, sort_keys=True, separators=(",", ":")))
         with app.state.database.transaction(owner_id=owner["owner_id"]) as conn:
             inserted = conn.execute(
@@ -296,11 +295,6 @@ def _require_origin(request: Request, settings: Settings) -> None:
     origin = request.headers.get("origin")
     if origin not in settings.origins:
         raise ApiError(403, "origin_rejected", "Origin 不在允许列表")
-
-
-def _require_fields(body: dict[str, Any], *names: str) -> None:
-    if not isinstance(body, dict) or any(name not in body for name in names):
-        raise ApiError(422, "invalid_body", "请求体缺少字段")
 
 
 def _session_response(session: dict[str, Any], settings: Settings, *, status: int) -> JSONResponse:

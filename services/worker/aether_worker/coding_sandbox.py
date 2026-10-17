@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import shutil
 import subprocess
@@ -10,118 +11,49 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, BinaryIO
+from typing import Any
 
+import requests
+from docker.errors import DockerException
+
+from aether_worker.container_runtime import container_logs
+from aether_worker.grading_files import PROTOCOL_CAP_SECONDS
+from aether_worker.openhands_image import (
+    IMAGE_UNAVAILABLE,
+    RUN_IMAGE_REASONS,
+    launch_image,
+)
+from aether_worker.output_bounds import (  # shared with container_runtime; callers still import them from here
+    LOG_CAPTURE_LIMIT,
+    MAX_PATCH_BYTES,  # noqa: F401
+    RESULT_CAPTURE_LIMIT,
+    read_bounded_tail,
+)
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
+    accepted_objective,
     remote_completed,
     remote_logs,
     remote_run,
     worker_delegates,
 )
 
-CODING_RUNNER = r"""
-import importlib.util, inspect, json, os, signal, sys, time
-from pathlib import Path
-
-def _on_term(_signum, _frame):
-    raise SystemExit(143)
-
-signal.signal(signal.SIGTERM, _on_term)
-
-def copy_tree(src, dst):
-    for path in sorted(src.rglob("*")):
-        rel = path.relative_to(src)
-        if any(part in {".git", "__pycache__"} for part in rel.parts):
-            continue
-        if path.is_symlink():
-            raise RuntimeError("symlink")
-        target = dst.joinpath(*rel.parts)
-        if path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-            continue
-        if not path.is_file():
-            raise RuntimeError("special")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(path.read_bytes())
-
-def main():
-    started = time.monotonic()
-    dst = Path("/tmp/job")
-    dst.mkdir(parents=True, exist_ok=True)
-    copy_tree(Path("/work"), dst)
-    sys.path.insert(0, str(dst))
-    cases = []
-    passed = 0
-    failed = 0
-    tests = sorted(path for path in dst.glob("test_*.py") if path.is_file() and not path.is_symlink())
-    for path in tests:
-        spec = importlib.util.spec_from_file_location(path.stem, path)
-        if spec is None or spec.loader is None:
-            failed += 1
-            cases.append({"name": path.stem, "verdict": "FAIL", "detail": "import"})
-            continue
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[path.stem] = module
-        spec.loader.exec_module(module)
-        for attr in sorted(dir(module)):
-            if not attr.startswith("test_"):
-                continue
-            fn = getattr(module, attr)
-            if not callable(fn):
-                continue
-            try:
-                value = fn()
-            except Exception as exc:
-                failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": type(exc).__name__})
-                continue
-            if inspect.iscoroutine(value):
-                value.close()
-                failed += 1
-                cases.append({"name": path.stem + "." + attr, "verdict": "FAIL", "detail": "async"})
-                continue
-            passed += 1
-            cases.append({"name": path.stem + "." + attr, "verdict": "PASS", "detail": ""})
-    errno = None
-    try:
-        sock = __import__("socket").socket()
-        sock.settimeout(1)
-        sock.connect(("1.1.1.1", 443))
-        errno = 0
-    except OSError as exc:
-        errno = exc.errno
-    if not cases:
-        failed += 1
-        cases.append({"name": "suite", "verdict": "FAIL", "detail": "no_tests"})
-    body = {
-        "passed": passed,
-        "failed": failed,
-        "errors": 0,
-        "cases": cases,
-        "elapsed_seconds": round(time.monotonic() - started, 6),
-        "network_errno": errno,
-        "credential_present": any(any(part in name for part in ("LIVE_MODEL", "ADMIN_DATABASE", "PASSWORD", "SECRET")) for name in os.environ),
-    }
-    sys.stdout.write("RESULT " + json.dumps(body, separators=(",", ":")) + "\n")
-    sys.stdout.flush()
-    return 0 if failed == 0 and passed > 0 else 1
-
-try:
-    code = main()
-except Exception as exc:
-    sys.stdout.write("RESULT " + json.dumps({"passed": 0, "failed": 1, "errors": 1, "cases": [{"name": "runner", "verdict": "FAIL", "detail": type(exc).__name__}], "elapsed_seconds": 0, "network_errno": None, "credential_present": False}) + "\n")
-    sys.stdout.flush()
-    code = 2
-raise SystemExit(code)
-"""
-
-
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
-LOG_CAPTURE_LIMIT = 65536
+# The CLI log fallback is killed after this long so a wedged `docker logs` cannot hold the job.
+CLI_LOGS_TIMEOUT_SECONDS = 60
 POLL_SECONDS = 0.25
+# With a heartbeat, a blocking log read is cut into waits of at most this long (LEASE_SECONDS / 3).
+LOG_HEARTBEAT_SECONDS = 10.0
+# 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
+CODING_MEMORY_BYTES = 805306368
+# The agent's share (80 s, unchanged) plus the grading protocol's hard cap, the entry's 5 s kill margin
+# and 30 s for container start-up and writing the result: the protocol limit now grows with the suite
+# (ADR-F44), so the container must outlast its cap. The job lease (30 s) is renewed on every 0.25 s poll
+# while the container runs, so a longer container time does not let it lapse.
+CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
+_MODEL_SOCKET = "/run/aether/proxy/model.sock"
 
 
 class CodingSandboxError(Exception):
@@ -136,11 +68,43 @@ def container_name(job_id: str) -> str:
     return f"aether-code-{token}"
 
 
-def container_arguments(workspace: Path, image: str, *, job_id: str | None = None) -> list[str]:
-    """Flags only. The caller supplies docker and does not inherit the worker environment."""
+def checked_objective(objective: object) -> str:
+    """The objective text, unchanged, or objective_invalid. It is never formatted into a command."""
+    try:
+        return accepted_objective(objective)
+    except SandboxDelegateError as exc:
+        raise CodingSandboxError("objective_invalid") from exc
+
+
+def container_arguments(
+    workspace: Path,
+    image: str,
+    *,
+    objective: str,
+    job_id: str | None = None,
+    proxy_dir: Path | None = None,
+    job_token: str | None = None,
+) -> list[str]:
+    """Flags only. The caller supplies docker and does not inherit the worker environment.
+
+    The objective is one argv element, so no shell sees it; the entry sends it as the user message.
+    """
+    text = checked_objective(objective)
     labels: list[str] = []
     if job_id is not None:
         labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding"]
+    proxy: list[str] = []
+    if proxy_dir is not None and job_token:
+        proxy = [
+            "-e",
+            f"AETHER_MODEL_SOCKET={_MODEL_SOCKET}",
+            "-e",
+            f"AETHER_JOB_TOKEN={job_token}",
+            "-e",
+            "AETHER_MODEL_ALIAS=openai/coder",
+            "-v",
+            f"{proxy_dir.resolve()}:/run/aether/proxy:rw",
+        ]
     return [
         "run",
         *labels,
@@ -154,9 +118,9 @@ def container_arguments(workspace: Path, image: str, *, job_id: str | None = Non
         "--pids-limit",
         "64",
         "--memory",
-        "268435456",
+        str(CODING_MEMORY_BYTES),
         "--memory-swap",
-        "268435456",
+        str(CODING_MEMORY_BYTES),
         "--cpus",
         "1",
         "--tmpfs",
@@ -168,18 +132,24 @@ def container_arguments(workspace: Path, image: str, *, job_id: str | None = Non
         "-e",
         "TMPDIR=/tmp",
         "-e",
+        "XDG_CACHE_HOME=/tmp",
+        "-e",
         "PYTHONDONTWRITEBYTECODE=1",
         "-e",
         "LANG=C.UTF-8",
         "-e",
-        "PATH=/usr/local/bin:/usr/bin:/bin",
+        "PATH=/usr/local/bin:/usr/bin:/bin:/opt/openhands/.venv/bin",
+        "-e",
+        "OPENHANDS_SUPPRESS_BANNER=1",
+        "-e",
+        f"AETHER_OBJECTIVE={text}",
+        *proxy,
         "-v",
         f"{workspace.resolve()}:/work:ro",
         image,
-        "python",
+        "/opt/openhands/.venv/bin/python",
         "-I",
-        "-c",
-        CODING_RUNNER,
+        "/opt/aether/openhands_sandbox_entry.py",
     ]
 
 
@@ -201,47 +171,152 @@ def coding_container_ids(job_id: str) -> list[str] | None:
     return [line.strip() for line in completed.stdout.splitlines() if line.strip()]
 
 
-def read_bounded_tail(stream: BinaryIO, limit: int) -> str:
-    """Keep only the last `limit` bytes. The host does not retain the rest."""
-    if limit < 1:
-        return ""
-    kept = bytearray()
+def _with_heartbeat(work: Callable[[], Any], heartbeat: Callable[[], None] | None) -> Any:
+    """Run a blocking call; with a heartbeat, run it on a reader thread and beat between join slices.
+
+    The call keeps its own timeout. An exception from the heartbeat propagates at once and the
+    daemon reader is left to finish on its own; it only reads logs, so nothing is written.
+    """
+    if heartbeat is None:
+        return work()
+    box: dict[str, Any] = {}
+
+    def run() -> None:
+        try:
+            box["value"] = work()
+        except BaseException as exc:  # noqa: BLE001 - re-raised on the caller's thread
+            box["error"] = exc
+
+    reader = threading.Thread(target=run, daemon=True)
+    reader.start()
     while True:
-        chunk = stream.read(8192)
-        if not chunk:
+        reader.join(LOG_HEARTBEAT_SECONDS)
+        if not reader.is_alive():
             break
-        kept.extend(chunk)
-        if len(kept) > limit:
-            del kept[:-limit]
-    return kept.decode("utf-8", errors="replace")
+        heartbeat()
+    if "error" in box:
+        raise box["error"]
+    return box["value"]
 
 
-def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
+def _bounded_logs(target: str, *, limit: int, heartbeat: Callable[[], None] | None = None) -> dict[str, str]:
+    """Both streams come back from the Docker SDK. An empty stream is b'', not a missing pipe.
+
+    With a heartbeat, it runs at most every LOG_HEARTBEAT_SECONDS while the logs are read.
+    """
     if worker_delegates():
         try:
-            return remote_logs(target, limit, timeout=60)
+            return _with_heartbeat(lambda: remote_logs(target, limit, timeout=60), heartbeat)
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
-    if shutil.which("docker") is None:
+    try:
+        stdout, stderr = _with_heartbeat(lambda: container_logs(target, limit=limit), heartbeat)
+    except (DockerException, requests.RequestException):
+        # The SDK cannot reach the daemon, or reached it but could not serve this container's
+        # logs (containers.get or logs failed, or the connection dropped mid-stream, which
+        # requests raises outside DockerException); the docker CLI, if present, is the fallback.
+        return _cli_logs(target, limit=limit, heartbeat=heartbeat)
+    return {
+        "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
+        "stderr": read_bounded_tail(io.BytesIO(stderr), min(limit, LOG_CAPTURE_LIMIT)),
+    }
+
+
+def _cli_logs(target: str, *, limit: int, heartbeat: Callable[[], None] | None = None) -> dict[str, str]:
+    """`docker logs`, one stream per run so neither pipe can block the other; only the tail is kept.
+
+    Both runs share one CLI_LOGS_TIMEOUT_SECONDS deadline: the second gets only what the first left.
+    """
+    cli = shutil.which("docker")
+    if cli is None:
         return {"stdout": "", "stderr": ""}
-    process = subprocess.Popen(["docker", "logs", target], stdout=subprocess.PIPE, stderr=subprocess.PIPE)
-    stdout: list[str] = []
-    stderr: list[str] = []
-    assert process.stdout is not None and process.stderr is not None
-    threads = [
-        threading.Thread(target=_collect_tail, args=(process.stdout, limit, stdout)),
-        threading.Thread(target=_collect_tail, args=(process.stderr, limit, stderr)),
-    ]
-    for thread in threads:
-        thread.start()
-    for thread in threads:
-        thread.join()
-    process.wait()
-    return {"stdout": stdout[0] if stdout else "", "stderr": stderr[0] if stderr else ""}
+    deadline = time.monotonic() + CLI_LOGS_TIMEOUT_SECONDS
+    stdout = _cli_stream(cli, target, limit, stdout=True, deadline=deadline, heartbeat=heartbeat)
+    stderr = _cli_stream(cli, target, min(limit, LOG_CAPTURE_LIMIT), stdout=False, deadline=deadline, heartbeat=heartbeat)
+    return {"stdout": stdout, "stderr": stderr}
 
 
-def _collect_tail(stream: BinaryIO, limit: int, sink: list[str]) -> None:
-    sink.append(read_bounded_tail(stream, limit))
+def _cli_stream(
+    cli: str,
+    target: str,
+    limit: int,
+    *,
+    stdout: bool,
+    deadline: float,
+    heartbeat: Callable[[], None] | None = None,
+) -> str:
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        return ""
+    try:
+        process = subprocess.Popen(
+            [cli, "logs", target],
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE if stdout else subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL if stdout else subprocess.PIPE,
+        )
+    except OSError:
+        return ""
+    stream = process.stdout if stdout else process.stderr
+    if stream is None:
+        process.kill()
+        process.wait()
+        return ""
+    if heartbeat is not None:
+        return _cli_stream_beating(process, stream, limit, deadline=deadline, heartbeat=heartbeat)
+    timer = threading.Timer(remaining, process.kill)
+    timer.start()
+    try:
+        return read_bounded_tail(stream, limit)
+    finally:
+        timer.cancel()
+        stream.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+
+
+def _cli_stream_beating(
+    process: subprocess.Popen[bytes],
+    stream: Any,
+    limit: int,
+    *,
+    deadline: float,
+    heartbeat: Callable[[], None],
+) -> str:
+    """The kill timer of _cli_stream as join slices: same deadline, a heartbeat between slices.
+
+    At the deadline the process is killed, its pipe closes and the reader returns the tail it has.
+    If the heartbeat raises, the process is killed the same way and the exception propagates.
+    """
+    box: dict[str, str] = {}
+    reader = threading.Thread(target=lambda: box.update(text=read_bounded_tail(stream, limit)), daemon=True)
+    reader.start()
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                process.kill()
+                break
+            reader.join(min(LOG_HEARTBEAT_SECONDS, remaining))
+            if not reader.is_alive():
+                break
+            if deadline - time.monotonic() > 0:
+                heartbeat()
+    except BaseException:
+        process.kill()
+        raise
+    finally:
+        reader.join()
+        stream.close()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait()
+    return box.get("text", "")
 
 
 def container_log_tails(job_id: str) -> dict[str, str]:
@@ -276,31 +351,46 @@ def release_coding_container(job_id: str) -> None:
 def run_coding_sandbox(
     workspace: Path,
     *,
+    objective: str,
     image: str = JOB_IMAGE,
-    timeout_seconds: int = 45,
+    timeout_seconds: int = CODING_SANDBOX_TIMEOUT_SECONDS,
     job_id: str | None = None,
+    proxy_dir: Path | None = None,
+    job_token: str | None = None,
     stop_requested: Callable[[], bool] | None = None,
     deadline_reached: Callable[[], bool] | None = None,
     on_poll: Callable[[], None] | None = None,
+    heartbeat: Callable[[], None] | None = None,
     grace_seconds: int = CANCEL_GRACE_SECONDS,
     poll_seconds: float = POLL_SECONDS,
 ) -> dict[str, Any]:
+    """heartbeat, if given, keeps the caller's lease alive while the exit logs are read; it may raise."""
     if not docker_available() or (not worker_delegates() and shutil.which("docker") is None):
         raise CodingSandboxError("sandbox_unavailable")
+    text = checked_objective(objective)
     chosen = job_id or str(uuid.uuid4())
-    _ensure_started(workspace, image, chosen)
+    _ensure_started(workspace, image, chosen, proxy_dir=proxy_dir, job_token=job_token, objective=text)
     return _wait_until_stopped(
         chosen,
         timeout_seconds=timeout_seconds,
         stop_requested=stop_requested,
         deadline_reached=deadline_reached,
         on_poll=on_poll,
+        heartbeat=heartbeat,
         grace_seconds=grace_seconds,
         poll_seconds=poll_seconds,
     )
 
 
-def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
+def _ensure_started(
+    workspace: Path,
+    image: str,
+    job_id: str,
+    *,
+    proxy_dir: Path | None,
+    job_token: str | None,
+    objective: str,
+) -> None:
     existing = coding_container_ids(job_id)
     if existing is None:
         raise CodingSandboxError("sandbox_unavailable")
@@ -310,11 +400,28 @@ def _ensure_started(workspace: Path, image: str, job_id: str) -> None:
         if image != JOB_IMAGE:
             raise CodingSandboxError("sandbox_unavailable")
         try:
-            launched = remote_run(workspace, job_id, timeout=180)
+            launched = remote_run(
+                workspace, job_id, proxy_dir=proxy_dir, job_token=job_token or "", objective=objective, timeout=180
+            )
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
+        marker = (launched.stderr or "").strip()
+        if launched.returncode != 0 and (marker == IMAGE_UNAVAILABLE or marker in RUN_IMAGE_REASONS):
+            # The runner has no usable image: prep failed before the roles started, or the run's
+            # image could not be pulled or lacked its label. The precise reason rides in the payload.
+            raise CodingSandboxError("image_unavailable", {"reason": marker})
     else:
-        args = [part for part in container_arguments(workspace, image, job_id=job_id) if part != "--rm"]
+        try:
+            runtime_image = launch_image(image, JOB_IMAGE)
+        except LookupError as exc:
+            raise CodingSandboxError("image_unavailable") from exc
+        args = [
+            part
+            for part in container_arguments(
+                workspace, runtime_image, objective=objective, job_id=job_id, proxy_dir=proxy_dir, job_token=job_token
+            )
+            if part != "--rm"
+        ]
         launched = _docker(["run", "-d", "--name", container_name(job_id), *args[1:]])
     if launched.returncode != 0 and not coding_container_ids(job_id):
         raise CodingSandboxError("sandbox_failed")
@@ -329,6 +436,7 @@ def _wait_until_stopped(
     on_poll: Callable[[], None] | None,
     grace_seconds: int,
     poll_seconds: float,
+    heartbeat: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     name = container_name(job_id)
     deadline = time.monotonic() + timeout_seconds
@@ -341,7 +449,10 @@ def _wait_until_stopped(
             _raise_after_stop(job_id, grace_seconds, "deadline_exceeded", "deadline_unconfirmed")
         status = _container_status(name)
         if status in {"exited", "dead"}:
-            return _collect_exit(name)
+            return _collect_exit(name, heartbeat=heartbeat)
+        if status is None and coding_container_ids(job_id) == []:
+            logs = container_log_tails(job_id)
+            raise CodingSandboxError("timeout", logs)
         if time.monotonic() >= deadline:
             logs = container_log_tails(job_id)
             if not confirm_coding_stop(job_id, grace_seconds=grace_seconds):
@@ -357,8 +468,8 @@ def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pend
     raise CodingSandboxError(confirmed_code, logs)
 
 
-def _collect_exit(name: str) -> dict[str, Any]:
-    captured = _bounded_logs(name, limit=LOG_CAPTURE_LIMIT)
+def _collect_exit(name: str, *, heartbeat: Callable[[], None] | None = None) -> dict[str, Any]:
+    captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT, heartbeat=heartbeat)
     logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
     code = _exit_code(name)
     _sandbox_docker(["rm", "-f", name])

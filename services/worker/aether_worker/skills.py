@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import re
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -12,13 +11,9 @@ import frontmatter
 import yaml
 
 from aether_worker.runner import JOB_IMAGE, _docker, _ensure_image, docker_available
+from aether_worker.secret_scan import redact_trace as scan_redact
 
 TRUSTED_PREFIXES = ("services/", "packages/", "migrations/", "contracts/", "apps/web/")
-_SECRET_PATTERNS = (
-    re.compile(r"sk-live-[A-Za-z0-9_-]+"),
-    re.compile(r"api_key=\S+"),
-    re.compile(r"密钥\S*"),
-)
 
 
 class SkillError(Exception):
@@ -172,10 +167,7 @@ def execute_script(root: Path, name: str, *, approved_hashes: set[str], output: 
 
 
 def redact_trace(text: str) -> str:
-    redacted = text
-    for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("[REDACTED]", redacted)
-    return redacted
+    return scan_redact(text)
 
 
 def read_split(root: Path, split: str) -> str:

@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-16",
   "artifact_type": "core_done_live_pending",
-  "current_task": "R8-C threat browser ADR-F43",
+  "current_task": "R8-B open-source replacements ADR-F42",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,13 +14,14 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. Commit 6a44eb5 writes measured vectors and skips live encode only for unmeasured text on the worker path. Push run 38971544094 and PR run 38971552108 both passed integration with 392 passed, 4 warnings. Sonar new_security_rating is 1. Approval Agent did not approve. Do not merge.",
+  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true. Rebased onto origin/main ab1ebef. Ingest parsing stays ADR-F41. The threat browser stays ADR-F43. R8-B stays ADR-F42. Coding calls append a configurable per-call reservation up to the task budget, settle measured overruns, and fail a job whose agent did not finish. CI for this reservation fix is not recorded yet. Do not merge.",
   "last_executed_commands": [
-    "uv run --locked --no-build python scripts/rebuild_spec.py",
+    "python3 scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
-    "uv run --locked --no-build pytest -q tests/unit/test_retrieval.py"
+    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
+    "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "6a44eb5 push run 38971544094 integration: 392 passed, 4 warnings in 708.88s. PR run 38971552108 integration: 392 passed, 4 warnings in 762.14s. Both pack-and-unit jobs passed. Sonar quality gate OK, new_security_rating actualValue 1. Local before that commit: verify_freeze passed, tests/unit/test_retrieval.py 17 passed. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-16 after the coding reservation fix. verify_freeze passed with api_operations 50. unittest 76 OK in 1.290s. unit 361 passed, 1 warning in 42.67s. Integration was not run locally: no Docker, Postgres, or Temporal. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -198,7 +199,7 @@
     "status": "done",
     "ci_run": "38694676859",
     "live_ready": false,
-    "codegraph_enabled": false,
+    "codegraph_enabled": true,
     "comparative_evidence": "not_run"
   }
 }

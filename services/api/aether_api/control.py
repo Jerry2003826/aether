@@ -13,23 +13,21 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from aether_api.body_models import (
+    ApproveExtraBody,
+    BudgetSpec,
+    CommandBody,
+    ContractBody,
+    CreateTaskBody,
+    DecisionBody,
+    SourceIdList,
+)
 from aether_api.errors import ApiError
 from aether_api.settings import Settings
 from aether_domain.security import sha256_text
 from aether_storage.db import Database
 from aether_storage.operations import OperationError, OperationLedger
 from aether_worker.outbox import insert_followup_command, insert_start_command
-
-_COMMANDS = {"approve_goal", "pause", "resume", "cancel"}
-_TEMPLATES = {
-    "artifact_exists",
-    "json_schema",
-    "trusted_test_suite",
-    "citation_integrity",
-    "source_coverage",
-    "human_review",
-}
-
 
 def register_control_routes(app: FastAPI, settings: Settings) -> None:
     @app.get("/v1/projects/{project_id}/tasks", operation_id="listTasks")
@@ -60,11 +58,10 @@ def register_control_routes(app: FastAPI, settings: Settings) -> None:
         owner = _owner(app, request, csrf=True, origin=settings)
         _owned(app, owner, project_id)
         key = _idempotency_key(request)
-        goal = body.get("goal") if isinstance(body, dict) else None
-        if not isinstance(goal, str) or not goal.strip() or len(goal) > 16000 or set(body) - {"goal", "budget", "allowed_source_ids"}:
-            raise ApiError(422, "invalid_task", "任务目标不合法")
-        budget = _budget_spec(body.get("budget")) if "budget" in body else None
-        allowed_source_ids = _source_ids(body.get("allowed_source_ids")) if "allowed_source_ids" in body else None
+        parsed = CreateTaskBody.model_validate(body)
+        goal = parsed.goal
+        budget = parsed.budget
+        allowed_source_ids = parsed.allowed_source_ids
         payload_hash = sha256_text(json.dumps({"goal": goal, "budget": budget, "allowed_source_ids": allowed_source_ids}, sort_keys=True, separators=(",", ":")))
         route = f"POST /v1/projects/{project_id}/tasks"
         command_id = str(uuid.uuid4())
@@ -396,13 +393,10 @@ def _claim_idempotency(conn, *, owner: str, project_id: str, route: str, key: st
 
 
 def _approve_extra(body: dict[str, Any], owner_id: str) -> dict[str, str]:
-    extra = {"owner_id": owner_id}
-    expected = body.get("expected_contract_sha256")
-    if expected is None:
-        return extra
-    if not isinstance(expected, str) or len(expected) != 64 or any(character not in "0123456789abcdef" for character in expected):
-        raise ApiError(422, "invalid_command", "命令不合法")
-    extra["expected_contract_sha256"] = expected
+    parsed = ApproveExtraBody.model_validate({"body": body, "owner_id": owner_id})
+    extra = {"owner_id": parsed.owner_id}
+    if parsed.expected_contract_sha256 is not None:
+        extra["expected_contract_sha256"] = parsed.expected_contract_sha256
     return extra
 
 
@@ -636,96 +630,26 @@ def _approval(row: Any) -> dict[str, Any]:
 
 
 def _draft_contract(body: dict[str, Any], project_id: str, task_id: str) -> dict[str, Any]:
-    if not isinstance(body, dict):
-        raise ApiError(422, "invalid_contract", "合同不合法")
-    goal = body.get("goal")
-    artifacts = body.get("required_artifacts")
-    criteria = body.get("criteria")
-    created_at = body.get("created_at")
-    if body.get("project_id") != project_id or body.get("task_id") != task_id:
-        raise ApiError(422, "invalid_contract", "合同不属于这个任务")
-    if not isinstance(goal, str) or not goal.strip():
-        raise ApiError(422, "invalid_contract", "合同缺少目标")
-    if not isinstance(artifacts, list) or not artifacts or not all(isinstance(item, str) and item for item in artifacts):
-        raise ApiError(422, "invalid_contract", "合同缺少产物")
-    if not isinstance(criteria, list) or not criteria or not all(_criterion(item) for item in criteria):
-        raise ApiError(422, "invalid_contract", "合同缺少验收条款")
-    if not isinstance(created_at, str) or not created_at:
-        raise ApiError(422, "invalid_contract", "合同缺少时间")
-    version = body.get("contract_version")
-    if not isinstance(version, int) or version < 1:
-        raise ApiError(422, "invalid_contract", "合同版本不合法")
+    ContractBody.model_validate(body, context={"project_id": project_id, "task_id": task_id})
     return body
 
 
-def _criterion(item: Any) -> bool:
-    return isinstance(item, dict) and isinstance(item.get("criterion_id"), str) and item.get("template") in _TEMPLATES and isinstance(item.get("description"), str) and bool(item["description"])
-
-
 def _command_body(body: dict[str, Any]) -> tuple[str, str]:
-    if not isinstance(body, dict):
-        raise ApiError(422, "invalid_command", "命令不合法")
-    command_id = body.get("command_id")
-    kind = body.get("kind")
-    try:
-        uuid.UUID(str(command_id))
-    except (TypeError, ValueError) as exc:
-        raise ApiError(422, "invalid_command", "命令编号不合法") from exc
-    if kind not in _COMMANDS or set(body) - {"command_id", "kind", "expected_contract_sha256", "reason"}:
-        raise ApiError(422, "invalid_command", "命令不合法")
-    return str(command_id), str(kind)
+    parsed = CommandBody.model_validate(body)
+    return parsed.command_id, parsed.kind
 
 
 def _decision_body(body: dict[str, Any]) -> tuple[str, str]:
-    if not isinstance(body, dict):
-        raise ApiError(422, "invalid_decision", "审批决定不合法")
-    decision = body.get("decision")
-    digest = body.get("expected_intent_hash")
-    if decision not in {"approve", "reject"} or not isinstance(digest, str) or len(digest) != 64:
-        raise ApiError(422, "invalid_decision", "审批决定不合法")
-    if set(body) - {"decision", "expected_intent_hash", "reason"}:
-        raise ApiError(422, "invalid_decision", "审批决定不合法")
-    return decision, digest
+    parsed = DecisionBody.model_validate(body)
+    return parsed.decision, parsed.expected_intent_hash
 
 
 def _budget_spec(value: Any) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) - {"max_cost_micro_usd", "max_tokens", "max_model_requests", "active_seconds", "verification_reserve_fraction"}:
-        raise ApiError(422, "invalid_budget", "任务预算不合法")
-    spec = {
-        "max_cost_micro_usd": 2_000_000,
-        "max_tokens": 100_000,
-        "max_model_requests": 48,
-        "active_seconds": 1800,
-        "verification_reserve_fraction": 0.2,
-    }
-    spec.update(value)
-    if any(isinstance(spec[name], bool) or not isinstance(spec[name], int) for name in ("max_cost_micro_usd", "max_tokens", "max_model_requests", "active_seconds")):
-        raise ApiError(422, "invalid_budget", "任务预算不合法")
-    fraction = spec["verification_reserve_fraction"]
-    if isinstance(fraction, bool) or not isinstance(fraction, (int, float)):
-        raise ApiError(422, "invalid_budget", "任务预算不合法")
-    spec["verification_reserve_fraction"] = float(fraction)
-    if spec["max_cost_micro_usd"] < 0 or spec["max_tokens"] < 1 or spec["max_model_requests"] < 1 or spec["active_seconds"] < 1:
-        raise ApiError(422, "invalid_budget", "任务预算不合法")
-    if not 0 <= spec["verification_reserve_fraction"] < 1:
-        raise ApiError(422, "invalid_budget", "任务预算不合法")
-    return spec
+    return BudgetSpec.model_validate(value).model_dump()
 
 
 def _source_ids(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        raise ApiError(422, "invalid_sources", "允许的来源不合法")
-    parsed: list[str] = []
-    for item in value:
-        if not isinstance(item, str):
-            raise ApiError(422, "invalid_sources", "允许的来源不合法")
-        try:
-            parsed.append(str(uuid.UUID(item)))
-        except ValueError as exc:
-            raise ApiError(422, "invalid_sources", "允许的来源不合法") from exc
-    if len(parsed) != len(set(parsed)):
-        raise ApiError(422, "invalid_sources", "允许的来源不合法")
-    return parsed
+    return SourceIdList.model_validate(value).values
 
 
 def _accepted(request: Request, command_id: str, resource_id: str) -> dict[str, str]:

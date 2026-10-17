@@ -25,6 +25,7 @@ sys.path.insert(0, str(ROOT / "services" / "worker"))
 sys.path.insert(0, str(ROOT / "services" / "api"))
 sys.path.insert(0, str(ROOT / "packages" / "storage"))
 sys.path.insert(0, str(ROOT / "packages" / "domain"))
+sys.path.append(str(ROOT))
 
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactError, assert_storage_root

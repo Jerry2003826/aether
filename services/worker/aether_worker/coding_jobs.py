@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import os
+import sys
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -12,9 +16,11 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, NoResultFound
 
+from aether_gateway.model import ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
 from aether_storage.budget import BudgetError, BudgetLedger
 from aether_storage.db import Database
+from aether_worker.coding_model_proxy import CodingModelProxy
 from aether_worker.coding_sandbox import (
     LOG_TAIL_LIMIT,
     CodingSandboxError,
@@ -29,6 +35,35 @@ _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
 LEASE_SECONDS = 30
 _UNCONFIRMED = frozenset({"cancel_unconfirmed", "deadline_unconfirmed", "timeout_unconfirmed"})
 _CONFIRMED_STOP = frozenset({"cancelled", "deadline_exceeded", "timeout"})
+CODING_CALL_RESERVE_TOKENS = 4096
+CODING_CALL_RESERVE_MICRO_USD = 4096
+CODING_RESERVE_TOKENS = CODING_CALL_RESERVE_TOKENS
+CODING_RESERVE_MICRO_USD = CODING_CALL_RESERVE_MICRO_USD
+
+
+def coding_call_reserve_tokens() -> int:
+    return _positive_env("AETHER_CODING_CALL_RESERVE_TOKENS", CODING_CALL_RESERVE_TOKENS)
+
+
+def coding_call_reserve_micro_usd() -> int:
+    raw = os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", "").strip()
+    if not raw:
+        return coding_call_reserve_tokens()
+    return _positive_env("AETHER_CODING_CALL_RESERVE_MICRO_USD", coding_call_reserve_tokens())
+
+
+def _positive_env(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    if value < 1:
+        return default
+    return value
+_LOG = logging.getLogger("aether.worker.coding")
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -42,6 +77,14 @@ class CodingError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class _LeaseLost(Exception):
+    """The lease could not be renewed: another worker may own the job, so this one must not settle."""
+
+
+# The proxy drain renews the lease this often, well inside LEASE_SECONDS.
+DRAIN_RENEW_SECONDS = LEASE_SECONDS / 3
 
 
 def lease_blocks_reap(*, deadline: datetime, lease_until: datetime | None, now: datetime) -> bool:
@@ -144,16 +187,20 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         )
         if early is not None:
             return early
+        objective = _job_objective(row)
         workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
         _ensure_account(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
+        reserve_tokens = coding_call_reserve_tokens()
+        reserve_micro = coding_call_reserve_micro_usd()
         if not ledger.reserve(
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            amount=1,
+            amount=reserve_micro,
             role="coding",
-            tokens=1,
+            tokens=reserve_tokens,
+            extra_detail={"call_reserve_tokens": reserve_tokens, "call_reserve_micro_usd": reserve_micro},
         ):
             raise CodingError("budget_exceeded")
         reserved = True
@@ -179,49 +226,155 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         with tempfile.TemporaryDirectory(prefix="aether-code-") as temporary:
             root = Path(temporary)
             _materialize(workspace, root)
-            try:
-                sandbox = run_coding_sandbox(
-                    root,
-                    job_id=job_id,
-                    stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
-                    deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
-                    on_poll=lambda: _renew_lease(
-                        database,
-                        owner_id=owner_id,
-                        project_id=project_id,
-                        operation_id=str(row["operation_id"]),
-                        job_id=job_id,
-                        fencing_token=fencing,
-                    ),
-                )
-            except CodingSandboxError as exc:
-                stopped = _sandbox_stop(
+            model_token = _issue_coding_token(
+                database,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+                attempt_id=str(fencing),
+                job_id=job_id,
+                operation_id=str(row["operation_id"]),
+            )
+            proxy: CodingModelProxy | None = None
+            drained = False
+
+            def keep_lease() -> None:
+                if not _renew_lease(
                     database,
-                    store,
                     owner_id=owner_id,
                     project_id=project_id,
-                    row=row,
-                    reserved=reserved,
-                    ledger=ledger,
+                    operation_id=str(row["operation_id"]),
+                    job_id=job_id,
+                    fencing_token=fencing,
+                ):
+                    raise _LeaseLost(job_id)
+
+            def drain_once() -> None:
+                # Settle and close only after calls still in flight finished; at most once per job.
+                nonlocal drained
+                if proxy is None or drained:
+                    return
+                drained = True
+                _drain_proxy(
+                    proxy,
+                    ledger,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    task_id=task_id,
                     request_key=request_key,
-                    root=root,
-                    exc=exc,
+                    heartbeat=keep_lease,
                 )
-                if stopped is not None:
-                    return stopped
-                raise
-            _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=True)
-            reserved = False
-            result = sandbox["result"]
-            passed = int(result.get("passed") or 0) > 0 and int(result.get("failed") or 0) == 0 and sandbox["exit_code"] == 0
-            error = None if passed else "test_failed"
-            if result.get("credential_present"):
-                passed = False
-                error = "credential_present"
-            if result.get("network_errno") == 0:
-                passed = False
-                error = "network_open"
-            state = "FINISHED" if passed else "FAILED"
+
+            try:
+                proxy = CodingModelProxy(database, job_token=model_token)
+                _renew_lease(
+                    database,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    operation_id=str(row["operation_id"]),
+                    job_id=job_id,
+                    fencing_token=fencing,
+                )
+                try:
+                    sandbox = run_coding_sandbox(
+                        root,
+                        objective=objective,
+                        job_id=job_id,
+                        proxy_dir=proxy.directory,
+                        job_token=model_token,
+                        stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
+                        deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
+                        on_poll=lambda: _renew_lease(
+                            database,
+                            owner_id=owner_id,
+                            project_id=project_id,
+                            operation_id=str(row["operation_id"]),
+                            job_id=job_id,
+                            fencing_token=fencing,
+                        ),
+                        # Reading the exit logs can take CLI_LOGS_TIMEOUT_SECONDS; keep the lease meanwhile.
+                        heartbeat=keep_lease,
+                    )
+                except CodingSandboxError as exc:
+                    drain_once()
+                    stopped = _sandbox_stop(
+                        database,
+                        store,
+                        owner_id=owner_id,
+                        project_id=project_id,
+                        row=row,
+                        reserved=reserved,
+                        ledger=ledger,
+                        request_key=request_key,
+                        root=root,
+                        exc=exc,
+                    )
+                    if stopped is not None:
+                        return stopped
+                    raise
+                # A call can still be forwarding after the agent exits; settle only once it is done.
+                drain_once()
+                _settle(
+                    ledger,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    request_key=request_key,
+                    reserved=True,
+                    result=sandbox["result"],
+                )
+                reserved = False
+            finally:
+                if proxy is not None:
+                    try:
+                        drain_once()
+                    except _LeaseLost:
+                        # The lease is gone: whatever got us here, this worker must not settle or fail
+                        # the job, so the lost lease replaces the pending error and returns fence_lost.
+                        _LOG.warning("coding_lease_lost_in_final_drain job=%s fencing=%s", job_id, fencing, exc_info=True)
+                        raise
+                    except Exception:  # noqa: BLE001 - keep the error that got us here
+                        _LOG.exception("coding_proxy_drain_failed job=%s", job_id)
+                    finally:
+                        proxy.close()
+            detail = _request_detail(
+                ledger,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+            )
+            measured = _measured_from_detail(detail)
+            upstream_error, usage_missing = _relay_flags(detail)
+            admission_error = detail.get("admission_error")
+            blocked = admission_error if isinstance(admission_error, str) and admission_error else None
+            state, error = _coding_terminal(
+                sandbox,
+                upstream_error=upstream_error,
+                measured=measured,
+                usage_missing=usage_missing,
+                admission_error=blocked,
+            )
+            observed = _successful_model_requests(
+                ledger,
+                owner_id=owner_id,
+                project_id=project_id,
+                task_id=task_id,
+                request_key=request_key,
+            )
+            result = sandbox.get("result")
+            if isinstance(result, dict):
+                result["model_requests"] = observed
+            _log_job(
+                job_id=job_id,
+                fencing=fencing,
+                state=state,
+                error=error,
+                result=result if isinstance(result, dict) else {},
+                measured=measured,
+                patch_source=_patch_source(sandbox),
+            )
             published = _publish(
                 database,
                 store,
@@ -237,6 +390,11 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         if not published:
             return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
         return {"coding_job_id": job_id, "state": state}
+    except _LeaseLost:
+        # Same as a fence lost at publish: the job is no longer ours, so nothing is settled,
+        # released or cleared here; the worker that holds the lease now finishes it.
+        _LOG.warning("coding_lease_lost_during_drain job=%s fencing=%s", job_id, fencing)
+        return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
     except (CodingError, CodingSandboxError, WorkspaceError, ArtifactError, BudgetError, OSError) as exc:
         code = exc.code if isinstance(exc, (CodingError, CodingSandboxError, WorkspaceError, ArtifactError)) else "coding_failed"
         if isinstance(exc, BudgetError):
@@ -260,7 +418,9 @@ def _claim(database: Database, *, owner_id: str, project_id: str, job_id: str) -
             row = conn.execute(
                 text(
                     "SELECT id::text AS id, task_id::text AS task_id, operation_id::text AS operation_id, "
-                    "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state "
+                    "base_artifact_id::text AS base_artifact_id, fencing_token, deadline, state, "
+                    "(SELECT o.normalized_arguments ->> 'objective' FROM operations o "
+                    "WHERE o.project_id = coding_jobs.project_id AND o.id = coding_jobs.operation_id) AS objective "
                     "FROM coding_jobs WHERE project_id = :project_id AND id = :id AND state = ANY(:states) FOR UPDATE"
                 ),
                 {"project_id": project_id, "id": job_id, "states": list(_OPEN)},
@@ -439,9 +599,10 @@ def _renew_lease(
     operation_id: str,
     job_id: str,
     fencing_token: int,
-) -> None:
+) -> bool:
+    """Extend a lease this worker still holds. False when it had expired or the fencing token moved on."""
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
+        renewed = conn.execute(
             text(
                 "UPDATE operations AS o SET lease_until = now() + make_interval(secs => :lease_seconds) "
                 "FROM coding_jobs AS j "
@@ -456,7 +617,7 @@ def _renew_lease(
                 "job_id": job_id,
                 "fencing": fencing_token,
             },
-        )
+        ).rowcount
         conn.execute(
             text(
                 "UPDATE coding_jobs SET last_heartbeat_at = now() "
@@ -471,6 +632,7 @@ def _renew_lease(
                 "states": list(_OPEN),
             },
         )
+    return renewed == 1
 
 
 def _clear_lease(
@@ -601,7 +763,7 @@ def _publish(
         fencing_token=int(row["fencing_token"]),
         operation_id=str(row["operation_id"]),
     )
-    patch = unified_patch(workspace["base_files"], workspace["files"]).encode()
+    patch = _published_patch(workspace, sandbox)
     result = json.dumps({"kind": "aether.coding_test_result", **sandbox["result"]}, ensure_ascii=False, separators=(",", ":")).encode()
     events = _events(sandbox, error_code, manifest=manifest, patch=patch)
     return _store_terminal(
@@ -732,6 +894,12 @@ def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[s
         "error_code": error_code,
         "network_errno": sandbox["result"].get("network_errno"),
         "credential_present": sandbox["result"].get("credential_present"),
+        "executor": sandbox["result"].get("executor"),
+        "input_tokens": sandbox["result"].get("input_tokens"),
+        "output_tokens": sandbox["result"].get("output_tokens"),
+        "edit_calls": sandbox["result"].get("edit_calls"),
+        "model_requests": sandbox["result"].get("model_requests"),
+        "patch_source": _patch_source(sandbox),
         "file_manifest": manifest,
         "patch_sha256": hashlib.sha256(patch).hexdigest(),
         "stdout_tail": stdout,
@@ -992,6 +1160,308 @@ def _operation(
         )
 
 
+def _issue_coding_token(
+    database: Database,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    attempt_id: str,
+    job_id: str,
+    operation_id: str,
+) -> str:
+    gateway = ModelGateway(database, upstream_base="", provider_key="")
+    return gateway.issue_token(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+        attempt_id=attempt_id,
+        capabilities=["coding:model"],
+        aliases=["coder"],
+        job_id=job_id,
+        operation_id=operation_id,
+    )
+
+
+def _job_objective(row: dict[str, Any]) -> str:
+    """The objective stored in the claimed operation's arguments. There is no default prompt."""
+    objective = row.get("objective")
+    if not isinstance(objective, str) or not objective.strip():
+        raise CodingError("objective_missing")
+    return objective
+
+
+# Case details the sandbox entry reports when the agent tampered with grading (exit code 1).
+GRADING_VIOLATIONS = frozenset({"grading_startup_hook", "grading_shadow_module", "grading_unverified"})
+# The protocol produced no result line (hung past its limit, killed, crashed). A graded failure with its
+# own error code; never a violation, since nothing was shown to be forged.
+GRADING_TIMEOUT = "grading_timeout"
+
+
+def _runner_details(sandbox: dict[str, Any]) -> set[str]:
+    result = sandbox.get("result")
+    if not isinstance(result, dict):
+        return set()
+    return {
+        str(case["detail"])
+        for case in result.get("cases") or []
+        if isinstance(case, dict) and case.get("name") == "runner" and isinstance(case.get("detail"), str)
+    }
+
+
+def _grading_violation(sandbox: dict[str, Any]) -> str | None:
+    result = sandbox.get("result")
+    if not isinstance(result, dict) or sandbox.get("exit_code") != 1:
+        return None
+    for case in result.get("cases") or []:
+        if isinstance(case, dict) and case.get("name") == "runner" and case.get("detail") in GRADING_VIOLATIONS:
+            return str(case["detail"])
+    return None
+
+
+def _agent_patch(sandbox: dict[str, Any]) -> str | None:
+    """The snapshot diff of the agent's workspace, however it was edited.
+
+    edit_calls only counts file_editor calls; a change made through the terminal is in
+    the diff too, so the count is logged but does not gate publication. A grading
+    violation keeps the patch for review as well.
+    """
+    result = sandbox.get("result")
+    if not isinstance(result, dict):
+        return None
+    patch = result.get("patch")
+    if isinstance(patch, str) and patch.startswith("--- "):
+        return patch
+    return None
+
+
+def _patch_source(sandbox: dict[str, Any]) -> str:
+    return "agent_edit" if _agent_patch(sandbox) is not None else "candidate_files"
+
+
+def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, Any]) -> bytes:
+    patch = _agent_patch(sandbox)
+    if patch is not None:
+        return patch.encode()
+    return unified_patch(workspace["base_files"], workspace["files"]).encode()
+
+
+def _agent_completed(body: dict[str, Any]) -> bool:
+    """Only an explicit true from the entry means the conversation reached FINISHED.
+
+    The entry always writes the flag; a missing or non-boolean value is treated as interrupted,
+    not inferred from the request count.
+    """
+    return body.get("agent_completed") is True
+
+
+def _coding_terminal(
+    sandbox: dict[str, Any],
+    *,
+    upstream_error: str | None,
+    measured: tuple[int, int] | None,
+    usage_missing: bool,
+    admission_error: str | None = None,
+) -> tuple[str, str | None]:
+    """FINISHED needs a completed agent, an agent change and a passing protocol.
+
+    A budget rejection or a blank report (the agent raised before it finished)
+    is FAILED even when the files on disk already pass. A conversation that
+    finishes without changing any source file (empty or missing patch; grading
+    files and caches are never in it) is FAILED/agent_no_change: candidate files that
+    already pass do not make a job FINISHED. edit_calls is not consulted; a
+    terminal-only change shows up in the patch.
+    """
+    result = sandbox.get("result")
+    body = result if isinstance(result, dict) else {}
+    passed = int(body.get("passed") or 0) > 0 and int(body.get("failed") or 0) == 0 and sandbox.get("exit_code") == 0
+    if body.get("credential_present"):
+        return "FAILED", "credential_present"
+    if body.get("network_errno") == 0:
+        return "FAILED", "network_open"
+    violation = _grading_violation(sandbox)
+    if violation:
+        return "FAILED", violation
+    if admission_error:
+        return "FAILED", admission_error
+    if not _agent_completed(body):
+        return "FAILED", "agent_interrupted"
+    if upstream_error:
+        return "FAILED", upstream_error
+    if usage_missing and measured is None:
+        return "FAILED", "usage_missing"
+    requests = body.get("model_requests")
+    called = isinstance(requests, int) and not isinstance(requests, bool) and requests >= 1
+    if not called and measured is None:
+        return "FAILED", "model_not_called"
+    if _agent_patch(sandbox) is None:
+        return "FAILED", "agent_no_change"
+    if not passed and GRADING_TIMEOUT in _runner_details(sandbox):
+        return "FAILED", GRADING_TIMEOUT
+    return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
+
+
+def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
+    if not isinstance(result, dict):
+        return None
+    incoming = result.get("input_tokens")
+    outgoing = result.get("output_tokens")
+    if type(incoming) is not int or type(outgoing) is not int:
+        return None
+    if incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
+        return None
+    return incoming, outgoing
+
+
+def _request_detail(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> dict[str, Any]:
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str):
+        loaded = json.loads(raw)
+        return dict(loaded) if isinstance(loaded, dict) else {}
+    return {}
+
+
+def _measured_from_detail(detail: dict[str, Any]) -> tuple[int, int] | None:
+    if "measured_input_tokens" not in detail or "measured_output_tokens" not in detail:
+        return None
+    incoming = detail["measured_input_tokens"]
+    outgoing = detail["measured_output_tokens"]
+    if type(incoming) is not int or type(outgoing) is not int or incoming < 0 or outgoing < 0 or incoming + outgoing < 1:
+        return None
+    return incoming, outgoing
+
+
+def _relay_flags(detail: dict[str, Any]) -> tuple[str | None, bool]:
+    error = detail.get("upstream_error")
+    code = error if isinstance(error, str) and error else None
+    return code, detail.get("usage_missing") is True
+
+
+def _successful_model_requests(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+) -> int:
+    """Gateway-observed calls. A sandbox exception must not publish this as zero."""
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        count = conn.execute(
+            text(
+                "SELECT count(*) FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND role = 'coding_call' AND request_key LIKE :prefix AND usage_status = 'known' "
+                "AND COALESCE(input_tokens, 0) + COALESCE(output_tokens, 0) > 0 "
+                "AND (usage_detail->>'upstream_error') IS NULL"
+            ),
+            {"project_id": project_id, "task_id": task_id, "prefix": request_key + ":call:%"},
+        ).scalar()
+    return int(count or 0)
+
+
+def _log_job(
+    *,
+    job_id: str,
+    fencing: int,
+    state: str,
+    error: str | None,
+    result: dict[str, Any],
+    measured: tuple[int, int] | None,
+    patch_source: str,
+) -> None:
+    logger = _logger()
+    logger.info(
+        "coding_job job=%s fencing=%s state=%s error=%s model_requests=%s edit_calls=%s input_tokens=%s output_tokens=%s patch_source=%s",
+        job_id,
+        fencing,
+        state,
+        error or "",
+        result.get("model_requests") if isinstance(result.get("model_requests"), int) else "",
+        result.get("edit_calls") if isinstance(result.get("edit_calls"), int) else "",
+        "" if measured is None else measured[0],
+        "" if measured is None else measured[1],
+        patch_source,
+    )
+
+
+def _logger() -> logging.Logger:
+    _LOG.setLevel(logging.INFO)
+    if not _LOG.handlers and not logging.getLogger().handlers:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter("%(levelname)s %(name)s %(message)s"))
+        _LOG.addHandler(handler)
+    return _LOG
+
+
+def _drain_proxy(
+    proxy: CodingModelProxy,
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    heartbeat: Callable[[], None] | None = None,
+) -> None:
+    """Wait for in-flight model calls; one that outlasts the drain is charged at its reservation.
+
+    The tokens still pending on the reservation belong to calls that were admitted but never
+    answered. They move to unknown_reserved_tokens, which _settle charges like a timeout.
+    proxy_drained tells the gateway not to book a late answer on top of that charge.
+    The heartbeat keeps the lease alive between drain slices; if it raises, nothing is written.
+    """
+    if heartbeat is None:
+        unfinished = proxy.drain()
+    else:
+        unfinished = proxy.drain(heartbeat=heartbeat, heartbeat_seconds=DRAIN_RENEW_SECONDS)
+    if unfinished <= 0:
+        return
+    _LOG.warning("coding_proxy_drain_timeout job_request=%s unfinished=%s", request_key, unfinished)
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+        if raw is None:
+            return
+        detail = dict(raw) if isinstance(raw, dict) else dict(json.loads(raw) or {})
+        pending = detail.get("pending_tokens")
+        pending = pending if type(pending) is int and pending > 0 else 0
+        detail["proxy_drained"] = True
+        detail["drain_unfinished"] = unfinished
+        if pending:
+            detail["unknown_usage_calls"] = int(detail.get("unknown_usage_calls") or 0) + unfinished
+            detail["unknown_reserved_tokens"] = int(detail.get("unknown_reserved_tokens") or 0) + pending
+            detail["pending_tokens"] = 0
+        conn.execute(
+            text(
+                "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+            ),
+            {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+        )
+
+
 def _settle(
     ledger: BudgetLedger,
     *,
@@ -1000,21 +1470,62 @@ def _settle(
     task_id: str,
     request_key: str,
     reserved: bool,
+    result: dict[str, Any] | None = None,
 ) -> None:
     if not reserved:
         return
-    try:
-        ledger.settle(
+    detail = _request_detail(
+        ledger,
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        request_key=request_key,
+    )
+    usage = _measured_from_detail(detail)
+    if usage is None:
+        usage = _usage(result)
+    if usage is None:
+        _release_hold(
+            ledger,
             owner_id=owner_id,
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            actual=0,
-            input_tokens=0,
-            output_tokens=0,
+            reserved=True,
         )
-    except (BudgetError, NoResultFound):
         return
+    incoming, outgoing = usage
+    try:
+        ledger.settle_measured(
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=task_id,
+            request_key=request_key,
+            actual=incoming + outgoing,
+            input_tokens=incoming,
+            output_tokens=outgoing,
+            unknown_tokens=_unknown_reserved_tokens(detail),
+        )
+    except BudgetError as exc:
+        if exc.code not in {"unknown_not_zero", "not_reserved", "conflicting_settlement"}:
+            raise
+    except NoResultFound:
+        return
+
+
+def _unknown_reserved_tokens(detail: dict[str, Any]) -> int:
+    """Reserved tokens of calls whose usage never arrived; the ledger charges them, capped at the hold.
+
+    A row flagged usage_missing without the per-call amount (written before the gateway
+    recorded it) cannot say how much was unknown, so the whole hold stays charged.
+    """
+    recorded = detail.get("unknown_reserved_tokens")
+    if type(recorded) is int and recorded > 0:
+        return recorded
+    if detail.get("usage_missing") is True:
+        held = detail.get("reserved_tokens")
+        return held if type(held) is int and held > 0 else 0
+    return 0
 
 
 def _release_hold(

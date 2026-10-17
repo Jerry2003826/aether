@@ -8,6 +8,7 @@ from aether_storage.db import Database
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.memory import apply_memory_commands
 from aether_worker.service import route_pending
+from tests.integration.fake_coding_upstream import PROVIDER_KEY, FakeCodingModel, editing_upstream
 from tests.integration.test_auth import ORIGIN, _bootstrap
 
 CONSOLE = Path("apps/web/app/console/page.tsx").read_text(encoding="utf-8")
@@ -76,7 +77,7 @@ def test_console_memory_create_matches_the_database(client, role_urls, tmp_path:
     assert row["epistemic_status"] == "proposed"
 
 
-def test_console_coding_job_matches_the_database(client, role_urls) -> None:
+def test_console_coding_job_matches_the_database(client, role_urls, monkeypatch) -> None:
     assert CODING_PATH in CODE
     assert "终态是 FINISHED 或 FAILED" in CODE
     owner_id, project_id, csrf = _session(client, "console-record-code-project")
@@ -89,7 +90,8 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
     workspace = {
         "kind": "aether.coding_workspace",
         "base_files": {"app.py": "def value():\n    return 0\n"},
-        "files": {"app.py": "def value():\n    return 42\n"},
+        # The candidate does not pass yet: the test-only upstream's file_editor edit makes it return 42.
+        "files": {"app.py": "def value():\n    return 0\n"},
         "tests": {"test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n"},
     }
     uploaded = client.post(
@@ -115,7 +117,16 @@ def test_console_coding_job_matches_the_database(client, role_urls) -> None:
     assert objective not in created.text
     worker = Database(role_urls["aether_worker"])
     store = ArtifactStore(client.app.state.settings.artifact_root, worker)
-    route_pending(Database(role_urls["aether_dispatcher"]), worker, Database(role_urls["aether_verifier"]), store)
+    model = FakeCodingModel()
+    with editing_upstream(model) as upstream_base:
+        # In-process gateway (no gateway role): the job's model socket proxy relays to this upstream.
+        for name in ("AETHER_GATEWAY_BASE", "AETHER_LOOPBACK_TOKEN", "AETHER_LIVE_MODEL_ALIAS"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("AETHER_LIVE_MODEL_BASE", upstream_base)
+        monkeypatch.setenv("AETHER_LIVE_MODEL_KEY", PROVIDER_KEY)
+        route_pending(Database(role_urls["aether_dispatcher"]), worker, Database(role_urls["aether_verifier"]), store)
+    assert model.problems == []
+    assert model.authorizations and set(model.authorizations) == {f"Bearer {PROVIDER_KEY}"}
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
             text(

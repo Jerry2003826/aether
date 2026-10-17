@@ -15,6 +15,7 @@ from typing import Any
 
 from reference.models import CodingJobRequest, CodingJobResult
 
+from aether_worker.container_runtime import execute_docker
 from aether_worker.loopback import LoopbackError, get_json
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
@@ -154,7 +155,7 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
 def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
         raise RunnerError("docker_forbidden")
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=timeout)
+    return execute_docker(args, timeout=timeout)
 
 
 def probe_docker_daemon() -> dict[str, str]:
@@ -258,8 +259,13 @@ def _launch_container(key: str, *, token: str, provider_key: str) -> str:
                 gateway_name,
                 "--network",
                 "none",
+                # Only NET_ADMIN, to bring up the shared loopback; nothing else, and no setuid gains.
+                "--cap-drop",
+                "ALL",
                 "--cap-add",
                 "NET_ADMIN",
+                "--security-opt",
+                "no-new-privileges",
                 "--label",
                 f"aether.job={label}",
                 "--label",
@@ -287,6 +293,8 @@ def _launch_container(key: str, *, token: str, provider_key: str) -> str:
         "--label",
         "aether.role=job",
         "--read-only",
+        "--cap-drop",
+        "ALL",
         "--security-opt",
         "no-new-privileges",
         "--pids-limit",

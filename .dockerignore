@@ -1,9 +1,14 @@
 .git
 .venv
+**/.venv
 **/node_modules
 **/.next
 **/__pycache__
 **/.pytest_cache
+__pycache__
+.cache
+data
+secrets
 reports
 archive
 *.zip
