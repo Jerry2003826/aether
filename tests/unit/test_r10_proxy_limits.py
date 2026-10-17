@@ -92,10 +92,6 @@ def _ask(proxy: CodingModelProxy) -> int:
     return int(b"".join(chunks).split(b" ", 2)[1])
 
 
-def _handler_threads() -> int:
-    return sum(1 for thread in threading.enumerate() if "process_request" in thread.name)
-
-
 def test_idle_client_is_disconnected_after_the_read_timeout(proxy) -> None:
     sock = _connect(proxy)
     try:
@@ -130,22 +126,93 @@ def test_trickling_client_is_cut_off_by_the_request_deadline(proxy) -> None:
     assert cut, "a client that never finishes its request kept the connection for 3s"
 
 
-def test_idle_connections_beyond_the_limit_do_not_pile_up_threads(proxy) -> None:
-    before = _handler_threads()
-    idle = [_connect(proxy) for _ in range(_LIMIT + 6)]
+def _status_line(sock: socket.socket, seconds: float) -> bytes:
+    sock.settimeout(seconds)
+    chunks: list[bytes] = []
     try:
-        time.sleep(0.15)
-        assert _handler_threads() - before <= _LIMIT
-        # Connections over the limit are turned away at once instead of waiting for a thread.
-        rejected = [_closed_within(sock, 0.2) for sock in idle[_LIMIT:]]
-        assert all(item is not None for item in rejected), rejected
-        time.sleep(_TIMEOUT + 0.4)
-        assert _handler_threads() - before == 0
+        while block := sock.recv(4096):
+            chunks.append(block)
+    except (TimeoutError, OSError):
+        pass
+    return b"".join(chunks).split(b"\r\n", 1)[0]
+
+
+def test_idle_connections_beyond_the_limit_do_not_pile_up_threads(proxy) -> None:
+    idle = [_connect(proxy) for _ in range(_LIMIT)]
+    extra: list[socket.socket] = []
+    try:
+        assert proxy.wait_until_active(_LIMIT, timeout=2.0)
+        extra = [_connect(proxy) for _ in range(6)]
+        # Connections over the limit are refused at once with 503, without a handler.
+        for sock in extra:
+            assert _status_line(sock, 2.0) == b"HTTP/1.1 503 Service Unavailable"
+        assert proxy.active_connections == _LIMIT
+        assert proxy.peak_connections == _LIMIT
+        # The idle ones are dropped by the read deadline, which frees every slot.
+        assert proxy.wait_until_active(0, timeout=_TIMEOUT + 2.0)
         assert _ask(proxy) == 200
         assert _ask(proxy) == 200
+        assert proxy.wait_until_active(0, timeout=2.0)
+        assert proxy.peak_connections == _LIMIT
     finally:
-        for sock in idle:
+        for sock in idle + extra:
             sock.close()
+
+
+def test_refusal_never_blocks_the_accept_thread() -> None:
+    from aether_worker import coding_model_proxy
+
+    class Full:
+        """A peer whose receive buffer is full: any blocking send would hang."""
+
+        def __init__(self) -> None:
+            self.blocking = True
+            self.calls: list[str] = []
+
+        def setblocking(self, flag: bool) -> None:
+            self.blocking = flag
+            self.calls.append(f"setblocking:{flag}")
+
+        def settimeout(self, value) -> None:
+            self.blocking = value is None
+            self.calls.append(f"settimeout:{value}")
+
+        def send(self, _data: bytes) -> int:
+            if self.blocking:
+                raise AssertionError("blocking send on the accept thread")
+            raise BlockingIOError
+
+        def sendall(self, _data: bytes) -> None:
+            raise AssertionError("sendall can block on the accept thread")
+
+    peer = Full()
+    coding_model_proxy._refuse(peer)  # type: ignore[arg-type]
+    assert "setblocking:False" in peer.calls
+
+
+def test_a_reply_write_timeout_is_one_log_line(proxy, monkeypatch, caplog, capsys) -> None:
+    from aether_worker import coding_model_proxy
+
+    def stalled(_writer, _status, _payload) -> None:
+        raise TimeoutError("timed out")
+
+    monkeypatch.setattr(coding_model_proxy, "_write_json", stalled)
+    caplog.set_level("INFO", logger="aether.worker.coding_proxy")
+    sock = _connect(proxy)
+    try:
+        raw = b'{"model":"coder","messages":[]}'
+        sock.sendall(
+            b"POST /v1/chat/completions HTTP/1.1\r\n"
+            + f"authorization: Bearer {_JOB}\r\ncontent-length: {len(raw)}\r\n\r\n".encode()
+            + raw
+        )
+        assert _closed_within(sock, 3.0) is not None
+    finally:
+        sock.close()
+    assert proxy.wait_until_active(0, timeout=2.0)
+    lines = [record.getMessage() for record in caplog.records if "write_timeout" in record.getMessage()]
+    assert lines == ["coding_proxy status=200 error=write_timeout"]
+    assert "Traceback" not in capsys.readouterr().err
 
 
 def test_limits_have_sane_defaults(monkeypatch) -> None:
