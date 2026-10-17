@@ -290,20 +290,27 @@ def _is_event_stream(raw: bytes, content_type: str) -> bool:
 
 
 def _sse_events(raw: bytes) -> list[dict[str, Any]]:
+    """Every data event as a JSON object. One bad event fails the whole answer as upstream_error.
+
+    Blocks with no data (comments, event:, id:, retry:, blank lines), an empty data field and the
+    [DONE] marker carry no event and are skipped. Any other payload that is not a JSON object,
+    including a cut-off final event, means the stream is incomplete; it is never stitched around.
+    """
     events: list[dict[str, Any]] = []
     for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
         data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
         if not data_lines:
             continue
         payload = "\n".join(data_lines).strip()
-        if payload == "[DONE]":
+        if not payload or payload == "[DONE]":
             continue
         try:
             loaded = json.loads(payload)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(loaded, dict):
-            events.append(loaded)
+        except json.JSONDecodeError as exc:
+            raise GatewayDenied("upstream_error", sent=True) from exc
+        if not isinstance(loaded, dict):
+            raise GatewayDenied("upstream_error", sent=True)
+        events.append(loaded)
     return events
 
 
