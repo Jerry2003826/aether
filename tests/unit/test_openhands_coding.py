@@ -493,8 +493,12 @@ def test_agent_receives_the_objective_verbatim_as_its_only_user_message(tmp_path
         assert len(systems) == 1
         assert _OBJECTIVE not in systems[0]
         assert "{target}" not in systems[0] and "pwned" not in systems[0]
-        assert "42" not in systems[0]
-        assert str(tmp_path / "job") in systems[0]
+        workdir = str(tmp_path / "job")
+        assert workdir in systems[0]
+        # The pytest tmp path can itself contain "42"; strip it before looking for demo wording.
+        generic = systems[0].replace(workdir, "<job>")
+        for demo in ("42", "returns 42", "return 0", "value()", "app.py", "str_replace", "file_editor str_replace"):
+            assert demo not in generic, demo
     assert not Path("/tmp/pwned").exists()
 
 
