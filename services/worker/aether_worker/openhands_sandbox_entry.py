@@ -31,6 +31,8 @@ EXECUTOR = "openhands.sdk.Agent"
 _STATE_DIR = ".aether-state"
 _OBJECTIVE = "AETHER_OBJECTIVE"
 _SKIP = {".git", "__pycache__", _STATE_DIR}
+# Same value as coding_sandbox.MAX_PATCH_BYTES: the RESULT line must fit the worker's stdout window.
+MAX_PATCH_BYTES = 2_097_152
 
 
 class _Pump(socketserver.ThreadingTCPServer):
@@ -126,6 +128,10 @@ def credential_present() -> bool:
 
 
 def emit(body: dict[str, object], code: int) -> None:
+    patch = body.get("patch")
+    if isinstance(patch, str) and len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
+        body["patch"] = ""
+        body["patch_omitted"] = "too_large"
     sys.stdout.write("RESULT " + json.dumps(body, separators=(",", ":")) + "\n")
     sys.stdout.flush()
     raise SystemExit(code)

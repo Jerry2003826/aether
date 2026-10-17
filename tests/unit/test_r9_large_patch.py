@@ -60,3 +60,17 @@ def test_large_patch_round_trips_intact(monkeypatch, delegated: bool) -> None:
     collected = coding_sandbox._collect_exit(_NAME)
     assert collected["result"]["patch"] == patch
     assert len(collected["stdout_tail"]) <= coding_sandbox.LOG_TAIL_LIMIT
+
+
+def test_entry_patch_cap_matches_the_worker_window() -> None:
+    import ast
+    from pathlib import Path
+
+    tree = ast.parse(Path("services/worker/aether_worker/openhands_sandbox_entry.py").read_text(encoding="utf-8"))
+    values = [
+        ast.literal_eval(node.value)
+        for node in tree.body
+        if isinstance(node, ast.Assign) and any(getattr(t, "id", "") == "MAX_PATCH_BYTES" for t in node.targets)
+    ]
+    assert values == [coding_sandbox.MAX_PATCH_BYTES]
+    assert coding_sandbox.MAX_PATCH_BYTES < coding_sandbox.RESULT_CAPTURE_LIMIT

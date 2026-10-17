@@ -8,7 +8,13 @@ import sys
 
 from docker.errors import DockerException
 
-from aether_worker.coding_sandbox import LOG_CAPTURE_LIMIT, _bounded_logs, container_arguments, container_name
+from aether_worker.coding_sandbox import (
+    LOG_CAPTURE_LIMIT,
+    RESULT_CAPTURE_LIMIT,
+    _bounded_logs,
+    container_arguments,
+    container_name,
+)
 from aether_worker.net_guard import fixtures_enabled
 from aether_worker.openhands_image import build_openhands_sandbox, coding_runtime_image, launch_image
 from aether_worker.role_http import serve_role
@@ -81,7 +87,7 @@ def _sandbox(body: dict) -> tuple[int, dict]:
     op = body.get("op")
     try:
         if op == "logs":
-            return 200, _logs(body.get("name"))
+            return 200, _logs(body.get("name"), body.get("limit"))
         completed = _completed(op, body)
     except SandboxDelegateError:
         return 400, {"error": "rejected"}
@@ -137,8 +143,10 @@ def _run(
     return _docker(["run", "-d", "--name", container_name(job), *args[1:]])
 
 
-def _logs(name: object) -> dict[str, str]:
-    captured = _bounded_logs(accepted_name(name), limit=LOG_CAPTURE_LIMIT)
+def _logs(name: object, limit: object = None) -> dict[str, str]:
+    """The worker may ask for up to RESULT_CAPTURE_LIMIT bytes so a large RESULT line stays whole."""
+    wanted = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else LOG_CAPTURE_LIMIT
+    captured = _bounded_logs(accepted_name(name), limit=min(wanted, RESULT_CAPTURE_LIMIT))
     return {"stdout": captured["stdout"], "stderr": captured["stderr"]}
 
 

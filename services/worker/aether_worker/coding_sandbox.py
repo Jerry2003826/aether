@@ -27,6 +27,10 @@ from aether_worker.sandbox_delegate import (
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
 LOG_CAPTURE_LIMIT = 65536
+# The RESULT line carries the whole patch. The sandbox entry caps the patch at MAX_PATCH_BYTES,
+# so the final line always fits inside this stdout window.
+MAX_PATCH_BYTES = 2_097_152
+RESULT_CAPTURE_LIMIT = 4 * MAX_PATCH_BYTES
 POLL_SECONDS = 0.25
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
 CODING_MEMORY_BYTES = 805306368
@@ -176,7 +180,7 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
     stdout, stderr = container_logs(target, limit=limit)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
-        "stderr": read_bounded_tail(io.BytesIO(stderr), limit),
+        "stderr": read_bounded_tail(io.BytesIO(stderr), min(limit, LOG_CAPTURE_LIMIT)),
     }
 
 
@@ -321,7 +325,7 @@ def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pend
 
 
 def _collect_exit(name: str) -> dict[str, Any]:
-    captured = _bounded_logs(name, limit=LOG_CAPTURE_LIMIT)
+    captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT)
     logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
     code = _exit_code(name)
     _sandbox_docker(["rm", "-f", name])
