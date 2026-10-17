@@ -16,6 +16,9 @@ OPENHANDS_BASE = "python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087
 SANDBOX_REPOSITORY = "aether-openhands-sandbox"
 HASH_LABEL = "aether.openhands_sandbox_hash"
 DOCKERFILE = "infra/openhands-sandbox.Dockerfile"
+# The runner answers a delegated "run" with this stderr when no sandbox image exists; the worker
+# matches it to fail the job as image_unavailable. One constant so the two sides cannot drift.
+IMAGE_UNAVAILABLE = "image_unavailable"
 # Always hashed, even if the Dockerfile stops naming them: the environment and its lock files.
 _CONTEXT_ROOTS = ("environments/openhands",)
 _LOCK_FILES = ("environments/openhands/pyproject.toml", "environments/openhands/uv.lock")

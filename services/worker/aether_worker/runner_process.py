@@ -17,6 +17,7 @@ from aether_worker.coding_sandbox import (
 )
 from aether_worker.net_guard import fixtures_enabled
 from aether_worker.openhands_image import (
+    IMAGE_UNAVAILABLE,
     ImageUnavailable,
     build_openhands_sandbox,
     coding_runtime_image,
@@ -168,7 +169,7 @@ def _run(
     try:
         image = launch_image(JOB_IMAGE, JOB_IMAGE)
     except LookupError:
-        return subprocess.CompletedProcess(["docker"], 1, "", "image_unavailable")
+        return subprocess.CompletedProcess(["docker"], 1, "", IMAGE_UNAVAILABLE)
     args = [part for part in container_arguments(root, image, objective=text, job_id=job, proxy_dir=proxy, job_token=token) if part != "--rm"]
     return _docker(["run", "-d", "--name", container_name(job), *args[1:]])
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from aether_worker.container_runtime import container_logs
-from aether_worker.openhands_image import launch_image
+from aether_worker.openhands_image import IMAGE_UNAVAILABLE, launch_image
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
@@ -267,7 +267,7 @@ def _ensure_started(
             )
         except SandboxDelegateError as exc:
             raise CodingSandboxError("sandbox_unavailable") from exc
-        if launched.returncode != 0 and (launched.stderr or "").strip() == "image_unavailable":
+        if launched.returncode != 0 and (launched.stderr or "").strip() == IMAGE_UNAVAILABLE:
             # Image prep failed before the roles started; the runner has no sandbox image to run.
             raise CodingSandboxError("image_unavailable")
     else:
