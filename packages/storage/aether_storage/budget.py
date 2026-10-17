@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +14,14 @@ from aether_storage.db import Database
 
 
 UNSENT_DISPATCH_STATES = frozenset({"dispatched", "permitted"})
+# Run first inside a settling transaction, before any ledger row is locked: False means the caller
+# no longer holds what it is settling for (a coding attempt whose fencing token moved on).
+SettleGuard = Callable[[Any], bool]
+
+
+def _require_guard(conn, guard: SettleGuard | None) -> None:
+    if guard is not None and not guard(conn):
+        raise BudgetError("fence_lost")
 
 
 def _detail(value: object) -> dict:
@@ -289,6 +299,7 @@ class BudgetLedger:
         input_tokens: int,
         output_tokens: int,
         unknown_tokens: int = 0,
+        guard: SettleGuard | None = None,
     ) -> str:
         """Book known token usage and release the hold, including a measured overrun.
 
@@ -300,10 +311,13 @@ class BudgetLedger:
         arrived (a timeout after sending, an answer without usage). That part is charged
         at the reservation's rate rather than released, and only out of what is still
         held after the measured tokens: the estimate never pushes the bill past the hold.
+
+        guard, if given, must hold before anything is booked; otherwise fence_lost and no change.
         """
         if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or actual != input_tokens + output_tokens:
             raise BudgetError("invalid_amount")
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
             account = conn.execute(
                 text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
                 {"project_id": project_id, "task_id": task_id},
@@ -372,8 +386,9 @@ class BudgetLedger:
             )
         return book_result
 
-    def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
+    def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, guard: SettleGuard | None = None) -> None:
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
             conn.execute(
                 text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
                 {"project_id": project_id, "task_id": task_id},
@@ -387,6 +402,32 @@ class BudgetLedger:
             ).rowcount
             if updated != 1:
                 raise BudgetError("not_reserved")
+
+    def cancel_unused(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, guard: SettleGuard | None = None) -> bool:
+        """Release a reservation through which nothing was ever sent, back to the account in full.
+
+        Only for a row the caller has shown carried no call to a provider; True when it was released.
+        """
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if request is None:
+                return False
+            _cancel_before_dispatch(
+                conn, account_id=account["id"], project_id=project_id, task_id=task_id, request_key=request_key,
+                amount=int(request["reserved_micro_usd"]), detail=_detail(request["usage_detail"]),
+            )
+        return True
 
     def _held_by(self, conn, *, project_id: str, task_id: str, request_key: str, attempt_id: str) -> tuple[object, dict, dict] | None:
         account = conn.execute(

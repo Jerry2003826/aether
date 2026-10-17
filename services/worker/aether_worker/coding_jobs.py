@@ -128,20 +128,38 @@ def reap_expired_coding_jobs(
     outcomes: list[dict[str, str]] = []
     for row in _expired_rows(database, owner_id=owner_id, project_id=project_id):
         job_id = str(row["id"])
-        if not _take_expired_lease(database, owner_id=owner_id, project_id=project_id, job_id=job_id, operation_id=str(row["operation_id"])):
-            continue
-        outcome = _stop_confirmed(
+        taken = _take_expired_lease(
             database,
-            store,
             owner_id=owner_id,
             project_id=project_id,
-            row=row,
-            reserved=False,
-            ledger=BudgetLedger(database),
-            request_key=f"coding-{job_id}-{int(row['fencing_token'])}",
-            logs=None,
-            root=None,
+            job_id=job_id,
+            operation_id=str(row["operation_id"]),
+            fencing_token=int(row["fencing_token"]),
         )
+        if taken is None:
+            continue
+        # Taking the job moved the fence: from here on the row is the reaper's attempt.
+        row = {**row, "fencing_token": taken}
+        ledger = BudgetLedger(database)
+        try:
+            _settle_prior_attempts(
+                ledger, owner_id=owner_id, project_id=project_id, task_id=str(row["task_id"]), job_id=job_id, fencing=taken
+            )
+            outcome = _stop_confirmed(
+                database,
+                store,
+                owner_id=owner_id,
+                project_id=project_id,
+                row=row,
+                reserved=False,
+                ledger=ledger,
+                request_key=attempt_request_key(job_id, taken),
+                logs=None,
+                root=None,
+            )
+        except _LeaseLost:
+            # Someone took the job again in the meantime; it is theirs to stop.
+            continue
         if outcome is not None:
             outcomes.append(outcome)
     return outcomes
@@ -167,11 +185,15 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
     if row is None:
         return {"coding_job_id": job_id, "state": "SKIPPED"}
     fencing = int(row["fencing_token"])
-    request_key = f"coding-{job_id}-{fencing}"
+    request_key = attempt_request_key(job_id, fencing)
+    fence = (job_id, fencing)
     reserved = False
     ledger = BudgetLedger(database)
     task_id = str(row["task_id"])
     try:
+        # The claim moved the fence, so this attempt books on a row of its own; an earlier
+        # attempt's reservation is closed here, not reused and not left held next to this one.
+        _settle_prior_attempts(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, job_id=job_id, fencing=fencing)
         early = _stop_confirmed(
             database,
             store,
@@ -271,6 +293,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     task_id=task_id,
                     request_key=request_key,
                     heartbeat=keep_lease,
+                    fence=fence,
                 )
 
             try:
@@ -321,6 +344,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     request_key=request_key,
                     reserved=True,
                     result=sandbox["result"],
+                    fence=fence,
                 )
                 reserved = False
             finally:
@@ -398,7 +422,9 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         code = exc.code if isinstance(exc, (CodingError, CodingSandboxError, WorkspaceError, ArtifactError)) else "coding_failed"
         if isinstance(exc, BudgetError):
             code = exc.code
-        _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
+        _release_hold(
+            ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved, fence=fence
+        )
         _clear_lease(
             database,
             owner_id=owner_id,
@@ -426,22 +452,27 @@ def _claim(database: Database, *, owner_id: str, project_id: str, job_id: str) -
             ).mappings().first()
             if row is None:
                 return None
+            # Every claim is a new holder, so it moves the fence: the worker whose lease lapsed may
+            # still be alive, and must fail to renew, publish, settle or clear from now on.
+            taken_fence = int(row["fencing_token"]) + 1
             taken = conn.execute(
                 text(
-                    "UPDATE operations SET lease_until = now() + make_interval(secs => :lease_seconds) "
+                    "UPDATE operations SET lease_until = now() + make_interval(secs => :lease_seconds), fencing_token = :taken_fence "
                     "WHERE project_id = :project_id AND id = :operation_id AND (lease_until IS NULL OR lease_until <= now())"
                 ),
-                {"lease_seconds": LEASE_SECONDS, "project_id": project_id, "operation_id": row["operation_id"]},
+                {"lease_seconds": LEASE_SECONDS, "taken_fence": taken_fence, "project_id": project_id, "operation_id": row["operation_id"]},
             ).rowcount
             if taken != 1:
                 return None
             updated = conn.execute(
                 text(
-                    "UPDATE coding_jobs SET state = 'STARTING', last_heartbeat_at = now(), container_reference = :name "
+                    "UPDATE coding_jobs SET state = 'STARTING', fencing_token = :taken_fence, last_heartbeat_at = now(), "
+                    "container_reference = :name "
                     "WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing AND operation_id = :operation_id"
                 ),
                 {
                     "name": container_name(job_id),
+                    "taken_fence": taken_fence,
                     "project_id": project_id,
                     "id": job_id,
                     "fencing": row["fencing_token"],
@@ -450,7 +481,9 @@ def _claim(database: Database, *, owner_id: str, project_id: str, job_id: str) -
             ).rowcount
             if updated != 1:
                 raise CodingError("fence_lost")
-        return dict(row)
+        claimed = dict(row)
+        claimed["fencing_token"] = taken_fence
+        return claimed
     except CodingError:
         return None
 
@@ -469,7 +502,15 @@ def _sandbox_stop(
     exc: CodingSandboxError,
 ) -> dict[str, str] | None:
     if exc.code in _UNCONFIRMED:
-        _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=str(row["task_id"]), request_key=request_key, reserved=reserved)
+        _release_hold(
+            ledger,
+            owner_id=owner_id,
+            project_id=project_id,
+            task_id=str(row["task_id"]),
+            request_key=request_key,
+            reserved=reserved,
+            fence=(str(row["id"]), int(row["fencing_token"])),
+        )
         _clear_lease(
             database,
             owner_id=owner_id,
@@ -521,8 +562,11 @@ def _stop_confirmed(
         return None
     confirmed = True if already_confirmed else confirm_coding_stop(job_id)
     state = terminal_state_after_stop(confirmed=confirmed, cancel=cancel)
+    fence = (job_id, int(row["fencing_token"]))
     if state is None:
-        _release_hold(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
+        _release_hold(
+            ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved, fence=fence
+        )
         _clear_lease(
             database,
             owner_id=owner_id,
@@ -534,7 +578,7 @@ def _stop_confirmed(
         pending = "cancel_unconfirmed" if cancel else "deadline_unconfirmed"
         return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": pending}
     workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
-    _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved)
+    _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=reserved, fence=fence)
     chosen = error_code or ("cancelled" if state == "CANCELLED" else "deadline_exceeded")
     stored = _publish_stop(
         database,
@@ -568,26 +612,172 @@ def _expired_rows(database: Database, *, owner_id: str, project_id: str) -> list
     return [dict(row) for row in rows]
 
 
-def _take_expired_lease(database: Database, *, owner_id: str, project_id: str, job_id: str, operation_id: str) -> bool:
-    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        taken = conn.execute(
+def _take_expired_lease(
+    database: Database, *, owner_id: str, project_id: str, job_id: str, operation_id: str, fencing_token: int
+) -> int | None:
+    """Take an expired job's lapsed lease for the reaper; the new fencing token, or None if not taken.
+
+    Like a claim, the take moves the fence, so a worker still alive on the old token loses the job.
+    """
+    taken_fence = fencing_token + 1
+    try:
+        with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            taken = conn.execute(
+                text(
+                    "UPDATE operations AS o SET lease_until = now() + make_interval(secs => :lease_seconds), fencing_token = :taken_fence "
+                    "FROM coding_jobs AS j "
+                    "WHERE o.project_id = :project_id AND o.id = :operation_id "
+                    "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
+                    "AND j.fencing_token = :fencing AND j.state = ANY(:states) AND j.deadline <= now() "
+                    "AND (o.lease_until IS NULL OR o.lease_until < now())"
+                ),
+                {
+                    "lease_seconds": LEASE_SECONDS,
+                    "taken_fence": taken_fence,
+                    "project_id": project_id,
+                    "operation_id": operation_id,
+                    "job_id": job_id,
+                    "fencing": fencing_token,
+                    "states": list(_OPEN),
+                },
+            ).rowcount
+            if taken != 1:
+                return None
+            moved = conn.execute(
+                text(
+                    "UPDATE coding_jobs SET fencing_token = :taken_fence "
+                    "WHERE project_id = :project_id AND id = :id AND operation_id = :operation_id AND fencing_token = :fencing"
+                ),
+                {"taken_fence": taken_fence, "project_id": project_id, "id": job_id, "operation_id": operation_id, "fencing": fencing_token},
+            ).rowcount
+            if moved != 1:
+                raise CodingError("fence_lost")  # rolls the lease back with it
+    except CodingError:
+        return None
+    return taken_fence
+
+
+def attempt_request_key(job_id: str, fencing: int) -> str:
+    """The parent reservation of one attempt. Every claim or reaper take is a new attempt and key."""
+    return f"coding-{job_id}-{fencing}"
+
+
+def _fence_guard(project_id: str, job_id: str, fencing: int) -> Callable[[Any], bool]:
+    """True while the job still carries this fencing token. Shares the row lock order with a claim."""
+
+    def held(conn: Any) -> bool:
+        return (
+            conn.execute(
+                text("SELECT 1 FROM coding_jobs WHERE project_id = :project_id AND id = :id AND fencing_token = :fencing FOR SHARE"),
+                {"project_id": project_id, "id": job_id, "fencing": fencing},
+            ).first()
+            is not None
+        )
+
+    return held
+
+
+def _settle_prior_attempts(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    job_id: str,
+    fencing: int,
+) -> None:
+    """Close every earlier attempt's parent reservation that is still held, for the attempt that took the job.
+
+    That attempt's proxy token carries the old fencing token, which the gateway now refuses, so the
+    row can no longer grow. It is closed as if its own drain had given up on every call still in
+    flight: pending tokens move to unknown_reserved_tokens and are charged at the reservation's
+    rate, measured tokens at their amount, and a late answer is not booked on top (proxy_drained).
+    A row that never admitted a call carried nothing to a provider and is released in full.
+    Each step is fenced on this attempt's token: if the job moves on again, the next holder does it.
+    """
+    prefix = f"coding-{job_id}-"
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        rows = conn.execute(
             text(
-                "UPDATE operations AS o SET lease_until = now() + make_interval(secs => :lease_seconds) "
-                "FROM coding_jobs AS j "
-                "WHERE o.project_id = :project_id AND o.id = :operation_id "
-                "AND j.project_id = o.project_id AND j.id = :job_id AND j.operation_id = o.id "
-                "AND j.state = ANY(:states) AND j.deadline <= now() "
-                "AND (o.lease_until IS NULL OR o.lease_until < now())"
+                "SELECT request_key FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND role = 'coding' AND usage_status = 'reserved' AND request_key LIKE :prefix ORDER BY request_key"
             ),
-            {
-                "lease_seconds": LEASE_SECONDS,
-                "project_id": project_id,
-                "operation_id": operation_id,
-                "job_id": job_id,
-                "states": list(_OPEN),
-            },
-        ).rowcount
-    return taken == 1
+            {"project_id": project_id, "task_id": task_id, "prefix": prefix + "%"},
+        ).mappings().all()
+    for item in rows:
+        key = str(item["request_key"])
+        suffix = key[len(prefix) :]
+        if not suffix.isdigit() or int(suffix) >= fencing:
+            continue
+        _close_prior_attempt(
+            ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=key, fence=(job_id, fencing)
+        )
+
+
+def _close_prior_attempt(
+    ledger: BudgetLedger,
+    *,
+    owner_id: str,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    fence: tuple[str, int],
+) -> None:
+    job_id, fencing = fence
+    with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        if not _fence_guard(project_id, job_id, fencing)(conn):
+            raise _LeaseLost(job_id)
+        raw = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+        ).scalar()
+        if raw is None:
+            return
+        detail = dict(raw) if isinstance(raw, dict) else dict(json.loads(raw) or {})
+        pending = detail.get("pending_tokens")
+        pending = pending if type(pending) is int and pending > 0 else 0
+        detail["proxy_drained"] = True
+        detail["superseded_by_fencing"] = fencing
+        if pending:
+            detail["takeover_pending_tokens"] = pending
+            detail["unknown_reserved_tokens"] = _count_detail(detail.get("unknown_reserved_tokens")) + pending
+            detail["pending_tokens"] = 0
+        conn.execute(
+            text(
+                "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+            ),
+            {"detail": json.dumps(detail), "project_id": project_id, "task_id": task_id, "request_key": request_key},
+        )
+        calls = conn.execute(
+            text(
+                "SELECT count(*) FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key LIKE :prefix"
+            ),
+            {"project_id": project_id, "task_id": task_id, "prefix": request_key + ":call:%"},
+        ).scalar()
+    _LOG.warning("coding_prior_attempt_closed request=%s fencing=%s pending=%s calls=%s", request_key, fencing, pending, calls)
+    silent = _measured_from_detail(detail) is None and _unknown_reserved_tokens(detail) == 0 and detail.get("usage_missing") is not True
+    if silent and not int(calls or 0):
+        # Every call opens its coding_call ticket before the provider is contacted; none means nothing was sent.
+        try:
+            ledger.cancel_unused(
+                owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key,
+                guard=_fence_guard(project_id, job_id, fencing),
+            )
+        except BudgetError as exc:
+            if exc.code == "fence_lost":
+                raise _LeaseLost(job_id) from exc
+            raise
+        return
+    _settle(ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, reserved=True, fence=fence)
+
+
+def _count_detail(value: object) -> int:
+    return value if type(value) is int and value > 0 else 0
 
 
 def _renew_lease(
@@ -1450,6 +1640,7 @@ def _drain_proxy(
     task_id: str,
     request_key: str,
     heartbeat: Callable[[], None] | None = None,
+    fence: tuple[str, int] | None = None,
 ) -> None:
     """Wait for in-flight model calls; one that outlasts the drain is charged at its reservation.
 
@@ -1466,6 +1657,8 @@ def _drain_proxy(
         return
     _LOG.warning("coding_proxy_drain_timeout job_request=%s unfinished=%s", request_key, unfinished)
     with ledger.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        if fence is not None and not _fence_guard(project_id, *fence)(conn):
+            raise _LeaseLost(fence[0])
         raw = conn.execute(
             text(
                 "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
@@ -1502,9 +1695,17 @@ def _settle(
     request_key: str,
     reserved: bool,
     result: dict[str, Any] | None = None,
+    fence: tuple[str, int] | None = None,
 ) -> None:
+    """Book the attempt's reservation. With fence, only while the job still carries that token.
+
+    A moved fence raises _LeaseLost and books nothing: the attempt that took the job closes this
+    row itself (_settle_prior_attempts). Tokens still pending here belong to calls whose answer
+    never reached the ledger after the drain; they are charged at the reservation like a timeout.
+    """
     if not reserved:
         return
+    guard = None if fence is None else _fence_guard(project_id, *fence)
     detail = _request_detail(
         ledger,
         owner_id=owner_id,
@@ -1515,18 +1716,11 @@ def _settle(
     usage = _measured_from_detail(detail)
     if usage is None:
         usage = _usage(result)
-    if usage is None:
-        _release_hold(
-            ledger,
-            owner_id=owner_id,
-            project_id=project_id,
-            task_id=task_id,
-            request_key=request_key,
-            reserved=True,
-        )
-        return
-    incoming, outgoing = usage
     try:
+        if usage is None:
+            ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, guard=guard)
+            return
+        incoming, outgoing = usage
         ledger.settle_measured(
             owner_id=owner_id,
             project_id=project_id,
@@ -1535,9 +1729,12 @@ def _settle(
             actual=incoming + outgoing,
             input_tokens=incoming,
             output_tokens=outgoing,
-            unknown_tokens=_unknown_reserved_tokens(detail),
+            unknown_tokens=_unknown_reserved_tokens(detail) + _count_detail(detail.get("pending_tokens")),
+            guard=guard,
         )
     except BudgetError as exc:
+        if exc.code == "fence_lost" and fence is not None:
+            raise _LeaseLost(fence[0]) from exc
         if exc.code not in {"unknown_not_zero", "not_reserved", "conflicting_settlement"}:
             raise
     except NoResultFound:
@@ -1567,10 +1764,13 @@ def _release_hold(
     task_id: str,
     request_key: str,
     reserved: bool,
+    fence: tuple[str, int] | None = None,
 ) -> None:
+    """Keep the hold as unknown. With fence, a moved fencing token leaves the row to the new holder."""
     if not reserved:
         return
+    guard = None if fence is None else _fence_guard(project_id, *fence)
     try:
-        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+        ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, guard=guard)
     except BudgetError:
         return

@@ -50,6 +50,7 @@ class _Job:
         monkeypatch.setattr(coding_model_proxy, "time", SimpleNamespace(monotonic=self.clock.monotonic))
         monkeypatch.setattr(coding_jobs, "BudgetLedger", lambda database: SimpleNamespace(database=database, reserve=lambda **_k: True))
         monkeypatch.setattr(coding_jobs, "_claim", lambda *_a, **_k: dict(row))
+        monkeypatch.setattr(coding_jobs, "_settle_prior_attempts", lambda *_a, **_k: None)
         monkeypatch.setattr(coding_jobs, "_stop_confirmed", lambda *_a, **_k: None)
         monkeypatch.setattr(coding_jobs, "_job_objective", lambda _row: "Make value() return 42.")
         monkeypatch.setattr(coding_jobs, "_workspace", lambda *_a, **_k: {})
