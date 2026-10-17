@@ -240,7 +240,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             drained = False
 
             def keep_lease() -> None:
-                # _renew_lease reports False when the lease expired or the fencing token moved on;
+                # Only an explicit True is a renewed lease (never fail open): False means it expired or the fencing token moved on;
                 # a database error propagates on its own.
                 renewed = _renew_lease(
                     database,
@@ -250,7 +250,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     job_id=job_id,
                     fencing_token=fencing,
                 )
-                if renewed is False:
+                if renewed is not True:
                     raise _LeaseLost(job_id)
 
             def drain_once() -> None:
