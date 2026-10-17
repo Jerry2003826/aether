@@ -16,7 +16,11 @@ from typing import Any, BinaryIO
 from docker.errors import DockerException
 
 from aether_worker.container_runtime import container_logs
-from aether_worker.openhands_image import IMAGE_UNAVAILABLE, RUN_IMAGE_REASONS, launch_image
+from aether_worker.openhands_image import (
+    IMAGE_UNAVAILABLE,
+    RUN_IMAGE_REASONS,
+    launch_image,
+)
 from aether_worker.runner import JOB_IMAGE, _docker, docker_available
 from aether_worker.sandbox_delegate import (
     SandboxDelegateError,
