@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import difflib
 import hashlib
+import ctypes
 import json
 import os
+import signal
 import socket
 import socketserver
 import sys
@@ -286,6 +288,106 @@ def _run_agent(job: Path, before: dict[str, str]) -> dict[str, object]:
     return report
 
 
+_PR_SET_CHILD_SUBREAPER = 36
+_REAP_GRACE_SECONDS = 2.0
+_REAP_DEADLINE_SECONDS = 10.0
+
+
+def become_subreaper() -> None:
+    """Orphans of the agent, including ones that call setsid twice, are reparented to this process."""
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        raise RuntimeError("subreaper_unavailable")
+
+
+def _process_table() -> dict[int, tuple[int, int, int, str]]:
+    """pid -> (ppid, pgid, sid, state), read from /proc."""
+    table: dict[int, tuple[int, int, int, str]] = {}
+    for entry in Path("/proc").iterdir():
+        if not entry.name.isdigit():
+            continue
+        try:
+            raw = (entry / "stat").read_text(encoding="ascii", errors="replace")
+        except OSError:
+            continue
+        fields = raw.rsplit(")", 1)[-1].split()
+        if len(fields) < 5:
+            continue
+        table[int(entry.name)] = (int(fields[1]), int(fields[2]), int(fields[3]), fields[0])
+    return table
+
+
+def _descendants(root: int) -> set[int]:
+    """Live descendants of root. With the subreaper set, escaped orphans stay in this tree."""
+    table = _process_table()
+    children: dict[int, list[int]] = {}
+    for pid, (ppid, _pgid, _sid, _state) in table.items():
+        children.setdefault(ppid, []).append(pid)
+    found: set[int] = set()
+    pending = list(children.get(root, []))
+    while pending:
+        pid = pending.pop()
+        if pid in found:
+            continue
+        found.add(pid)
+        pending.extend(children.get(pid, []))
+    # Process groups and sessions started inside the tree are swept too.
+    groups = {table[pid][1] for pid in found} | {table[pid][2] for pid in found}
+    groups.discard(os.getpgid(0))
+    groups.discard(os.getsid(0))
+    for pid, (_ppid, pgid, sid, _state) in table.items():
+        if pid != root and (pgid in groups or sid in groups):
+            found.add(pid)
+    return {pid for pid in found if pid in table and table[pid][3] != "Z"}
+
+
+def _reap_zombies() -> None:
+    while True:
+        try:
+            pid, _status = os.waitpid(-1, os.WNOHANG)
+        except ChildProcessError:
+            return
+        if pid == 0:
+            return
+
+
+def _signal_all(pids: set[int], sig: int) -> None:
+    table = _process_table()
+    groups = {table[pid][1] for pid in pids if pid in table} - {os.getpgid(0)}
+    for group in groups:
+        try:
+            os.killpg(group, sig)
+        except OSError:
+            pass
+    for pid in pids:
+        try:
+            os.kill(pid, sig)
+        except OSError:
+            pass
+
+
+def stop_agent_processes() -> None:
+    """Stop every process the agent left behind: SIGTERM, then SIGKILL after a grace period.
+
+    Raises when any process is still alive, so the job fails before tests are restored.
+    """
+    me = os.getpid()
+    grace = time.monotonic() + _REAP_GRACE_SECONDS
+    deadline = time.monotonic() + _REAP_DEADLINE_SECONDS
+    sig = signal.SIGTERM
+    while True:
+        _reap_zombies()
+        left = _descendants(me)
+        if not left:
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError("agent_processes_left")
+        if sig == signal.SIGTERM and time.monotonic() >= grace:
+            sig = signal.SIGKILL
+        _signal_all(left, sig)
+        time.sleep(0.05)
+
+
 def restore_baseline_tests(work: Path, job: Path) -> None:
     """Put the job-creation tests back and check their hashes before the protocol runs.
 
@@ -310,10 +412,12 @@ def restore_baseline_tests(work: Path, job: Path) -> None:
 def main() -> None:
     started = time.monotonic()
     try:
+        become_subreaper()
         job = job_directory()
         copy_tree(WORK, job)
         before = _snapshot(job)
         agent_report = _run_agent(job, before)
+        stop_agent_processes()
         restore_baseline_tests(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
