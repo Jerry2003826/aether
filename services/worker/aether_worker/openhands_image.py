@@ -5,8 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
+from typing import Any
 
-from aether_worker.container_runtime import build_context, image_id_with_label
+from docker.errors import DockerException, ImageNotFound
+
+from aether_worker.container_runtime import build_context, docker_client, image_id_with_label
 
 OPENHANDS_VERSION = "1.54.0"
 OPENHANDS_BASE = "python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f"
@@ -138,3 +141,52 @@ def build_openhands_sandbox() -> str:
         tag=sandbox_tag(),
         labels={"aether.openhands_sandbox": OPENHANDS_VERSION, HASH_LABEL: context_hash()},
     )
+
+
+class ImageUnavailable(LookupError):
+    """No image for tag. reason is one of:
+
+    image_unavailable        neither pull nor build was allowed
+    image_pull_failed        the pull was tried and failed, and build was not allowed
+    image_build_unsupported  build was allowed but this module can only build the OpenHands sandbox tag
+    image_build_failed       the build was tried and failed
+    """
+
+    def __init__(self, reason: str, tag: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+        self.tag = tag
+
+
+def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build: bool = True) -> str:
+    """Image id for tag: the local image if present, else a pull (allow_pull), else a build (allow_build).
+
+    Only ImageNotFound on the local lookup counts as missing; any other Docker error
+    (daemon unreachable) propagates. A pull that fails for any Docker reason (not found,
+    access denied, registry down) falls through to the build. Only the current OpenHands
+    sandbox tag can be built. When nothing yields an image this raises ImageUnavailable.
+    Call it before anything waits on a readiness timeout: a first build takes minutes.
+    """
+    try:
+        return str(client.images.get(tag).id)
+    except ImageNotFound:
+        pass
+    pull_error: DockerException | None = None
+    if allow_pull:
+        try:
+            return str(client.images.pull(tag).id)
+        except DockerException as exc:
+            pull_error = exc
+    if not allow_build:
+        raise ImageUnavailable("image_pull_failed" if allow_pull else "image_unavailable", tag) from pull_error
+    if tag != sandbox_tag():
+        raise ImageUnavailable("image_build_unsupported", tag) from pull_error
+    try:
+        return build_openhands_sandbox()
+    except (DockerException, OSError) as exc:
+        raise ImageUnavailable("image_build_failed", tag) from exc
+
+
+def ensure_openhands_sandbox(client: Any | None = None) -> str:
+    """The OpenHands sandbox image for the current context hash: local, pulled, or built here."""
+    return ensure_image(docker_client() if client is None else client, sandbox_tag())
