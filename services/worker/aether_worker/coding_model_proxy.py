@@ -17,6 +17,7 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 from aether_gateway.model import GatewayDenied, ModelGateway
@@ -116,15 +117,36 @@ class CodingModelProxy:
         with self._server.changed:
             return self._server.changed.wait_for(lambda: self._server.active == count, timeout=timeout)
 
-    def drain(self, *, timeout: float | None = None) -> int:
+    def drain(
+        self,
+        *,
+        timeout: float | None = None,
+        heartbeat: Callable[[], None] | None = None,
+        heartbeat_seconds: float | None = None,
+    ) -> int:
         """Stop accepting connections, then wait for the ones in flight. Returns how many are left.
 
         The listener is closed first, so nothing new starts while we wait. Handler threads
         are not interrupted: a call that is still forwarding keeps going and may still answer.
         0 means every in-flight call finished (its usage is recorded) within the timeout.
+
+        With a heartbeat, the wait is cut into slices of at most heartbeat_seconds and the
+        heartbeat runs between slices, so a caller can keep a lease alive for the whole wait.
+        An exception from the heartbeat ends the drain and propagates.
         """
         self._stop_listening()
-        self.wait_until_active(0, timeout=drain_seconds() if timeout is None else timeout)
+        total = drain_seconds() if timeout is None else timeout
+        if heartbeat is None or heartbeat_seconds is None or heartbeat_seconds <= 0:
+            self.wait_until_active(0, timeout=total)
+            return self.active_connections
+        deadline = time.monotonic() + total
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or self.wait_until_active(0, timeout=min(heartbeat_seconds, remaining)):
+                break
+            if deadline - time.monotonic() <= 0:
+                break
+            heartbeat()
         return self.active_connections
 
     def close(self) -> None:

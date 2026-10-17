@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -120,7 +121,7 @@ def test_the_lease_is_renewed_while_the_drain_waits_its_full_time(monkeypatch: p
     during = [moment for moment in job.renewed_at if 0 < moment <= DEFAULT_DRAIN_SECONDS]
     assert len(during) >= 2, job.renewed_at
     marks = [0.0, *during, DEFAULT_DRAIN_SECONDS]
-    gaps = [later - earlier for earlier, later in zip(marks, marks[1:], strict=False)]
+    gaps = [later - earlier for earlier, later in itertools.pairwise(marks)]
     assert max(gaps) < coding_jobs.LEASE_SECONDS, gaps
     assert job.settled == [pytest.approx(DEFAULT_DRAIN_SECONDS)]
     assert job.drains == 1

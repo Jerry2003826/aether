@@ -8,6 +8,7 @@ import logging
 import os
 import sys
 import tempfile
+from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -76,6 +77,14 @@ class CodingError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+class _LeaseLost(Exception):
+    """The lease could not be renewed: another worker may own the job, so this one must not settle."""
+
+
+# The proxy drain renews the lease this often, well inside LEASE_SECONDS.
+DRAIN_RENEW_SECONDS = LEASE_SECONDS / 3
 
 
 def lease_blocks_reap(*, deadline: datetime, lease_until: datetime | None, now: datetime) -> bool:
@@ -236,7 +245,27 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 if proxy is None or drained:
                     return
                 drained = True
-                _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+
+                def keep_lease() -> None:
+                    if not _renew_lease(
+                        database,
+                        owner_id=owner_id,
+                        project_id=project_id,
+                        operation_id=str(row["operation_id"]),
+                        job_id=job_id,
+                        fencing_token=fencing,
+                    ):
+                        raise _LeaseLost(job_id)
+
+                _drain_proxy(
+                    proxy,
+                    ledger,
+                    owner_id=owner_id,
+                    project_id=project_id,
+                    task_id=task_id,
+                    request_key=request_key,
+                    heartbeat=keep_lease,
+                )
 
             try:
                 proxy = CodingModelProxy(database, job_token=model_token)
@@ -355,6 +384,11 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         if not published:
             return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
         return {"coding_job_id": job_id, "state": state}
+    except _LeaseLost:
+        # Same as a fence lost at publish: the job is no longer ours, so nothing is settled,
+        # released or cleared here; the worker that holds the lease now finishes it.
+        _LOG.warning("coding_lease_lost_during_drain job=%s fencing=%s", job_id, fencing)
+        return {"coding_job_id": job_id, "state": "ACTIVE", "error_code": "fence_lost"}
     except (CodingError, CodingSandboxError, WorkspaceError, ArtifactError, BudgetError, OSError) as exc:
         code = exc.code if isinstance(exc, (CodingError, CodingSandboxError, WorkspaceError, ArtifactError)) else "coding_failed"
         if isinstance(exc, BudgetError):
@@ -559,9 +593,10 @@ def _renew_lease(
     operation_id: str,
     job_id: str,
     fencing_token: int,
-) -> None:
+) -> bool:
+    """Extend a lease this worker still holds. False when it had expired or the fencing token moved on."""
     with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        conn.execute(
+        renewed = conn.execute(
             text(
                 "UPDATE operations AS o SET lease_until = now() + make_interval(secs => :lease_seconds) "
                 "FROM coding_jobs AS j "
@@ -576,7 +611,7 @@ def _renew_lease(
                 "job_id": job_id,
                 "fencing": fencing_token,
             },
-        )
+        ).rowcount
         conn.execute(
             text(
                 "UPDATE coding_jobs SET last_heartbeat_at = now() "
@@ -591,6 +626,7 @@ def _renew_lease(
                 "states": list(_OPEN),
             },
         )
+    return renewed == 1
 
 
 def _clear_lease(
@@ -1376,14 +1412,19 @@ def _drain_proxy(
     project_id: str,
     task_id: str,
     request_key: str,
+    heartbeat: Callable[[], None] | None = None,
 ) -> None:
     """Wait for in-flight model calls; one that outlasts the drain is charged at its reservation.
 
     The tokens still pending on the reservation belong to calls that were admitted but never
     answered. They move to unknown_reserved_tokens, which _settle charges like a timeout.
     proxy_drained tells the gateway not to book a late answer on top of that charge.
+    The heartbeat keeps the lease alive between drain slices; if it raises, nothing is written.
     """
-    unfinished = proxy.drain()
+    if heartbeat is None:
+        unfinished = proxy.drain()
+    else:
+        unfinished = proxy.drain(heartbeat=heartbeat, heartbeat_seconds=DRAIN_RENEW_SECONDS)
     if unfinished <= 0:
         return
     _LOG.warning("coding_proxy_drain_timeout job_request=%s unfinished=%s", request_key, unfinished)
