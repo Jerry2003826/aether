@@ -7,6 +7,8 @@ import difflib
 import hashlib
 import json
 import os
+import secrets
+import shlex
 import signal
 import socket
 import socketserver
@@ -166,13 +168,48 @@ def _failure(detail: str) -> dict[str, object]:
     }
 
 
-def _protocol_payload(stdout: str) -> dict[str, object]:
-    for line in reversed(stdout.splitlines()):
-        if line.startswith("{") and line.endswith("}"):
+def _protocol_payload(stdout: str, nonce: str) -> dict[str, object]:
+    """The protocol's result: the one stdout line signed with this run's nonce.
+
+    Candidate code cannot learn the nonce (the protocol reads and deletes its file before any candidate
+    code runs), so a forged, missing or duplicated result fails the job as grading_unverified.
+    """
+    signed: list[dict[str, object]] = []
+    for line in stdout.splitlines():
+        if not (line.startswith("{") and line.endswith("}")):
+            continue
+        try:
             body = json.loads(line)
-            if isinstance(body, dict):
-                return body
-    raise json.JSONDecodeError("protocol", stdout, 0)
+        except ValueError:
+            continue
+        if isinstance(body, dict) and body.get("nonce") == nonce:
+            signed.append(body)
+    if len(signed) != 1:
+        raise GradingViolation("grading_unverified")
+    body = signed[0]
+    body.pop("nonce", None)
+    return body
+
+
+_PR_SET_DUMPABLE = 4
+
+
+def not_dumpable() -> None:
+    """Keep same-uid processes started during grading out of /proc/<entry>/{fd,mem,environ} (best effort)."""
+    try:
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_DUMPABLE, 0, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+
+
+def _nonce_file(nonce: str) -> Path:
+    """A private file holding the nonce; the protocol deletes it before it runs any candidate code."""
+    folder = Path(tempfile.mkdtemp(prefix="aether-nonce-"))
+    path = folder / "nonce"
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+        handle.write(nonce)
+    return path
 
 
 def job_directory() -> Path:
@@ -556,13 +593,20 @@ def main() -> None:
         # Grading files and caches are left out of it; tampering with them is caught separately.
         agent_report["patch"] = _patch(before, job)
         restore_grading_directory(WORK, job)
-        workspace = LocalWorkspace(working_dir=str(job))
-        result = workspace.execute_command(
-            f"{sys.executable} -I {PROTOCOL}",
-            cwd=str(job),
-            timeout=40,
-        )
-        payload = _protocol_payload(result.stdout or "")
+        not_dumpable()
+        nonce = secrets.token_hex(16)
+        secret = _nonce_file(nonce)
+        try:
+            workspace = LocalWorkspace(working_dir=str(job))
+            result = workspace.execute_command(
+                f"AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
+                cwd=str(job),
+                timeout=40,
+            )
+        finally:
+            secret.unlink(missing_ok=True)
+            secret.parent.rmdir()
+        payload = _protocol_payload(result.stdout or "", nonce)
     except SystemExit:
         raise
     except ObjectiveMissing:

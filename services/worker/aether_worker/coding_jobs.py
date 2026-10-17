@@ -1152,7 +1152,7 @@ def _job_objective(row: dict[str, Any]) -> str:
 
 
 # Case details the sandbox entry reports when the agent tampered with grading (exit code 1).
-GRADING_VIOLATIONS = frozenset({"grading_startup_hook", "grading_shadow_module"})
+GRADING_VIOLATIONS = frozenset({"grading_startup_hook", "grading_shadow_module", "grading_unverified"})
 
 
 def _grading_violation(sandbox: dict[str, Any]) -> str | None:

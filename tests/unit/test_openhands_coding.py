@@ -29,6 +29,10 @@ _PROMPT_TOKENS = 17
 _COMPLETION_TOKENS = 9
 
 
+# Stub protocols sign their one result line with the nonce the entry hands them, like coding_protocol.
+_SIGN = "import os as _os\n_NONCE = open(_os.environ['AETHER_PROTOCOL_NONCE_FILE']).read().strip()\n"
+
+
 def _call_names(node: ast.AST) -> list[str]:
     found: list[str] = []
     for child in ast.iter_child_nodes(node):
@@ -122,9 +126,9 @@ def test_agent_calls_the_model_socket_edits_the_file_and_strips_the_secret(tmp_p
     fake.start()
     protocol = tmp_path / "protocol.py"
     protocol.write_text(
-        "import json, os, sys, time\n"
+        _SIGN + "import json, os, sys, time\n"
         "time.sleep(0.3)\n"
-        "body = {"
+        "body = {'nonce': _NONCE, "
         "'passed': 1, 'failed': 0, 'errors': 0, "
         "'cases': [{'name': 'suite.test_value', 'verdict': 'PASS', 'detail': ''}], "
         "'elapsed_seconds': 0, "
@@ -208,8 +212,8 @@ def test_a_finish_call_leaves_the_candidate_file_unchanged(tmp_path: Path) -> No
     fake.start()
     protocol = tmp_path / "protocol.py"
     protocol.write_text(
-        "import json, sys\n"
-        "sys.stdout.write(json.dumps({'passed': 1, 'failed': 0, 'errors': 0, 'cases': []}) + '\\n')\n",
+        _SIGN + "import json, sys\n"
+        "sys.stdout.write(json.dumps({'nonce': _NONCE, 'passed': 1, 'failed': 0, 'errors': 0, 'cases': []}) + '\\n')\n",
         encoding="utf-8",
     )
     work = tmp_path / "work"
@@ -439,8 +443,8 @@ def _message_text(message: dict) -> str:
 def _entry_env(tmp_path: Path, fake: _SocketModel, **extra: str) -> dict[str, str]:
     protocol = tmp_path / "protocol.py"
     protocol.write_text(
-        "import json, sys\n"
-        "sys.stdout.write(json.dumps({'passed': 1, 'failed': 0, 'errors': 0, 'cases': []}) + '\\n')\n",
+        _SIGN + "import json, sys\n"
+        "sys.stdout.write(json.dumps({'nonce': _NONCE, 'passed': 1, 'failed': 0, 'errors': 0, 'cases': []}) + '\\n')\n",
         encoding="utf-8",
     )
     work = tmp_path / "work"
@@ -578,8 +582,8 @@ def test_published_patch_matches_the_workspace_that_is_graded(tmp_path: Path) ->
     fake.start()
     protocol = tmp_path / "protocol.py"
     protocol.write_text(
-        "import json, sys\n"
-        "body = {'passed': 1, 'failed': 0, 'errors': 0, 'cases': [], 'graded': open('app.py').read()}\n"
+        _SIGN + "import json, sys\n"
+        "body = {'nonce': _NONCE, 'passed': 1, 'failed': 0, 'errors': 0, 'cases': [], 'graded': open('app.py').read()}\n"
         "sys.stdout.write(json.dumps(body) + '\\n')\n",
         encoding="utf-8",
     )
