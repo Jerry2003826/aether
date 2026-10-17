@@ -735,3 +735,48 @@ def _read_http(reader) -> tuple[str, str, dict[str, str], bytes] | None:
     length = int(headers.get("content-length") or "0")
     raw = reader.read(length)
     return parts[0].upper(), parts[1], headers, raw
+
+
+def _sandbox_context(root: Path) -> None:
+    from aether_worker.openhands_image import DOCKERFILE
+
+    source = Path(__file__).resolve().parents[2]
+    for name in (
+        DOCKERFILE,
+        "environments/openhands/pyproject.toml",
+        "environments/openhands/uv.lock",
+        "services/worker/aether_worker/coding_protocol.py",
+        "services/worker/aether_worker/openhands_sandbox_entry.py",
+    ):
+        target = root / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes((source / name).read_bytes())
+    (root / "environments/openhands/wheels").mkdir(parents=True, exist_ok=True)
+    (root / "environments/openhands/wheels/local.whl").write_bytes(b"wheel")
+
+
+def test_sandbox_tag_hashes_the_build_context_and_lock_files(tmp_path: Path) -> None:
+    from aether_worker.openhands_image import DOCKERFILE, sandbox_tag
+
+    root = tmp_path / "repo"
+    _sandbox_context(root)
+    first = sandbox_tag(root)
+    assert first.startswith(f"aether-openhands-sandbox:{OPENHANDS_VERSION}-")
+    assert sandbox_tag(root) == first
+    seen = {first}
+    for name in (
+        DOCKERFILE,
+        "environments/openhands/uv.lock",
+        "environments/openhands/pyproject.toml",
+        "environments/openhands/wheels/local.whl",
+        "services/worker/aether_worker/coding_protocol.py",
+        "services/worker/aether_worker/openhands_sandbox_entry.py",
+    ):
+        path = root / name
+        original = path.read_bytes()
+        path.write_bytes(original + b"\n# changed\n")
+        changed = sandbox_tag(root)
+        assert changed not in seen, name
+        seen.add(changed)
+        path.write_bytes(original)
+        assert sandbox_tag(root) == first
