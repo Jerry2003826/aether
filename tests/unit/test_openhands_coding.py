@@ -963,6 +963,91 @@ def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_pat
     assert body["patch"] == expected
 
 
+_GRADING_REWRITER = (
+    "import os, signal, sys, time\n"
+    "job, ready = sys.argv[1], sys.argv[2]\n"
+    "def write(name, text):\n"
+    "    with open(os.path.join(job, name), 'w') as handle:\n"
+    "        handle.write(text)\n"
+    "write('test_app.py', 'def test_value():\\n    assert True\\n')\n"
+    "write('conftest.py', 'import app\\napp.value = lambda: 42\\n')\n"
+    "write('helper.py', 'def bonus():\\n    return 1\\n')\n"
+    "def late(*_args):\n"
+    "    write('test_app.py', 'def test_value():\\n    pass\\n')\n"
+    "    write('conftest.py', 'raise SystemExit(0)\\n')\n"
+    "    write('app.py', 'def value():\\n    return 42\\n')\n"
+    "    os._exit(0)\n"
+    "signal.signal(signal.SIGTERM, late)\n"
+    "write(ready, str(os.getpid()))\n"
+    "deadline = time.monotonic() + 60\n"
+    "while time.monotonic() < deadline:\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+def test_published_patch_excludes_grading_rewrites_even_from_late_background_writers(tmp_path: Path) -> None:
+    """The agent and a background writer it leaves behind rewrite tests, conftest and sources."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    writer = tmp_path / "rewriter.py"
+    writer.write_text(_GRADING_REWRITER, encoding="utf-8")
+    ready = tmp_path / "writer.pid"
+    job = tmp_path / "job"
+    command = (
+        f"(setsid sh -c 'setsid {sys.executable} {writer} {job} {ready} "
+        f">/dev/null 2>&1 </dev/null &' &) ; sleep 1"
+    )
+    fake = _SocketModel(terminal_command=command)
+    fake.start()
+    protocol = Path("services/worker/aether_worker/coding_protocol.py")
+    work = tmp_path / "work"
+    work.mkdir()
+    baseline_test = "import app\n\ndef test_value():\n    assert app.value() == 42\n"
+    baseline_conftest = "# baseline conftest\n"
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    (work / "test_app.py").write_text(baseline_test, encoding="utf-8")
+    (work / "conftest.py").write_text(baseline_conftest, encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if key != "AETHER_OBJECTIVE"}
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": "Make value() return 42.",
+            "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    pid = 0
+    try:
+        completed = _run_entry(tmp_path, env)
+        assert ready.is_file(), completed.stdout + completed.stderr
+        pid = int(ready.read_text(encoding="ascii"))
+    finally:
+        fake.close()
+        if pid and _alive(pid):
+            os.kill(pid, 9)
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    patch = body["patch"]
+    # Graded workspace: trusted tests restored, the late source edit kept.
+    assert (job / "test_app.py").read_text(encoding="utf-8") == baseline_test
+    assert (job / "conftest.py").read_text(encoding="utf-8") == baseline_conftest
+    assert (job / "app.py").read_text(encoding="utf-8") == "def value():\n    return 42\n"
+    # Published patch: source changes only, including the late one, and no grading-file change.
+    assert "+++ b/app.py" in patch and "+    return 42" in patch
+    assert "+++ b/helper.py" in patch
+    assert "test_app.py" not in patch
+    assert "conftest.py" not in patch
+    assert "assert True" not in patch and "SystemExit" not in patch
+    # It is exactly the baseline-to-graded diff (restored grading files contribute nothing).
+    assert patch == _expected_patch(work, job)
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+
+
 class _SocketModel:
     def __init__(
         self,
