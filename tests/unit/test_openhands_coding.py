@@ -1301,3 +1301,45 @@ def test_a_protocol_that_reports_nothing_is_a_grading_timeout_not_a_violation(tm
     assert completed.returncode == 1, completed.stdout + completed.stderr
     details = [case["detail"] for case in body["cases"] if case["name"] == "runner"]
     assert details == ["grading_timeout"], body
+
+
+@pytest.mark.parametrize("baseline_name", ["json.py", "decimal.py"])
+def test_a_rewritten_baseline_module_named_like_stdlib_is_restored_and_fails_the_job(
+    tmp_path: Path, baseline_name: str
+) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    script = (
+        "import os, sys\n"
+        "job = sys.argv[1]\n"
+        "open(job + '/app.py', 'w').write('def value():\\n    return 42\\n')\n"
+        f"open(os.path.join(job, {baseline_name!r}), 'w').write('raise SystemExit(0)\\n')\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            baseline_name: "VALUE = 1\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    job = tmp_path / "job"
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "grading_shadow_module"}]
+    assert (job / baseline_name).read_text(encoding="utf-8") == "VALUE = 1\n"
+
+
+def test_an_untouched_baseline_module_named_like_stdlib_does_not_fail_the_job(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    script = "import sys\nopen(sys.argv[1] + '/app.py', 'w').write('def value():\\n    return 42\\n')\n"
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "json.py": "VALUE = 1\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert body["cases"] == [{"name": "test_app.test_value", "verdict": "PASS", "detail": ""}]
