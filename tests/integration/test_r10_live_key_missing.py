@@ -20,11 +20,7 @@ from typing import ClassVar
 
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
-from aether_worker.goal_effect import (
-    WorkerEndpoints,
-    execute_task_effect,
-    materialize_goal_effect,
-)
+from aether_worker.goal_effect import WorkerEndpoints, materialize_goal_effect
 from aether_worker.outbox import enqueue_task
 from sqlalchemy import text
 
@@ -106,7 +102,7 @@ def _stop(proc: subprocess.Popen[bytes]) -> None:
 
 
 def test_missing_key_is_refused_unsent_uncharged_and_resumable(client, role_urls) -> None:
-    owner, project, _headers = _project(client)
+    owner, project, headers = _project(client)
     worker = Database(role_urls["aether_worker"])
     root = client.app.state.settings.artifact_root
     _Upstream.seen = []
@@ -154,16 +150,33 @@ def test_missing_key_is_refused_unsent_uncharged_and_resumable(client, role_urls
         if account is not None:
             assert (account["spent_micro_usd"], account["held_micro_usd"], account["tokens_used"]) == (0, 0, 0), account
 
-        # The key is configured: a gateway with it, and the review resolved (what approving
-        # resolve_review does: back to the stage it stopped in, resume state cleared).
+        # The key is configured: a gateway with it. The owner then approves the review through the
+        # API, exactly as the console does, and the worker runs the resolve_review command the API
+        # queued (what the workflow delivers): back to the stage it stopped in, then the research.
         _stop(keyless)
         keyed, keyed_base = _gateway(role_urls, base, _KEY)
+        listed = client.get(f"/v1/projects/{project}/approvals")
+        assert listed.status_code == 200, listed.text
+        pending = [item for item in listed.json()["items"] if item["task_id"] == created["task_id"]]
+        assert len(pending) == 1, pending
+        approval = pending[0]
+        assert approval["normalized_payload"]["action"] == "resolve_review", approval
+        assert approval["normalized_payload"]["code"] == "live_provider_unconfigured", approval
+        decided = client.post(
+            f"/v1/projects/{project}/approvals/{approval['id']}/decision",
+            headers={**headers, "Idempotency-Key": str(uuid.uuid4()), "If-Match": str(approval["version"])},
+            json={"decision": "approve", "expected_intent_hash": approval["intent_digest"]},
+        )
+        assert decided.status_code == 202, decided.text
+        resolve_key = f"resolve-{approval['id']}"
         with worker.transaction(owner_id=owner, project_id=project) as conn:
-            conn.execute(
-                text("UPDATE tasks SET status = 'RUNNING', resume_state = NULL WHERE project_id = :project AND id = :id AND status = 'NEEDS_REVIEW'"),
-                {"project": project, "id": created["task_id"]},
-            )
-        resumed = execute_task_effect(_endpoints(role_urls, root, base, keyed_base), payload)
+            queued = conn.execute(
+                text("SELECT kind FROM command_outbox WHERE project_id = :project AND task_id = :id AND command_key = :key"),
+                {"project": project, "id": created["task_id"], "key": resolve_key},
+            ).scalar_one()
+        assert queued == "resolve_review"
+        resolve = {**payload, "command_id": resolve_key}
+        resumed = materialize_goal_effect(_endpoints(role_urls, root, base, keyed_base), resolve)
         assert resumed.get("status") == "SUCCEEDED", resumed
         assert _Upstream.seen == [f"Bearer {_KEY}"]
     finally:
