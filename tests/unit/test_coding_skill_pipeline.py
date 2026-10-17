@@ -69,20 +69,30 @@ def _sandbox(passed: int, *, requests: int, edits: int = 0, patch: str = "") -> 
     }
 
 
+_AGENT_PATCH = "--- a/app.py\n+++ b/app.py\n@@\n-return 0\n+return 7\n"
+
+
+def _finished(passed: int = 1, *, requests: int = 2, patch: str = _AGENT_PATCH) -> dict:
+    """A conversation that reached FINISHED and changed a file."""
+    sandbox = _sandbox(passed, requests=requests, patch=patch)
+    sandbox["result"]["agent_completed"] = True
+    return sandbox
+
+
 def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish() -> None:
     parsed = parse_workspace(json.dumps(_workspace()).encode())
-    agent_patch = "--- a/app.py\n+++ b/app.py\n@@\n-return 0\n+return 7\n"
-    edited = _sandbox(1, requests=2, edits=1, patch=agent_patch)
+    edited = _sandbox(1, requests=2, edits=1, patch=_AGENT_PATCH)
     assert _patch_source(edited) == "agent_edit"
-    assert _published_patch(parsed, edited) == agent_patch.encode()
+    assert _published_patch(parsed, edited) == _AGENT_PATCH.encode()
     untouched = _sandbox(1, requests=1)
     assert _patch_source(untouched) == "candidate_files"
     assert b"return 42" in _published_patch(parsed, untouched)
-    assert _coding_terminal(untouched, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
+    done = _finished()
+    assert _coding_terminal(done, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
     blank = _sandbox(1, requests=0)
     assert _coding_terminal(blank, upstream_error=None, measured=None, usage_missing=False) == ("FAILED", "agent_interrupted")
     assert _coding_terminal(blank, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FAILED", "agent_interrupted")
-    interrupted = _sandbox(1, requests=2)
+    interrupted = _sandbox(1, requests=2, patch=_AGENT_PATCH)
     interrupted["result"]["agent_completed"] = False
     assert _coding_terminal(interrupted, upstream_error=None, measured=(5626, 243), usage_missing=False) == (
         "FAILED",
@@ -95,18 +105,56 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
         usage_missing=False,
         admission_error="budget_exceeded",
     ) == ("FAILED", "budget_exceeded")
-    completed = _sandbox(1, requests=1)
-    completed["result"]["agent_completed"] = True
-    assert _coding_terminal(completed, upstream_error=None, measured=(8, 4), usage_missing=False) == ("FINISHED", None)
-    assert _coding_terminal(untouched, upstream_error="upstream_http_400", measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(done, upstream_error="upstream_http_400", measured=(8, 4), usage_missing=False) == (
         "FAILED",
         "upstream_http_400",
     )
-    assert _coding_terminal(untouched, upstream_error=None, measured=None, usage_missing=True) == ("FAILED", "usage_missing")
-    assert _coding_terminal(_sandbox(0, requests=1), upstream_error=None, measured=(8, 4), usage_missing=False) == (
+    assert _coding_terminal(done, upstream_error=None, measured=None, usage_missing=True) == ("FAILED", "usage_missing")
+    assert _coding_terminal(_finished(0, requests=1), upstream_error=None, measured=(8, 4), usage_missing=False) == (
         "FAILED",
         "test_failed",
     )
+
+
+def test_a_passing_candidate_without_an_agent_change_cannot_finish() -> None:
+    """The candidate files already pass, but the agent changed nothing: that is not a finished job."""
+    for patch in ("", None, "diff --git a/app.py b/app.py\n", 7):
+        unchanged = _finished()
+        if patch is None:
+            del unchanged["result"]["patch"]
+        else:
+            unchanged["result"]["patch"] = patch
+        assert _coding_terminal(unchanged, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+            "FAILED",
+            "agent_no_change",
+        )
+    # The scripted no-upstream finish: one call, 8/4 usage, no edit.
+    scripted = _finished(requests=1, patch="")
+    scripted["result"]["edit_calls"] = 0
+    assert _coding_terminal(scripted, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+        "FAILED",
+        "agent_no_change",
+    )
+
+
+def test_an_unfinished_conversation_cannot_finish_even_with_a_patch_and_passing_tests() -> None:
+    stopped = _finished()
+    stopped["result"]["agent_completed"] = False
+    assert _coding_terminal(stopped, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+        "FAILED",
+        "agent_interrupted",
+    )
+    # A report without the flag is not proof that the conversation reached FINISHED.
+    for flag in (None, "true", 1):
+        unknown = _finished()
+        if flag is None:
+            del unknown["result"]["agent_completed"]
+        else:
+            unknown["result"]["agent_completed"] = flag
+        assert _coding_terminal(unknown, upstream_error=None, measured=(8, 4), usage_missing=False) == (
+            "FAILED",
+            "agent_interrupted",
+        )
 
 
 def test_a_terminal_only_agent_patch_is_published_without_file_editor_calls() -> None:
