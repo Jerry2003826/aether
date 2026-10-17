@@ -30,10 +30,6 @@ litellm.suppress_debug_info = True
 # name the upstream reports. It is a local estimate, not a provider bill.
 COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
-SCRIPTED_PROMPT_TOKENS = 8
-SCRIPTED_COMPLETION_TOKENS = 4
-# The fixed edit of the no-upstream substitute, run in the sandbox workspace by the terminal tool.
-SCRIPTED_EDIT_COMMAND = "sed -i 's/return 0$/return 42/' app.py"
 CODING_CALL_OUTPUT_CAP = 256
 CODING_MAX_MODEL_CALLS = 4
 # Upper-bound guess of input tokens from request bytes. Real tokenizers average
@@ -333,50 +329,6 @@ def _public(value: object, secret: str) -> str:
     return text
 
 
-def scripted_chat_completion(model: str, messages: object = None) -> dict[str, Any]:
-    """The no-upstream substitute: one real terminal edit, then finish.
-
-    The first turn (no tool result in ``messages`` yet) runs SCRIPTED_EDIT_COMMAND
-    through the terminal tool in the workspace, so the sandbox produces an agent
-    patch. Every later turn is a finish call. Each turn reports 8/4 tokens.
-    A workspace the command cannot change ends with an empty patch and fails as
-    agent_no_change; candidate files that already pass do not finish a job.
-    """
-    prompt = SCRIPTED_PROMPT_TOKENS
-    completion = SCRIPTED_COMPLETION_TOKENS
-    answered = isinstance(messages, list) and any(
-        isinstance(item, dict) and item.get("role") == "tool" for item in messages
-    )
-    if answered:
-        call = {"id": "call_finish", "name": "finish", "arguments": json.dumps({"message": "done"})}
-    else:
-        call = {"id": "call_edit", "name": "terminal", "arguments": json.dumps({"command": SCRIPTED_EDIT_COMMAND})}
-    return {
-        "id": "chatcmpl-aether-scripted",
-        "object": "chat.completion",
-        "created": 0,
-        "model": model,
-        "choices": [
-            {
-                "index": 0,
-                "finish_reason": "tool_calls",
-                "message": {
-                    "role": "assistant",
-                    "content": None,
-                    "tool_calls": [
-                        {
-                            "id": call["id"],
-                            "type": "function",
-                            "function": {"name": call["name"], "arguments": call["arguments"]},
-                        }
-                    ],
-                },
-            }
-        ],
-        "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion},
-    }
-
-
 def _completion_text(response: Any) -> tuple[str | None, str | None]:
     """Visible answer text and finish_reason.
 
@@ -580,6 +532,22 @@ class ModelGateway:
         if not _alias_matches(model, aliases):
             raise GatewayDenied("alias_denied")
         alias = model.removeprefix("openai/") or model
+        if not self.upstream_base:
+            # No upstream means no model. Nothing scripted answers in its place, so no
+            # file is changed and the job fails as model_unavailable instead of passing.
+            self._note_admission_block(grant, "model_unavailable")
+            self._log_relay(
+                project_id=str(grant["project_id"]),
+                status=None,
+                requested_model=model,
+                upstream_model="",
+                stream=body.get("stream") is True,
+                response_kind="",
+                incoming=None,
+                outgoing=None,
+                error="model_unavailable",
+            )
+            raise GatewayDenied("model_unavailable", sent=False)
         prompt = chat_prompt(body)
         try:
             max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
@@ -603,11 +571,7 @@ class ModelGateway:
         upstream_model = str(payload.get("model") or "")
         client_stream = body.get("stream") is True
         try:
-            if not self.upstream_base:
-                self._response_kind = "scripted"
-                result = scripted_chat_completion(model or "coder", body.get("messages"))
-            else:
-                result = self._post_upstream(payload)
+            result = self._post_upstream(payload)
         except GatewayDenied as exc:
             self._note_upstream_failure(grant, exc, release_pending=True)
             self._log_relay(
@@ -978,7 +942,10 @@ class ModelGateway:
             )
 
     def _note_admission_block(self, session: dict[str, Any], code: str) -> None:
-        """Remember a pre-upstream budget rejection. The hold stays until measured usage is settled."""
+        """Remember a pre-upstream rejection (budget_exceeded, model_unavailable) on the parent reservation.
+
+        The worker reads it as the job's error code. The hold stays until measured usage is settled.
+        """
         project_id = str(session["project_id"])
         task_id = str(session["task_id"])
         parent_key = str(session["scope"]["request_key"])
