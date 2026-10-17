@@ -169,7 +169,13 @@ class CodingModelProxy:
 
     @property
     def revoked_in_band(self) -> bool:
-        """The sandbox itself closed the channel (before its container ended), not the worker's backstop."""
+        """True when the first revoke was an authenticated POST to REVOKE_PATH over the socket (the
+        sandbox entry's), False when nothing revoked yet or the worker's revoke() came first.
+
+        The proxy does not know the container's lifetime. coding_jobs reads this once, after
+        run_coding_sandbox has returned (the container has exited and its logs were read) and
+        before its own revoke() in the drain, so True there means the in-band revoke happened
+        while the container ran. Later revokes never change it."""
         return self._revoked_by == "sandbox"
 
     def wait_until_revoked(self, *, timeout: float) -> bool:

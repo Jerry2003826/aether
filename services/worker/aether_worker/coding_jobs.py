@@ -307,7 +307,9 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                     if stopped is not None:
                         return stopped
                     raise
-                # Read before the worker's own revoke: did the sandbox close the channel before it graded?
+                # Read once, here: run_coding_sandbox has returned (the container exited) and the
+                # worker's own revoke in drain_once has not run yet, so this is whether the sandbox
+                # entry revoked in band while its container ran. Not read on the CodingSandboxError path.
                 channel_revoked = proxy.revoked_in_band
                 # A call can still be forwarding after the agent exits; settle only once it is done.
                 drain_once()
@@ -1282,8 +1284,10 @@ def _coding_terminal(
     files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
     terminal-only change shows up in the patch. channel_revoked (required, so
-    no caller can skip the check by forgetting it) is whether the proxy saw the sandbox
-    revoke the model channel; graded results without it are FAILED/model_channel_open.
+    no caller can skip the check by forgetting it) is proxy.revoked_in_band as read by
+    _run_one after the container exited and before the worker's own revoke: whether the
+    sandbox entry revoked the model channel in band. Graded results without it are
+    FAILED/model_channel_open.
     """
     result = sandbox.get("result")
     body = result if isinstance(result, dict) else {}
@@ -1293,7 +1297,8 @@ def _coding_terminal(
     if body.get("network_errno") == 0:
         return "FAILED", "network_open"
     # The sandbox could not confirm the model channel closed and skipped grading; or (channel_revoked
-    # false: the proxy saw no in-band revoke) it reports grading that ran with the channel open.
+    # false: no in-band revoke was recorded by the time the container exited) it reports grading
+    # that may have run with the channel open.
     if MODEL_CHANNEL_OPEN in _runner_details(sandbox) or (not channel_revoked and _graded(body)):
         return "FAILED", MODEL_CHANNEL_OPEN
     violation = _grading_violation(sandbox)
