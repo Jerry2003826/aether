@@ -269,3 +269,15 @@ def test_a_lease_lost_while_the_sandbox_polls_is_fence_lost_and_never_settled(mo
     assert job.released == []
     assert job.stopped == []
     assert failed == []
+
+
+@pytest.mark.parametrize("answer", [None, 1, "yes"])
+def test_only_an_explicit_true_counts_as_a_renewed_lease(monkeypatch: pytest.MonkeyPatch, answer: Any) -> None:
+    # The liveness check must not fail open: anything but True from _renew_lease is a lost lease.
+    job = _Job(monkeypatch)
+    monkeypatch.setattr(coding_jobs, "_renew_lease", lambda *_a, **_k: answer)
+    outcome = job.run()
+    assert outcome == {"coding_job_id": _JOB, "state": "ACTIVE", "error_code": "fence_lost"}
+    assert job.settled == []
+    assert job.published == []
+    assert job.released == []

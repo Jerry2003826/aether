@@ -58,7 +58,7 @@ class _Harness:
         monkeypatch.setattr(coding_jobs, "_operation", lambda *_a, **_k: None)
         monkeypatch.setattr(coding_jobs, "_materialize", lambda *_a, **_k: None)
         monkeypatch.setattr(coding_jobs, "_issue_coding_token", lambda *_a, **_k: "job-token-drain")
-        monkeypatch.setattr(coding_jobs, "_renew_lease", lambda *_a, **_k: None)
+        monkeypatch.setattr(coding_jobs, "_renew_lease", lambda *_a, **_k: True)
         monkeypatch.setattr(coding_jobs, "_manifest", lambda *_a, **_k: [])
         monkeypatch.setattr(coding_jobs, "_publish", lambda *_a, **_k: True)
         monkeypatch.setattr(coding_jobs, "_clear_lease", lambda *_a, **_k: None)
