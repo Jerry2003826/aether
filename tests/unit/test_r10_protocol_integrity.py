@@ -200,3 +200,76 @@ def test_a_real_virtualenv_with_pyvenv_cfg_is_skipped(tmp_path: Path) -> None:
         )
         code, body = _grade(root)
         assert (code, body["passed"], body["failed"]) == (0, 1, 0), (venv, body)
+
+
+def test_a_failing_test_in_a_subdirectory_fails_the_suite(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_a.py": "def test_a():\n    pass\n",
+            "tests/test_strict.py": "import app\n\ndef test_strict():\n    assert app.value() == 42\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert code == 1, body
+    assert {"name": "tests.test_strict.test_strict", "verdict": "FAIL", "detail": "AssertionError"} in body["cases"], body
+
+
+def test_subdirectory_tests_are_discovered_run_and_counted(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "oracle.py": "def expected():\n    return 42\n",
+            "test_a.py": "def test_a():\n    pass\n",
+            # Not a package: sibling helpers import by bare name, like pytest's default rootdir mode.
+            "tests/helpers.py": "import oracle\n\ndef want():\n    return oracle.expected()\n",
+            "tests/test_plain.py": "import app\nimport helpers\n\ndef test_plain():\n    assert app.value() == helpers.want()\n",
+            # A package with a nested non-package directory.
+            "pkgtests/__init__.py": "",
+            "pkgtests/support.py": "VALUE = 42\n",
+            "pkgtests/test_pkg.py": "import app\nfrom pkgtests.support import VALUE\n\ndef test_pkg():\n    assert app.value() == VALUE\n",
+            "tests/unit/test_x.py": "import app\n\ndef test_x():\n    assert app.value() == 42\n",
+            "test/deep/check_test.py": "import app\n\ndef test_suffix():\n    assert app.value() == 42\n",
+            # Same basename at two levels: both run, neither hides the other.
+            "tests/unit/test_a.py": "def test_a():\n    pass\n",
+            # Skipped trees are never collected.
+            "node_modules/x/test_ignored.py": "def test_ignored():\n    raise AssertionError\n",
+            ".venv/pyvenv.cfg": "home = /usr/bin\n",
+            ".venv/lib/test_ignored.py": "def test_ignored():\n    raise AssertionError\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    names = {case["name"] for case in body["cases"] if case["verdict"] == "PASS"}
+    assert names == {
+        "test_a.test_a",
+        "tests.test_plain.test_plain",
+        "pkgtests.test_pkg.test_pkg",
+        "tests.unit.test_x.test_x",
+        "test.deep.check_test.test_suffix",
+        "tests.unit.test_a.test_a",
+    }, body
+    assert (code, body["passed"], body["failed"]) == (0, 6, 0), body
+
+
+def test_test_files_created_during_the_run_are_never_graded(tmp_path: Path) -> None:
+    """Trusted tests are collected from the baseline snapshot before any candidate code runs."""
+    _write(
+        tmp_path,
+        {
+            "app.py": (
+                "import pathlib\n"
+                "for name in ('test_zz.py', 'tests/test_zz.py', 'tests/deep/zz_test.py'):\n"
+                "    path = pathlib.Path(__file__).parent / name\n"
+                "    path.parent.mkdir(parents=True, exist_ok=True)\n"
+                "    path.write_text('def test_extra():\\n    pass\\n')\n"
+                "def value():\n    return 42\n"
+            ),
+            "test_a.py": "import app\n\ndef test_a():\n    assert app.value() == 42\n",
+            "tests/test_b.py": "import app\n\ndef test_b():\n    assert app.value() == 42\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert {case["name"] for case in body["cases"]} == {"test_a.test_a", "tests.test_b.test_b"}, body
+    assert (code, body["passed"], body["failed"]) == (0, 2, 0), body
