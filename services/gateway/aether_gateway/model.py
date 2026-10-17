@@ -1273,6 +1273,8 @@ class ModelGateway:
                 # The error body gets the same overall deadline and byte cap as a 2xx body.
                 detail = _read_error_body(exc, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
             except GatewayDenied as cut:
+                # An over-cap non-2xx call keeps upstream_status, so it settles as a known HTTP
+                # error rather than at its reservation (providers generally do not bill 5xx).
                 raise GatewayDenied(cut.code, sent=True, upstream_status=status_code or None) from exc
             except TimeoutError as timed_out:
                 raise GatewayDenied("upstream_error", sent=True, upstream_status=status_code or None) from timed_out
