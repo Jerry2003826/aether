@@ -6,7 +6,6 @@ import subprocess
 from pathlib import Path
 
 import pytest
-
 from aether_worker import coding_sandbox
 from aether_worker.coding_jobs import _agent_patch, _coding_terminal
 

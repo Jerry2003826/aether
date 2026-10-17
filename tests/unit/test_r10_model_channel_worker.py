@@ -8,7 +8,6 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from aether_worker import coding_jobs
 from aether_worker.coding_jobs import _coding_terminal
 from aether_worker.coding_model_proxy import CodingModelProxy
