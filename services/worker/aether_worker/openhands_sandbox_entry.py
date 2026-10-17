@@ -552,7 +552,8 @@ def main() -> None:
         agent_report = _run_agent(job, objective)
         stop_agent_processes()
         # Taken only once nothing the agent started can still write, and before grading files
-        # are restored, so the published patch is the code that gets graded (plus any tampering).
+        # are restored, so the published patch is the agent's source change that gets graded.
+        # Grading files and caches are left out of it; tampering with them is caught separately.
         agent_report["patch"] = _patch(before, job)
         restore_grading_directory(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
