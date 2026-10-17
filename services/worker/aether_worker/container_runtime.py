@@ -202,6 +202,9 @@ def _pull(args: list[str]) -> subprocess.CompletedProcess[str]:
 def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProcess[str]:
     parsed = _parse_run(args)
     kwargs = {key: value for key, value in parsed["kwargs"].items() if value is not None}
+    missing = _ensure_run_image(parsed["image"])
+    if missing is not None:
+        return missing
     container = docker_client().containers.run(parsed["image"], parsed["command"], detach=True, **kwargs)
     if parsed["detach"]:
         return _ok(str(container.id) + "\n", "")
@@ -229,6 +232,28 @@ def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProce
                 container.remove(force=True)
             except DockerException:
                 pass
+
+
+def _ensure_run_image(image: str) -> subprocess.CompletedProcess[str] | None:
+    """Before a run, make a missing `image` present: never build; pull unless it is a locally built sandbox tag.
+
+    A present image is used as is. Returns a failed result whose stderr is the ImageUnavailable
+    reason (image_unavailable, image_pull_failed or image_label_mismatch), or None to go ahead.
+    """
+    client = docker_client()
+    try:
+        client.images.get(image)
+        return None
+    except ImageNotFound:
+        pass
+    from aether_worker import openhands_image  # openhands_image imports this module
+
+    local_only = image.rsplit("/", 1)[-1].split(":", 1)[0] == openhands_image.SANDBOX_REPOSITORY
+    try:
+        openhands_image.ensure_image(client, image, allow_pull=not local_only, allow_build=False)
+    except openhands_image.ImageUnavailable as exc:
+        return _failed(exc.reason)
+    return None
 
 
 def _exec(args: list[str]) -> subprocess.CompletedProcess[str]:

@@ -277,6 +277,10 @@ def _coding_body(model: str, *, repair: str | None) -> dict[str, Any]:
     }
 
 
+# ImageUnavailable reasons execute_docker reports for a run whose image could not be made present.
+_IMAGE_REASONS = frozenset({"image_unavailable", "image_pull_failed", "image_label_mismatch"})
+
+
 def _isolation_command() -> list[str]:
     return ["docker", "run", "--rm", *ISOLATION_FLAGS, ISOLATION_IMAGE, "python", "-c", ISOLATION_SCRIPT]
 
@@ -315,8 +319,15 @@ def _linux_isolation(secret: str) -> dict[str, Any]:
         "secret_present": "key True" in (completed.stdout or ""),
     }
     if completed.returncode != 0:
-        reason = "image_unavailable" if "Unable to find image" in output or "pull access denied" in output else "container_failed"
-        evidence["status"] = NOT_RUN if reason == "image_unavailable" else "fail"
+        stderr = (completed.stderr or "").strip()
+        if stderr in _IMAGE_REASONS:
+            # ensure_image ran before the container: ImageUnavailable.reason is the not_run reason.
+            reason = stderr
+        elif "Unable to find image" in output or "pull access denied" in output:
+            reason = "image_unavailable"
+        else:
+            reason = "container_failed"
+        evidence["status"] = NOT_RUN if reason in _IMAGE_REASONS else "fail"
         evidence["reason"] = reason
         return evidence
     secret_absent = "key False" in (completed.stdout or "")

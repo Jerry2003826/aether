@@ -24,6 +24,11 @@ class _Container:
         return None
 
 
+class _Image:
+    def __init__(self, reference: str) -> None:
+        self.id = "sha256:" + reference.encode().hex()[:12]
+
+
 class _Images:
     def __init__(self, client: _Client, *, pull_fails: bool) -> None:
         self._client = client
@@ -33,14 +38,18 @@ class _Images:
     def get(self, reference: str) -> object:
         if reference not in self._client.present:
             raise ImageNotFound(f"No such image: {reference}")
-        return object()
+        return _Image(reference)
 
     def pull(self, repository: str, tag: str | None = None, **_kwargs: object) -> object:
+        # Like docker-py: a digest or tag may come inside the repository argument.
+        if tag is None and "@" in repository:
+            repository, tag = repository.split("@", 1)
         self.pulls.append((repository, tag))
         if self._pull_fails:
             raise APIError("pull access denied")
-        self._client.present.add(f"{repository}@{tag}" if tag and tag.startswith("sha256:") else f"{repository}:{tag}")
-        return object()
+        reference = f"{repository}@{tag}" if tag and tag.startswith("sha256:") else f"{repository}:{tag}"
+        self._client.present.add(reference)
+        return _Image(reference)
 
 
 class _Containers:

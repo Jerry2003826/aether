@@ -20,6 +20,10 @@ class _ImageApi:
     def pull(self, repository: str, tag: str | None = None) -> None:
         self.pulled = (repository, tag)
 
+    def get(self, reference: str) -> object:
+        # Every image is present locally, so a run never needs ensure_image.
+        return object()
+
 
 class _Container:
     def __init__(self) -> None:
@@ -162,6 +166,7 @@ class _StreamContainers:
 class _StreamClient:
     def __init__(self) -> None:
         self.containers = _StreamContainers()
+        self.images = _ImageApi()
 
 
 def test_exec_kill_and_log_tail_use_the_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
