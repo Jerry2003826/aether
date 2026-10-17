@@ -27,6 +27,9 @@ from aether_worker.loopback import LoopbackError, post_json
 _MAX_BODY = 1_048_576
 _MAX_LINE = 8192
 _CHAT_PATHS = {"/v1/chat/completions", "/chat/completions"}
+# The sandbox entry posts here (with the job token) to end the model channel before grading.
+# openhands_sandbox_entry.py runs in the sandbox image and carries the same literal.
+REVOKE_PATH = "/aether/revoke"
 _SANDBOX_UID = 65534
 _ACL_USER_OBJ = 0x01
 _ACL_USER = 0x02
@@ -85,6 +88,9 @@ class CodingModelProxy:
         self.job_token = job_token
         self._closed = False
         self._listening = True
+        self._listen_lock = threading.Lock()
+        self._revoked = False
+        self._stopped = threading.Event()
         self.directory = Path(tempfile.mkdtemp(prefix="aether-model-"))
         try:
             _grant_directory(self.directory)
@@ -149,6 +155,10 @@ class CodingModelProxy:
             heartbeat()
         return self.active_connections
 
+    def wait_until_revoked(self, *, timeout: float) -> bool:
+        """Block until a revoke has removed the socket and closed the listener, or `timeout` passes."""
+        return self._revoked and self._stopped.wait(timeout)
+
     def close(self) -> None:
         if self._closed:
             return
@@ -157,18 +167,37 @@ class CodingModelProxy:
         shutil.rmtree(self.directory, ignore_errors=True)
 
     def _stop_listening(self) -> None:
-        if self._listening:
-            self._listening = False
-            self._server.shutdown()
-            self._server.server_close()
+        with self._listen_lock:
+            if self._listening:
+                self._listening = False
+                self._server.shutdown()
+                self._server.server_close()
+        self._stopped.set()
+
+    def _revoke(self) -> None:
+        """End the model channel for the rest of the job: no more model calls, and the socket is gone.
+
+        The sandbox calls this (with the job token) once the agent phase ends and before it runs
+        candidate code for grading, so that code cannot reach the paid model. The socket file is
+        unlinked here on the host (the container cannot remove it), so a later connect fails with
+        ENOENT; the listener is closed on a separate thread so this answer can still be written.
+        """
+        self._revoked = True
+        self.socket_path.unlink(missing_ok=True)
+        threading.Thread(target=self._stop_listening, daemon=True).start()
 
     def respond(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
-        if method != "POST" or path not in _CHAT_PATHS:
+        if method != "POST" or (path not in _CHAT_PATHS and path != REVOKE_PATH):
             return 404, {"error": "not_found"}
         expected = f"Bearer {self.job_token}"
         presented = headers.get("authorization", "")
         if not secrets.compare_digest(presented, expected):
             return 401, {"error": "unauthorized"}
+        if path == REVOKE_PATH:
+            self._revoke()
+            return 200, {"revoked": True}
+        if self._revoked:
+            return 401, {"error": "revoked"}
         try:
             loaded = json.loads(raw.decode()) if raw else {}
         except (UnicodeError, json.JSONDecodeError):

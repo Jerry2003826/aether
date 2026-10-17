@@ -137,6 +137,45 @@ def network_errno() -> int | None:
         sock.close()
 
 
+# The agent phase's model channel. coding_model_proxy.REVOKE_PATH is the host side of this literal.
+_MODEL_ENV = ("AETHER_MODEL_SOCKET", "AETHER_JOB_TOKEN", "AETHER_MODEL_ALIAS")
+_REVOKE_PATH = "/aether/revoke"
+_REVOKE_TIMEOUT_SECONDS = 5.0
+
+
+def close_model_channel() -> None:
+    """Take the model channel away before any candidate code runs for grading.
+
+    The job token and socket path leave this process's environment, so nothing started from here
+    inherits them, and the host proxy is asked (with the token) to revoke the job: it refuses later
+    model calls and unlinks the socket, which this unprivileged process could not remove itself.
+    Revoking is best effort; we wait briefly for the socket file to disappear.
+    """
+    socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
+    token = os.environ.get("AETHER_JOB_TOKEN", "")
+    for name in _MODEL_ENV:
+        os.environ.pop(name, None)
+    if not socket_path or not token:
+        return
+    request = (
+        f"POST {_REVOKE_PATH} HTTP/1.1\r\nhost: aether-proxy\r\nauthorization: Bearer {token}\r\n"
+        "content-length: 0\r\nconnection: close\r\n\r\n"
+    ).encode("ascii")
+    deadline = time.monotonic() + _REVOKE_TIMEOUT_SECONDS
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as channel:
+            channel.settimeout(_REVOKE_TIMEOUT_SECONDS)
+            channel.connect(socket_path)
+            channel.sendall(request)
+            while channel.recv(4096):
+                pass
+    except OSError:
+        sys.stderr.write("model_channel_revoke_failed\n")
+        return
+    while os.path.lexists(socket_path) and time.monotonic() < deadline:
+        time.sleep(0.05)
+
+
 def credential_present() -> bool:
     markers = ("LIVE_MODEL", "ADMIN_DATABASE", "PASSWORD", "SECRET")
     return any(any(part in name for part in markers) for name in os.environ)
@@ -639,6 +678,7 @@ def main() -> None:
         before = _snapshot(job)
         agent_report = _run_agent(job, objective)
         stop_agent_processes()
+        close_model_channel()
         # Taken only once nothing the agent started can still write, and before grading files
         # are restored, so the published patch is the agent's source change that gets graded.
         # Grading files and caches are left out of it; tampering with them is caught separately.

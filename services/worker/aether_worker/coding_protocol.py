@@ -294,7 +294,7 @@ class _Session:
     def _start(self) -> None:
         child_in, to_child = os.pipe()
         from_child, child_out = os.pipe()
-        env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_PROTOCOL_")}
+        env = _child_env()
         try:
             self._process = subprocess.Popen(  # this interpreter running this file
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--candidate", str(child_in), str(child_out), str(os.getpid())],
@@ -711,8 +711,22 @@ def _call_timeout(test_timeout: float) -> float:
     return min(configured, test_timeout * 0.75)
 
 
+# Name fragments of credentials a child must never inherit (upper-cased match).
+_CREDENTIAL_MARKERS = ("API_KEY", "TOKEN", "SECRET", "PASSWORD", "CREDENTIAL", "ACCESS_KEY", "PRIVATE_KEY", "DATABASE_URL")
+
+
 def _child_env() -> dict[str, str]:
-    return {key: value for key, value in os.environ.items() if not key.startswith("AETHER_PROTOCOL_")}
+    """Environment for the candidate and test processes: no AETHER_* settings and nothing credential-like.
+
+    The agent phase ran with the model channel (AETHER_JOB_TOKEN, AETHER_MODEL_SOCKET, ...); none of
+    it, nor any other credential, may reach candidate code while it is graded, or that code could
+    notice grading and call the paid model. The protocol's own settings never travel by env either.
+    """
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not key.upper().startswith("AETHER_") and not any(marker in key.upper() for marker in _CREDENTIAL_MARKERS)
+    }
 
 
 _PR_SET_PDEATHSIG = 1
