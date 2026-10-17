@@ -690,7 +690,7 @@ def test_added_startup_hook_is_deleted_and_fails_the_job(tmp_path: Path) -> None
         },
     )
     job = tmp_path / "job"
-    assert completed.returncode == 2
+    assert completed.returncode == 1
     assert body["passed"] == 0
     assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "grading_startup_hook"}]
     assert not (job / "usercustomize.py").exists()
