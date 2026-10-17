@@ -273,3 +273,25 @@ def test_candidate_cannot_signal_the_test_or_grader_process(tmp_path: Path) -> N
         "test_signal.test_can_signal_its_own_children": ("PASS", ""),
     }, body
     assert code == 0, body
+
+
+def test_candidate_files_over_the_cap_are_left_out_and_logged_by_name(tmp_path: Path) -> None:
+    # The per-step copy is bounded (8 MiB) so copying cannot eat the protocol budget; what is left out
+    # is logged by name and count, never by content.
+    mib = 1024 * 1024
+    marker = "CONTENT-MARKER-6d1f"
+    (tmp_path / "big1.bin").write_bytes((marker + "\n").encode() * (5 * mib // 20))
+    (tmp_path / "big2.bin").write_bytes((marker + "\n").encode() * (5 * mib // 20))
+    _write(
+        tmp_path,
+        {
+            "app.py": "import os\n\ndef present():\n    return sorted(name for name in os.listdir('.') if name.endswith('.bin'))\n",
+            "test_cap.py": "import app\n\ndef test_present():\n    assert app.present() == ['big1.bin']\n",
+        },
+    )
+    code, body, output = _grade(tmp_path)
+    assert body is not None, output
+    assert code == 0, body
+    assert "candidate_files_dropped count=1 " in output, output[-2000:]
+    assert "big2.bin" in output
+    assert marker not in output
