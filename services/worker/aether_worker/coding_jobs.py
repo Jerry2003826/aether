@@ -1198,6 +1198,8 @@ GRADING_TIMEOUT = "grading_timeout"
 # The model channel was not confirmed closed before grading (see ADR-F44). Our side failed to close
 # it, nothing shows tampering, so it is its own failure code and never a violation.
 MODEL_CHANNEL_OPEN = "model_channel_open"
+# The entry omitted the agent's patch (patch_omitted=too_large) so the RESULT line stays whole.
+PATCH_TOO_LARGE = "patch_too_large"
 
 
 def _graded(body: dict[str, Any]) -> bool:
@@ -1297,6 +1299,9 @@ def _coding_terminal(
     violation = _grading_violation(sandbox)
     if violation:
         return "FAILED", violation
+    if body.get("patch_omitted") == "too_large":
+        # The entry dropped a patch too large for the RESULT line; there is no change to publish.
+        return "FAILED", PATCH_TOO_LARGE
     if admission_error:
         return "FAILED", admission_error
     if not _agent_completed(body):

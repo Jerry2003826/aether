@@ -48,6 +48,10 @@ _OBJECTIVE = "AETHER_OBJECTIVE"
 _SKIP = {".git", "__pycache__", _STATE_DIR}
 # Same value as coding_sandbox.MAX_PATCH_BYTES: the RESULT line must fit the worker's stdout window.
 MAX_PATCH_BYTES = 2_097_152
+# The worker keeps only the last output_bounds.RESULT_CAPTURE_LIMIT (4 * MAX_PATCH_BYTES) bytes of stdout.
+# JSON escaping can grow a patch up to sixfold (a control character becomes \u00XX), so the serialized
+# line is capped too, with room for the newline and any trailing output.
+MAX_RESULT_LINE_BYTES = 4 * MAX_PATCH_BYTES - 65536
 
 
 class _Pump(socketserver.ThreadingTCPServer):
@@ -210,7 +214,13 @@ def emit(body: dict[str, object], code: int) -> None:
     if isinstance(patch, str) and len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
         body["patch"] = ""
         body["patch_omitted"] = "too_large"
-    sys.stdout.write("RESULT " + json.dumps(body, separators=(",", ":")) + "\n")
+    line = "RESULT " + json.dumps(body, separators=(",", ":"))
+    if len(line) > MAX_RESULT_LINE_BYTES and body.get("patch"):
+        # Escaped past the worker's window: a cut line would lose the RESULT prefix (sandbox_failed).
+        body["patch"] = ""
+        body["patch_omitted"] = "too_large"
+        line = "RESULT " + json.dumps(body, separators=(",", ":"))
+    sys.stdout.write(line + "\n")
     sys.stdout.flush()
     raise SystemExit(code)
 
@@ -304,6 +314,7 @@ def job_directory() -> Path:
 
 
 def _snapshot(root: Path) -> dict[str, str]:
+    """Text of every regular file. Present-but-empty is "", absent is a missing key."""
     found: dict[str, str] = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
@@ -331,11 +342,17 @@ def _patch(before: dict[str, str], root: Path) -> str:
     for name in sorted(set(before) | set(after)):
         if grading_files.is_grading_path(name) or grading_files.is_cache_path(name):
             continue
-        old = before.get(name, "")
-        new = after.get(name, "")
+        old = before.get(name)
+        new = after.get(name)
         if old == new:
             continue
-        chunks.extend(difflib.unified_diff(_lines(old), _lines(new), fromfile=f"a/{name}", tofile=f"b/{name}"))
+        if not old and not new:
+            # An empty file created or deleted: no lines to diff, but it is a change. /dev/null marks
+            # the absent side, as in diff -N / git.
+            chunks.append(f"--- {'a/' + name if old is not None else '/dev/null'}\n")
+            chunks.append(f"+++ {'b/' + name if new is not None else '/dev/null'}\n")
+            continue
+        chunks.extend(difflib.unified_diff(_lines(old or ""), _lines(new or ""), fromfile=f"a/{name}", tofile=f"b/{name}"))
     text = "".join(chunks)
     if not text.startswith("--- "):
         return ""
