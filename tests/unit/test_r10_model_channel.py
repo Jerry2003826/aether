@@ -220,9 +220,8 @@ def test_concurrent_and_repeated_revokes_unlink_and_close_exactly_once(
         start.wait()
         try:
             answers.append(_send(proxy.socket_path, "/aether/revoke", _JOB))
-        except (
-            OSError
-        ) as exc:  # the socket may already be gone; that is a closed channel too
+        except OSError as exc:
+            # Gone (unlinked), or queued when the listener closed (reset): a closed channel too.
             answers.append(type(exc).__name__)
 
     threads = [threading.Thread(target=by_host) for _ in range(4)] + [
@@ -241,7 +240,7 @@ def test_concurrent_and_repeated_revokes_unlink_and_close_exactly_once(
     assert len(unlinks) == 1
     assert closes == [1]
     assert all(
-        answer in {200, "FileNotFoundError", "ConnectionRefusedError"}
+        answer in {200, "FileNotFoundError", "ConnectionRefusedError", "ConnectionResetError", "BrokenPipeError"}
         for answer in answers
     ), answers
 
@@ -349,6 +348,8 @@ def test_after_revoke_chat_is_refused_and_never_reaches_the_upstream(monkeypatch
         with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as early:
             early.settimeout(5)
             early.connect(str(made.socket_path))
+            # Accepted (a handler holds its slot), not just queued in the backlog that closing drops.
+            assert made.wait_until_active(1, timeout=5)
             made.revoke()
             raw = json.dumps({"model": "coder", "messages": []}).encode()
             head = f"POST /v1/chat/completions HTTP/1.1\r\nauthorization: Bearer {_JOB}\r\ncontent-length: {len(raw)}\r\n\r\n"
