@@ -6,7 +6,6 @@ import json
 import subprocess
 
 import pytest
-
 from aether_worker import coding_sandbox, runner_process
 
 _NAME = "aether-code-job1"
