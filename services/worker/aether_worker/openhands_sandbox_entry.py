@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
+import ctypes
 import difflib
 import hashlib
-import ctypes
 import json
 import os
 import signal
@@ -21,7 +21,7 @@ os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"
 
 import openhands.tools.file_editor as file_editor_tool
 import openhands.tools.terminal as terminal_tool
-from openhands.sdk import Agent, Conversation, ConversationExecutionStatus, LLM, Tool
+from openhands.sdk import LLM, Agent, Conversation, ConversationExecutionStatus, Tool
 from openhands.sdk.event import ActionEvent
 from openhands.sdk.workspace.local import LocalWorkspace
 

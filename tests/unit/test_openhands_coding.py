@@ -5,7 +5,6 @@ from __future__ import annotations
 import ast
 import json
 import os
-import socket
 import socketserver
 import subprocess
 import sys
