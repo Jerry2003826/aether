@@ -411,25 +411,92 @@ def stop_agent_processes() -> None:
         time.sleep(0.05)
 
 
-def restore_baseline_tests(work: Path, job: Path) -> None:
-    """Put the job-creation tests back and check their hashes before the protocol runs.
+# Files the agent is asked to change. Every other path in the grading directory must match the baseline.
+CANDIDATE_FILES = frozenset({"app.py"})
 
-    An edit to a test, or an added test file, is removed. The protocol then grades
-    the candidate against the read-only baseline suite.
-    """
-    baseline: dict[str, bytes] = {}
-    for path in work.glob("test_*.py"):
+
+def _digest(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
+
+
+def _baseline_files(work: Path) -> dict[str, bytes]:
+    found: dict[str, bytes] = {}
+    for path in sorted(work.rglob("*")):
+        relative = path.relative_to(work)
+        if any(part in {".git", "__pycache__"} for part in relative.parts):
+            continue
         if path.is_symlink() or not path.is_file():
             continue
-        baseline[path.name] = path.read_bytes()
-    for path in list(job.glob("test_*.py")):
-        if path.name not in baseline or path.is_symlink():
+        found[relative.as_posix()] = path.read_bytes()
+    return found
+
+
+def _remove(path: Path) -> None:
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+        return
+    for child in path.iterdir():
+        _remove(child)
+    path.rmdir()
+
+
+def restore_grading_directory(work: Path, job: Path) -> None:
+    """Make the whole grading directory match the job-creation baseline, file by file.
+
+    Only CANDIDATE_FILES keep the agent's content. Any other changed file (tests,
+    oracle.py, conftest.py, pytest.ini, .pth, ...) is rewritten from the baseline;
+    any file or directory the agent added is deleted, including bytecode caches and
+    agent state. The result is then verified against the baseline SHA-256 hashes.
+    """
+    baseline = _baseline_files(work)
+    expected = {name: _digest(data) for name, data in baseline.items()}
+    for path in sorted(job.rglob("*"), key=lambda item: len(item.parts), reverse=True):
+        if not os.path.lexists(path):
+            continue
+        name = path.relative_to(job).as_posix()
+        if path.is_symlink():
             path.unlink()
+        elif path.is_dir():
+            prefix = name + "/"
+            keep = any(item.startswith(prefix) for item in expected) or any(
+                item.startswith(prefix) for item in CANDIDATE_FILES
+            )
+            if not keep:
+                _remove(path)
+        elif name in CANDIDATE_FILES:
+            continue
+        elif name not in expected or not path.is_file():
+            _remove(path)
     for name, data in baseline.items():
+        if name in CANDIDATE_FILES:
+            continue
         target = job / name
+        if target.is_file() and not target.is_symlink() and _digest(target.read_bytes()) == expected[name]:
+            continue
+        if os.path.lexists(target):
+            _remove(target)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-        if hashlib.sha256(target.read_bytes()).hexdigest() != hashlib.sha256(data).hexdigest():
-            raise RuntimeError("test_hash_mismatch")
+    _verify_grading_directory(job, expected)
+
+
+def _verify_grading_directory(job: Path, expected: dict[str, str]) -> None:
+    seen: set[str] = set()
+    for path in job.rglob("*"):
+        name = path.relative_to(job).as_posix()
+        if path.is_symlink():
+            raise RuntimeError("grading_symlink")
+        if path.is_dir():
+            continue
+        if name in CANDIDATE_FILES:
+            continue
+        if name not in expected:
+            raise RuntimeError("grading_extra_file")
+        if _digest(path.read_bytes()) != expected[name]:
+            raise RuntimeError("grading_hash_mismatch")
+        seen.add(name)
+    if seen != {name for name in expected if name not in CANDIDATE_FILES}:
+        raise RuntimeError("grading_missing_file")
 
 
 def main() -> None:
@@ -442,7 +509,7 @@ def main() -> None:
         before = _snapshot(job)
         agent_report = _run_agent(job, before, objective)
         stop_agent_processes()
-        restore_baseline_tests(WORK, job)
+        restore_grading_directory(WORK, job)
         workspace = LocalWorkspace(working_dir=str(job))
         result = workspace.execute_command(
             f"{sys.executable} -I {PROTOCOL}",

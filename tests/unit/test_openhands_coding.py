@@ -94,7 +94,7 @@ def test_entry_source_calls_the_agent_and_launch_keeps_other_images(monkeypatch)
     assert "mkdtemp" in attribute_calls
     main = next(node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "main")
     ordered = _call_names(main)
-    assert ordered.index("_run_agent") < ordered.index("restore_baseline_tests") < ordered.index("execute_command")
+    assert ordered.index("_run_agent") < ordered.index("restore_grading_directory") < ordered.index("execute_command")
     assert "/tmp" not in source
     assert "_install_workspace_import_boundary" not in source
     assert not any(name == "importlib" or name.startswith("importlib.") for name in imported)
