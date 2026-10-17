@@ -11,6 +11,7 @@ import secrets
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 from datetime import UTC, datetime, timedelta
@@ -211,6 +212,41 @@ def _alias_matches(model: str, aliases: list[str]) -> bool:
         return True
     stripped = model.removeprefix("openai/")
     return bool(stripped) and stripped != model and stripped in aliases
+
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+
+
+def _origin(url: str) -> tuple[str, str, int | None]:
+    parts = urllib.parse.urlsplit(url)
+    scheme = parts.scheme.lower()
+    return scheme, (parts.hostname or "").lower(), parts.port or _DEFAULT_PORTS.get(scheme)
+
+
+def _same_origin(current: str, target: str) -> bool:
+    """Scheme, host and port all equal. https to http is never the same origin."""
+    return _origin(current) == _origin(urllib.parse.urljoin(current, target))
+
+
+class _SameOriginRedirect(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only within the upstream's origin; the request carries the provider key.
+
+    A cross-origin redirect is not followed: urllib then raises it as an HTTPError with its 3xx
+    status, which settles like any other known non-2xx answer (sent, upstream_status kept).
+    """
+
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not _same_origin(req.full_url, newurl):
+            return None
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
 def _chat_url(base: str) -> str:
@@ -1266,7 +1302,7 @@ class ModelGateway:
             headers={"authorization": f"Bearer {self.provider_key}", "content-type": "application/json"},
             method="POST",
         )
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _SameOriginRedirect)
         window = upstream_deadline_seconds()
         deadline = time.monotonic() + window
         try:

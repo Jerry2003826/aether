@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import json
+import logging
 import shutil
 import subprocess
 import threading
@@ -44,6 +45,7 @@ LOG_TAIL_LIMIT = 4096
 # The CLI log fallback is killed after this long so a wedged `docker logs` cannot hold the job.
 CLI_LOGS_TIMEOUT_SECONDS = 60
 POLL_SECONDS = 0.25
+_LOG = logging.getLogger("aether.worker.coding")
 # With a heartbeat, a blocking log read is cut into waits of at most this long (LEASE_SECONDS / 3).
 LOG_HEARTBEAT_SECONDS = 10.0
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
@@ -444,7 +446,12 @@ def _wait_until_stopped(
     deadline = time.monotonic() + timeout_seconds
     while True:
         if on_poll is not None:
-            on_poll()
+            try:
+                on_poll()
+            except BaseException:
+                # The caller gave up the run (its lease is gone): the agent must not keep working.
+                _remove_coding_container(job_id)
+                raise
         if stop_requested is not None and stop_requested():
             _raise_after_stop(job_id, grace_seconds, "cancelled", "cancel_unconfirmed")
         if deadline_reached is not None and deadline_reached():
@@ -461,6 +468,14 @@ def _wait_until_stopped(
                 raise CodingSandboxError("timeout_unconfirmed", logs)
             raise CodingSandboxError("timeout", logs)
         time.sleep(poll_seconds)
+
+
+def _remove_coding_container(job_id: str) -> None:
+    """Best effort: a failure here must not replace the error that stopped the run."""
+    try:
+        release_coding_container(job_id)
+    except Exception:  # noqa: BLE001 - best effort, the caller's error is the one that matters
+        _LOG.warning("coding_container_remove_failed job=%s", job_id, exc_info=True)
 
 
 def _raise_after_stop(job_id: str, grace_seconds: int, confirmed_code: str, pending_code: str) -> None:

@@ -240,14 +240,17 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             drained = False
 
             def keep_lease() -> None:
-                if not _renew_lease(
+                # _renew_lease reports False when the lease expired or the fencing token moved on;
+                # a database error propagates on its own.
+                renewed = _renew_lease(
                     database,
                     owner_id=owner_id,
                     project_id=project_id,
                     operation_id=str(row["operation_id"]),
                     job_id=job_id,
                     fencing_token=fencing,
-                ):
+                )
+                if renewed is False:
                     raise _LeaseLost(job_id)
 
             def drain_once() -> None:
@@ -268,14 +271,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
 
             try:
                 proxy = CodingModelProxy(database, job_token=model_token)
-                _renew_lease(
-                    database,
-                    owner_id=owner_id,
-                    project_id=project_id,
-                    operation_id=str(row["operation_id"]),
-                    job_id=job_id,
-                    fencing_token=fencing,
-                )
+                keep_lease()
                 try:
                     sandbox = run_coding_sandbox(
                         root,
@@ -285,14 +281,8 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                         job_token=model_token,
                         stop_requested=lambda: _cancel_requested(database, owner_id=owner_id, project_id=project_id, task_id=task_id),
                         deadline_reached=lambda: _deadline_passed(database, owner_id=owner_id, project_id=project_id, job_id=job_id),
-                        on_poll=lambda: _renew_lease(
-                            database,
-                            owner_id=owner_id,
-                            project_id=project_id,
-                            operation_id=str(row["operation_id"]),
-                            job_id=job_id,
-                            fencing_token=fencing,
-                        ),
+                        # A lost lease raises _LeaseLost out of the poll; the sandbox removes its container first.
+                        on_poll=keep_lease,
                         # Reading the exit logs can take CLI_LOGS_TIMEOUT_SECONDS; keep the lease meanwhile.
                         heartbeat=keep_lease,
                     )
