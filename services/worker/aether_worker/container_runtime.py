@@ -79,11 +79,15 @@ def execute_docker(args: list[str], *, timeout: float | None = None) -> subproce
 
 
 def container_logs(name: str, *, limit: int = _LOG_STREAM_LIMIT) -> tuple[bytes, bytes]:
-    """Stream logs and keep only the last `limit` bytes of each stream."""
+    """Stream logs and keep only the last `limit` bytes of each stream.
+
+    A container the daemon does not know has no logs. Any other DockerException, from the client,
+    containers.get() or logs(), propagates so the caller can fall back to the docker CLI.
+    """
     client = docker_client()
     try:
         container = client.containers.get(name)
-    except (NotFound, DockerException):
+    except NotFound:
         return b"", b""
     return _read_tails(container, stdout_limit=limit, stderr_limit=limit)
 

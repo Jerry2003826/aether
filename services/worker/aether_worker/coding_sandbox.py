@@ -178,7 +178,8 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
     try:
         stdout, stderr = container_logs(target, limit=limit)
     except DockerException:
-        # The SDK cannot reach the daemon; the docker CLI, if present, is the fallback.
+        # The SDK cannot reach the daemon, or reached it but could not serve this container's
+        # logs (containers.get or logs failed); the docker CLI, if present, is the fallback.
         return _cli_logs(target, limit=limit)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
