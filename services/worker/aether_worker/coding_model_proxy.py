@@ -2,17 +2,21 @@
 
 from __future__ import annotations
 
+import io
 import json
 import logging
+import math
 import os
 import secrets
 import shutil
+import socket
 import socketserver
 import stat
 import struct
 import sys
 import tempfile
 import threading
+import time
 from pathlib import Path
 
 from aether_gateway.model import GatewayDenied, ModelGateway
@@ -31,6 +35,31 @@ _ACL_OTHER = 0x20
 _ACL_UNDEFINED_ID = 0xFFFFFFFF
 _DIR_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 _LOG = logging.getLogger("aether.worker.coding_proxy")
+# A sandbox client gets this long to deliver one whole request (and to read the reply), and may
+# hold at most this many connections at once. Excess connections are refused with 503 at accept
+# time, without a thread. OpenHands sends one request at a time, so the defaults leave headroom.
+READ_TIMEOUT_ENV = "AETHER_CODING_PROXY_READ_TIMEOUT_SECONDS"
+MAX_CONNECTIONS_ENV = "AETHER_CODING_PROXY_MAX_CONNECTIONS"
+DEFAULT_READ_TIMEOUT_SECONDS = 30.0
+DEFAULT_MAX_CONNECTIONS = 8
+_REJECT_SEND_SECONDS = 0.2
+
+
+def proxy_limits() -> tuple[float, int]:
+    """(read timeout seconds, max concurrent connections) from the environment; bad values use the defaults."""
+    try:
+        timeout = float(os.environ.get(READ_TIMEOUT_ENV, ""))
+    except ValueError:
+        timeout = DEFAULT_READ_TIMEOUT_SECONDS
+    if not math.isfinite(timeout) or timeout <= 0:
+        timeout = DEFAULT_READ_TIMEOUT_SECONDS
+    try:
+        limit = int(os.environ.get(MAX_CONNECTIONS_ENV, ""))
+    except ValueError:
+        limit = DEFAULT_MAX_CONNECTIONS
+    if limit < 1:
+        limit = DEFAULT_MAX_CONNECTIONS
+    return timeout, limit
 
 
 class CodingModelProxy:
@@ -45,6 +74,8 @@ class CodingModelProxy:
             _grant_directory(self.directory)
             self.socket_path = self.directory / "model.sock"
             self._server = _UnixServer(str(self.socket_path), _Handler)
+            self._server.read_timeout, limit = proxy_limits()
+            self._server.slots = threading.BoundedSemaphore(limit)
         except OSError:
             shutil.rmtree(self.directory, ignore_errors=True)
             raise
@@ -102,6 +133,27 @@ class CodingModelProxy:
 class _UnixServer(socketserver.ThreadingUnixStreamServer):
     daemon_threads = True
     proxy: CodingModelProxy
+    read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS
+    slots: threading.BoundedSemaphore
+
+    def process_request(self, request, client_address) -> None:
+        """Start a handler thread only while a connection slot is free; otherwise refuse at once."""
+        if not self.slots.acquire(blocking=False):
+            _logger().info("coding_proxy status=503 error=too_many_connections")
+            _refuse(request)
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self.slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self.slots.release()
 
     def server_bind(self) -> None:
         super().server_bind()
@@ -112,11 +164,40 @@ class _UnixServer(socketserver.ThreadingUnixStreamServer):
             raise
 
 
+class _DeadlineReader(io.RawIOBase):
+    """Socket reads that share one deadline, so trickling bytes cannot keep a connection open."""
+
+    def __init__(self, sock: socket.socket, deadline: float) -> None:
+        self._sock = sock
+        self._deadline = deadline
+
+    def readable(self) -> bool:
+        return True
+
+    def readinto(self, buffer) -> int:
+        remaining = self._deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError("request_deadline")
+        self._sock.settimeout(remaining)
+        return self._sock.recv_into(buffer)
+
+
 class _Handler(socketserver.StreamRequestHandler):
     server: _UnixServer
 
+    def setup(self) -> None:
+        super().setup()
+        deadline = time.monotonic() + self.server.read_timeout
+        self.rfile = io.BufferedReader(_DeadlineReader(self.connection, deadline))
+
     def handle(self) -> None:
-        parsed = _read_http(self.rfile)
+        try:
+            parsed = _read_http(self.rfile)
+        except (TimeoutError, OSError):
+            _logger().info("coding_proxy status=408 error=read_timeout")
+            return
+        # The reply gets the same bound, so a client that stops reading cannot pin the thread.
+        self.connection.settimeout(self.server.read_timeout)
         if parsed is None:
             _write_json(self.wfile, 400, {"error": "body_rejected"})
             return
@@ -125,6 +206,22 @@ class _Handler(socketserver.StreamRequestHandler):
         error = payload.get("error") if status >= 400 else ""
         _logger().info("coding_proxy status=%s error=%s", status, error if isinstance(error, str) else "")
         _write_json(self.wfile, status, payload)
+
+
+def _refuse(request: socket.socket) -> None:
+    encoded = json.dumps({"error": "too_many_connections"}).encode()
+    head = (
+        "HTTP/1.1 503 Service Unavailable\r\n"
+        "content-type: application/json\r\n"
+        f"content-length: {len(encoded)}\r\n"
+        "connection: close\r\n"
+        "\r\n"
+    )
+    try:
+        request.settimeout(_REJECT_SEND_SECONDS)
+        request.sendall(head.encode("ascii") + encoded)
+    except OSError:
+        pass
 
 
 def _posix_acl(owner: int, named: int) -> bytes:
