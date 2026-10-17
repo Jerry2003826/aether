@@ -253,6 +253,23 @@ def test_subdirectory_tests_are_discovered_run_and_counted(tmp_path: Path) -> No
     assert (code, body["passed"], body["failed"]) == (0, 6, 0), body
 
 
+def test_a_test_package_under_a_plain_tests_dir_supports_relative_imports(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "tests/pkg/__init__.py": "",
+            "tests/pkg/data.py": "VALUE = 42\n",
+            "tests/pkg/test_rel.py": "import app\nfrom . import data\n\ndef test_rel():\n    assert app.value() == data.VALUE\n",
+            "tests/broken_test.py": "import missing_module_xyz\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert {"name": "tests.pkg.test_rel.test_rel", "verdict": "PASS", "detail": ""} in body["cases"], body
+    assert {"name": "tests.broken_test", "verdict": "FAIL", "detail": "import:ModuleNotFoundError"} in body["cases"], body
+    assert code == 1
+
+
 def test_test_files_created_during_the_run_are_never_graded(tmp_path: Path) -> None:
     """Trusted tests are collected from the baseline snapshot before any candidate code runs."""
     _write(

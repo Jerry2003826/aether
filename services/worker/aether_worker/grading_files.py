@@ -49,8 +49,8 @@ CACHE_DIRS = frozenset(
     }
 )
 TEST_DIRS = frozenset({"tests", "test"})
-# Grading runs the stdlib coding_protocol on root test_*.py and never pytest (pytest is not installed
-# in the sandbox image), so no pytest config is read at grading time. Every config is still restored
+# Grading runs the stdlib coding_protocol on test_*.py / *_test.py anywhere in the tree and never
+# pytest (pytest is not installed in the sandbox image), so no pytest config is read at grading time. Every config is still restored
 # from the baseline or deleted, so a pytest-based grader could not be redirected by an added one.
 SUPPORT_FILES = frozenset(
     {

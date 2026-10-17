@@ -103,7 +103,7 @@ def test_hidden_pytest_configs_are_grading_files() -> None:
 
 
 def test_grading_protocol_never_reads_pytest_configuration() -> None:
-    """Grading runs the stdlib protocol on root test_*.py, so no pytest config (baseline or added) applies."""
+    """Grading runs the stdlib protocol on test_*.py / *_test.py, so no pytest config (baseline or added) applies."""
     import ast
 
     source = Path("services/worker/aether_worker/coding_protocol.py").read_text(encoding="utf-8")
@@ -111,7 +111,7 @@ def test_grading_protocol_never_reads_pytest_configuration() -> None:
     imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
     imported |= {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
     assert not imported & {"pytest", "_pytest", "pluggy", "tomllib", "configparser"}
-    assert 'glob("test_*.py")' in source
+    assert "pytest.ini" not in source and "pyproject" not in source
 
 
 def test_new_top_level_modules_that_shadow_imports_are_detected() -> None:
