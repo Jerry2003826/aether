@@ -9,6 +9,7 @@ import json
 import os
 import secrets
 import shlex
+import shutil
 import signal
 import socket
 import socketserver
@@ -502,21 +503,54 @@ class StartupHookAdded(GradingViolation):
 
 
 class ShadowModuleAdded(GradingViolation):
-    """The agent added a top-level module or package named like stdlib or an installed package."""
+    """The agent added, or changed, a top-level module or package named like stdlib or an installed package."""
+
+
+def _tree_digests(path: Path) -> dict[str, str]:
+    """Relative path -> digest of every file under a top-level entry (caches left out); a symlink counts as changed."""
+    if path.is_symlink():
+        return {"": "symlink"}
+    if not path.is_dir():
+        return {"": _digest(path.read_bytes())}
+    found: dict[str, str] = {}
+    for item in path.rglob("*"):
+        relative = item.relative_to(path).as_posix()
+        if grading_files.is_cache_path(relative):
+            continue
+        if item.is_symlink():
+            found[relative] = "symlink"
+        elif item.is_file():
+            found[relative] = _digest(item.read_bytes())
+    return found
+
+
+def _restore_entry(work: Path, job: Path) -> None:
+    if os.path.lexists(job):
+        _remove(job)
+    if work.is_dir():
+        shutil.copytree(work, job, symlinks=True)
+    else:
+        shutil.copy2(work, job)
 
 
 def _remove_added_shadow_modules(work: Path, job: Path) -> list[str]:
-    """Delete every NEW top-level entry of job that would shadow an import. Baseline names are kept."""
-    removed: list[str] = []
+    """Delete every NEW top-level entry of job that would shadow an import, and restore every BASELINE one
+    that the agent changed. Both are reported; an unchanged baseline module with such a name is kept (the
+    protocol never serves it under that name, see coding_protocol._module_map)."""
+    flagged: list[str] = []
     for path in sorted(job.iterdir()):
         name = path.name
-        if os.path.lexists(work / name):
-            continue
         probe = name if not path.is_dir() or path.is_symlink() else f"{name}/__init__.py"
-        if grading_files.is_shadow_module(probe):
+        if not grading_files.is_shadow_module(probe) and not grading_files.is_shadow_module(f"{name}/__init__.py"):
+            continue
+        baseline = work / name
+        if not os.path.lexists(baseline):
             _remove(path)
-            removed.append(name)
-    return removed
+            flagged.append(name)
+        elif _tree_digests(path) != _tree_digests(baseline):
+            _restore_entry(baseline, path)
+            flagged.append(name)
+    return flagged
 
 
 def _baseline_files(work: Path, editable: Collection[str] | None) -> dict[str, bytes]:
@@ -620,7 +654,7 @@ def main() -> None:
         try:
             workspace = LocalWorkspace(working_dir=str(job))
             result = workspace.execute_command(
-                f"AETHER_PROTOCOL_BUDGET_SECONDS={budget} AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
+                f"AETHER_PROTOCOL_BUDGET_SECONDS={budget} AETHER_PROTOCOL_BASELINE_DIR={shlex.quote(str(WORK))} AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
                 cwd=str(job),
                 timeout=budget + _PROTOCOL_KILL_MARGIN_SECONDS,
             )

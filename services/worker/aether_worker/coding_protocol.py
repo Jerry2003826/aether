@@ -118,7 +118,16 @@ def _module_map(sources: dict[str, bytes], bases: list[str]) -> dict[str, tuple[
 
     Each test process gets only its own test's directory, so same-named helpers in two test
     directories never resolve to each other, and a module added at the root cannot shadow a helper.
+
+    A workspace module whose top-level name is a stdlib, builtin or installed-dependency name (or a
+    grading_files.SHADOW_ROOTS name) is never mapped, in the test or the candidate process: `import types`
+    or `import requests` always gets the interpreter's own module, never tests/types.py or ./requests.py.
+    The protocol runs in the sandbox interpreter, so grading_files.shadow_names() is the grading set.
     """
+    # The one exception: a top-level package that holds test modules (e.g. a `test/` package) keeps its
+    # name, or its tests could not be imported at all.
+    holders = {name.split("/", 1)[0] for name in sources if "/" in name and _is_test_module(name)}
+    shadowed = grading_files.shadow_names() - {top for top in holders if f"{top}/__init__.py" in sources}
     found: dict[str, tuple[str, bool]] = {}
     for base in [*bases, ""]:
         prefix = base + "/" if base else ""
@@ -131,8 +140,27 @@ def _module_map(sources: dict[str, bytes], bases: list[str]) -> dict[str, tuple[
                 parts = parts[:-1]
             if not parts or not all(part.isidentifier() for part in parts):
                 continue
+            if parts[0] in shadowed:
+                continue
             found.setdefault(".".join(parts), (name, package))
     return found
+
+
+def _declared(name: str, declared: frozenset[str] | None) -> bool:
+    """A candidate module tests may import: its file, or the package `__init__.py` of a package containing
+    it, existed in the baseline workspace. None (no baseline given) declares every module."""
+    if declared is None or name in declared:
+        return True
+    parts = name.split("/")
+    return any("/".join([*parts[:depth], "__init__.py"]) in declared for depth in range(1, len(parts)))
+
+
+def _baseline_modules() -> frozenset[str] | None:
+    """Python files of the read-only baseline the entry names (AETHER_PROTOCOL_BASELINE_DIR); listed, never run."""
+    path = os.environ.pop(_BASELINE_ENV, "")
+    if not path:
+        return None
+    return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
 
 
 def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False):
@@ -181,6 +209,7 @@ _MAX_MESSAGE = 32 * 1024 * 1024
 _MAX_DEPTH = 100
 _CALL_TIMEOUT_ENV = "AETHER_PROTOCOL_CALL_TIMEOUT_SECONDS"
 _NONCE_ENV = "AETHER_PROTOCOL_NONCE_FILE"
+_BASELINE_ENV = "AETHER_PROTOCOL_BASELINE_DIR"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
 # The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
 _BUDGET_ENV = "AETHER_PROTOCOL_BUDGET_SECONDS"
@@ -588,19 +617,28 @@ class _GraderFinder(importlib.abc.MetaPathFinder):
     The grader never compiles or executes candidate source.
     """
 
-    def __init__(self, root: Path, sources: dict[str, bytes], modules: dict[str, tuple[str, bool]]) -> None:
+    def __init__(
+        self,
+        root: Path,
+        sources: dict[str, bytes],
+        modules: dict[str, tuple[str, bool]],
+        declared: frozenset[str] | None = None,
+    ) -> None:
         self._root = root
         self._sources = sources
         self._modules = modules
+        self._declared = declared
 
     def find_spec(self, fullname, path=None, target=None):
         entry = self._modules.get(fullname)
         if entry is None:
             return None
         name, package = entry
+        # Tests only get modules the baseline declared; a module the agent added is for candidate code
+        # (which imports it in the candidate process), not a new name for tests.
+        if not _declared(name, self._declared):
+            raise ImportError(f"{fullname} is not a baseline module", name=fullname)
         if _is_candidate(name):
-            if fullname.split(".", 1)[0] in sys.stdlib_module_names:
-                return None
             spec = importlib.machinery.ModuleSpec(fullname, _RemoteLoader(package), is_package=package)
             if package:
                 spec.submodule_search_locations = []
@@ -779,6 +817,7 @@ def run_suite(root: Path) -> dict[str, Any]:
     failed = 0
     files = _files(root)
     sources = {name: path.read_bytes() for name, path in files.items()}
+    baseline_modules = _baseline_modules()
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
@@ -811,6 +850,7 @@ def run_suite(root: Path) -> dict[str, Any]:
             "import_name": import_name,
             "label": label,
             "call_timeout": call_timeout,
+            "declared": None if baseline_modules is None else sorted(baseline_modules),
         }
         # Importing the module once on its own: an import failure fails the module, and tests the module
         # defines without a top-level def (a loop, an assignment, an imported test class) are run as well.
@@ -1089,7 +1129,10 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
     relative, import_name, label = request["relative"], request["import_name"], request["label"]
-    sys.meta_path.insert(0, _GraderFinder(root, sources, _module_map(sources, bases)))
+    declared = request.get("declared")
+    sys.meta_path.insert(
+        0, _GraderFinder(root, sources, _module_map(sources, bases), None if declared is None else frozenset(declared))
+    )
     _Current.session = _Session(root, sources, bases, float(request["call_timeout"]))
     try:
         try:
@@ -1176,7 +1219,9 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             root = Path.cwd()
             modules = _module_map(dict.fromkeys(message["all"], b""), list(message["bases"]))
             sys.meta_path.insert(0, _CandidateFinder(root, sources, modules))
-            sys.path[:0] = [*(str(root / base) for base in message["bases"]), str(root)]
+            # Appended, after the stdlib and site-packages: a workspace file the module map refuses (a
+            # stdlib or dependency name) cannot come back in through the path finder.
+            sys.path.extend([*(str(root / base) for base in message["bases"]), str(root)])
             return ["n"]
         if op == "import":
             return keep(importlib.import_module(message["name"]))

@@ -124,3 +124,17 @@ def test_tests_are_served_only_candidate_modules_the_baseline_declared(tmp_path:
 def test_the_sandbox_entry_tells_the_protocol_where_the_baseline_is() -> None:
     source = Path("services/worker/aether_worker/openhands_sandbox_entry.py").read_text(encoding="utf-8")
     assert "AETHER_PROTOCOL_BASELINE_DIR={shlex.quote(str(WORK))}" in source
+
+
+def test_a_test_package_named_like_stdlib_still_runs_its_tests(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "test/__init__.py": "",
+            "test/test_pkg.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert _verdicts(body) == {"test.test_pkg.test_value": ("PASS", "")}, body
+    assert code == 0, body

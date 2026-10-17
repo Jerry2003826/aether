@@ -145,10 +145,11 @@ def test_shadow_set_comes_from_the_installed_names_source(monkeypatch) -> None:
 
 
 def test_worker_side_never_computes_the_shadow_set() -> None:
-    """Only the sandbox entry may call the shadow functions; the worker consumes grading_shadow_module only."""
+    """Only sandbox-side code (the entry and the protocol it runs) may call the shadow functions; the worker
+    consumes grading_shadow_module only."""
     import ast
 
-    allowed = {"grading_files.py", "openhands_sandbox_entry.py"}
+    allowed = {"grading_files.py", "openhands_sandbox_entry.py", "coding_protocol.py"}
     for path in sorted(Path("services").rglob("*.py")):
         if path.name in allowed or ".venv" in path.parts:
             continue
