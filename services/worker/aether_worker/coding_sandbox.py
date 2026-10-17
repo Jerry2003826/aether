@@ -13,6 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
+import requests
 from docker.errors import DockerException
 
 from aether_worker.container_runtime import container_logs
@@ -177,9 +178,10 @@ def _bounded_logs(target: str, *, limit: int) -> dict[str, str]:
             raise CodingSandboxError("sandbox_unavailable") from exc
     try:
         stdout, stderr = container_logs(target, limit=limit)
-    except DockerException:
+    except (DockerException, requests.RequestException):
         # The SDK cannot reach the daemon, or reached it but could not serve this container's
-        # logs (containers.get or logs failed); the docker CLI, if present, is the fallback.
+        # logs (containers.get or logs failed, or the connection dropped mid-stream, which
+        # requests raises outside DockerException); the docker CLI, if present, is the fallback.
         return _cli_logs(target, limit=limit)
     return {
         "stdout": read_bounded_tail(io.BytesIO(stdout), limit),
