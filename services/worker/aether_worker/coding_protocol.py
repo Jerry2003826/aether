@@ -761,8 +761,13 @@ def _child_env() -> dict[str, str]:
 
 
 _ISOLATION_UNAVAILABLE = "candidate_isolation_unavailable"
-# Candidate (non-grading) files copied into each candidate directory; past this the rest are left out.
-_MAX_CANDIDATE_BYTES = 64 * 1024 * 1024
+# Candidate (non-grading) files copied into each candidate directory; past this the rest are left out
+# (and logged by name). Copied once per step, so the bound keeps the copy far inside the protocol budget:
+# a full 8 MiB (1000 files) onto the sandbox's tmpfs measured ~30 ms per step, ~3 s over the ~105
+# steps the 240 s cap allows (each step is allowed 2 s), and it counts once against container memory. Source trees are far smaller; data sets that are
+# not tests do not belong in a graded workspace.
+_MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
+_DROPPED_NAMES_LOGGED = 20
 
 
 def _candidate_files(root: Path) -> dict[str, bytes]:
@@ -771,6 +776,7 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
     Read once, before any candidate code runs, and written into a fresh directory for every test.
     """
     found: dict[str, bytes] = {}
+    dropped: list[str] = []
     total = 0
     pending = [root]
     while pending:
@@ -794,9 +800,16 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
             except OSError:
                 continue
             if total + len(data) > _MAX_CANDIDATE_BYTES:
+                dropped.append(name)
                 continue
             total += len(data)
             found[name] = data
+    if dropped:
+        # Names and a count on the grader's stderr (the entry's log), never contents; not the result line.
+        names = ", ".join(repr(name[:200]) for name in dropped[:_DROPPED_NAMES_LOGGED])
+        more = f" (+{len(dropped) - _DROPPED_NAMES_LOGGED} more)" if len(dropped) > _DROPPED_NAMES_LOGGED else ""
+        sys.stderr.write(f"aether-protocol: candidate_files_dropped count={len(dropped)} limit_bytes={_MAX_CANDIDATE_BYTES} names=[{names}]{more}\n")
+        sys.stderr.flush()
     return found
 
 
