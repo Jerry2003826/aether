@@ -1,10 +1,10 @@
 """Stdlib test protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands.
 
-Integrity: before any candidate code runs, every file under the workspace is read into memory and
-hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
+Integrity: before any candidate code runs, every Python source and grading file under the workspace
+(virtualenvs, node_modules, VCS and cache dirs skipped) is read into memory and hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
 are served from that in-memory snapshot, so a file rewritten during the run has no effect on any
-module loaded afterwards. The files are hashed again before each test module and after the run;
-any difference fails the suite with `grading_tampered`.
+module loaded afterwards. Those files are hashed again before each test module and after the run;
+one that is missing or changed fails the suite with `grading_tampered`. New files are fine.
 """
 
 from __future__ import annotations
@@ -20,29 +20,74 @@ import time
 from pathlib import Path
 from typing import Any
 
-_SKIP_DIRS = {"__pycache__", ".git", ".aether-state", ".pytest_cache"}
+# grading_files.py ships next to this script (repo and image); `-I` drops the script dir from sys.path.
+# Appended, then removed, so it cannot shadow any other module.
+_HERE = str(Path(__file__).resolve().parent)
+sys.path.append(_HERE)
+try:
+    import grading_files
+finally:
+    sys.path.remove(_HERE)
+
+# Never walked: VCS data, caches, virtualenvs and vendored dependency trees.
+_SKIP_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".aether-state",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        ".venv",
+        "venv",
+        "env",
+        "node_modules",
+        "site-packages",
+    }
+)
+
+
+def _guarded(name: str) -> bool:
+    """Snapshot and verify Python sources and grading files; other data may change freely."""
+    return name.endswith(".py") or grading_files.is_grading_path(name)
 
 
 def _files(root: Path) -> dict[str, Path]:
     found: dict[str, Path] = {}
-    for path in sorted(root.rglob("*")):
-        relative = path.relative_to(root)
-        if any(part in _SKIP_DIRS for part in relative.parts):
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
             continue
-        if path.is_symlink() or not path.is_file():
-            continue
-        found[relative.as_posix()] = path
+        for path in entries:
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                if path.name not in _SKIP_DIRS:
+                    pending.append(path)
+                continue
+            name = path.relative_to(root).as_posix()
+            if path.is_file() and _guarded(name):
+                found[name] = path
     return found
 
 
-def _digests(root: Path) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for name, path in _files(root).items():
+def _tampered(root: Path, baseline: dict[str, str]) -> bool:
+    """A snapshotted file that is now missing or different. New files are fine."""
+    for name, digest in baseline.items():
         try:
-            result[name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            data = (root / name).read_bytes()
         except OSError:
-            result[name] = "unreadable"
-    return result
+            return True
+        if (root / name).is_symlink() or hashlib.sha256(data).hexdigest() != digest:
+            return True
+    return False
 
 
 class _SnapshotLoader(importlib.abc.Loader):
@@ -102,7 +147,7 @@ def run_suite(root: Path) -> dict[str, Any]:
     sys.path.insert(0, str(root))
     tampered = False
     for name in tests:
-        if _digests(root) != baseline:
+        if _tampered(root, baseline):
             tampered = True
             break
         stem = name[:-3]
@@ -133,7 +178,7 @@ def run_suite(root: Path) -> dict[str, Any]:
                 continue
             passed += 1
             cases.append({"name": stem + "." + attr, "verdict": "PASS", "detail": ""})
-    if tampered or _digests(root) != baseline:
+    if tampered or _tampered(root, baseline):
         failed += 1
         cases.append({"name": "suite", "verdict": "FAIL", "detail": "grading_tampered"})
     if not cases:
