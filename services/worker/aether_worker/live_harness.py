@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from aether_worker.openhands_image import RUN_IMAGE_REASONS
 from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
 from aether_worker.runner import _docker
 from aether_worker.sandbox_image import SANDBOX_IMAGE
@@ -45,7 +46,7 @@ CORPUS = (
     {"id": "chunk-code", "text": "assert left != right && flag == true"},
 )
 ISOLATION_IMAGE = SANDBOX_IMAGE
-ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
+ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "32")
 ISOLATION_SCRIPT = (
     "import os,socket\n"
     "print('key', 'AETHER_LIVE_MODEL_KEY' in os.environ)\n"
@@ -277,10 +278,6 @@ def _coding_body(model: str, *, repair: str | None) -> dict[str, Any]:
     }
 
 
-# ImageUnavailable reasons execute_docker reports for a run whose image could not be made present.
-_IMAGE_REASONS = frozenset({"image_unavailable", "image_pull_failed", "image_label_mismatch"})
-
-
 def _isolation_command() -> list[str]:
     return ["docker", "run", "--rm", *ISOLATION_FLAGS, ISOLATION_IMAGE, "python", "-c", ISOLATION_SCRIPT]
 
@@ -320,14 +317,14 @@ def _linux_isolation(secret: str) -> dict[str, Any]:
     }
     if completed.returncode != 0:
         stderr = (completed.stderr or "").strip()
-        if stderr in _IMAGE_REASONS:
+        if stderr in RUN_IMAGE_REASONS:
             # ensure_image ran before the container: ImageUnavailable.reason is the not_run reason.
             reason = stderr
         elif "Unable to find image" in output or "pull access denied" in output:
             reason = "image_unavailable"
         else:
             reason = "container_failed"
-        evidence["status"] = NOT_RUN if reason in _IMAGE_REASONS else "fail"
+        evidence["status"] = NOT_RUN if reason in RUN_IMAGE_REASONS else "fail"
         evidence["reason"] = reason
         return evidence
     secret_absent = "key False" in (completed.stdout or "")

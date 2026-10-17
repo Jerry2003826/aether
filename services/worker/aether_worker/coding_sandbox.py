@@ -16,6 +16,7 @@ from typing import Any, BinaryIO
 from docker.errors import DockerException
 
 from aether_worker.container_runtime import container_logs
+from aether_worker.grading_files import PROTOCOL_CAP_SECONDS
 from aether_worker.openhands_image import (
     IMAGE_UNAVAILABLE,
     RUN_IMAGE_REASONS,
@@ -43,7 +44,9 @@ RESULT_CAPTURE_LIMIT = 4 * MAX_PATCH_BYTES
 POLL_SECONDS = 0.25
 # 768 MiB. One agent-entry sample peaked at 283888 KiB, above the old 256 MiB cgroup.
 CODING_MEMORY_BYTES = 805306368
-CODING_SANDBOX_TIMEOUT_SECONDS = 120
+# The agent's share (80 s, unchanged) plus the grading protocol's hard cap and the entry's kill margin:
+# the protocol limit now grows with the suite (ADR-F44), so the container must outlast its cap.
+CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
 
 

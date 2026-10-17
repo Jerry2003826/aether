@@ -23,10 +23,14 @@ SHADOW_ROOTS (mirrors verification._SHADOW_ROOTS). They must only be called insi
 that grades. Worker-side code must not call them, because the worker environment has a different
 package set; the worker only consumes the grading_shadow_module case detail.
     grading_paths(root, editable=None)   relative POSIX paths of grading files under root (.git skipped).
+    declared_tests(source)               test ids a test module declares (ast, baseline source).
+    grading_steps(root)                  processes the protocol will start; sizes its time limit.
+    protocol_timeout_seconds(steps)      the protocol's limit: base + per step, capped (ADR-F44).
 """
 
 from __future__ import annotations
 
+import ast
 import sys
 from collections.abc import Collection
 from functools import cache
@@ -157,3 +161,158 @@ def grading_paths(root: Path, editable: Collection[str] | None = None) -> set[st
         if is_grading_path(name, editable):
             found.add(name)
     return found
+
+
+# ---------------------------------------------------------------------------------------------
+# What the grading protocol collects, and how long it may take. Shared by coding_protocol.py (which
+# runs every collected test in its own process) and the sandbox entry (which bounds the protocol).
+
+# Never walked: VCS data, caches, virtualenvs and vendored dependency trees.
+WALK_SKIP_DIRS = frozenset(
+    {
+        "__pycache__",
+        ".git",
+        ".hg",
+        ".svn",
+        ".aether-state",
+        ".pytest_cache",
+        ".mypy_cache",
+        ".ruff_cache",
+        ".tox",
+        ".nox",
+        "node_modules",
+        "site-packages",
+    }
+)
+# Skipped only when they really are virtualenvs (pyvenv.cfg); otherwise they may be candidate packages.
+VENV_DIRS = frozenset({".venv", "venv", "env"})
+
+# Seconds. One call into candidate code < one test process < the whole protocol, which is
+# PROTOCOL_BASE_SECONDS + PROTOCOL_STEP_SECONDS per step (a step is one test, or one module import),
+# capped at PROTOCOL_CAP_SECONDS. A fresh test process costs about 0.1 s, so the step allowance covers
+# isolation overhead with room for real work; a suite that hangs stops at the cap, never later.
+PROTOCOL_CALL_TIMEOUT_SECONDS = 15
+PROTOCOL_TEST_TIMEOUT_SECONDS = 20
+PROTOCOL_BASE_SECONDS = 30
+PROTOCOL_STEP_SECONDS = 2
+PROTOCOL_CAP_SECONDS = 240
+
+
+def protocol_timeout_seconds(steps: int) -> int:
+    return min(PROTOCOL_CAP_SECONDS, PROTOCOL_BASE_SECONDS + PROTOCOL_STEP_SECONDS * max(0, steps))
+
+
+def walk_skipped(path: Path) -> bool:
+    if path.name in WALK_SKIP_DIRS:
+        return True
+    return path.name in VENV_DIRS and (path / "pyvenv.cfg").is_file()
+
+
+def is_test_module(relative: str) -> bool:
+    base = relative.rsplit("/", 1)[-1]
+    return base.endswith(".py") and (base.startswith("test_") or base.endswith("_test.py"))
+
+
+def _dotted(node: ast.expr) -> str:
+    if isinstance(node, ast.Name):
+        return node.id
+    if isinstance(node, ast.Attribute):
+        return _dotted(node.value) + "." + node.attr
+    return ""
+
+
+def _local_bases(node: ast.ClassDef, classes: dict[str, ast.ClassDef], seen: set[str]) -> list[ast.ClassDef]:
+    found = [node]
+    for base in node.bases:
+        name = _dotted(base)
+        if name in classes and name not in seen:
+            seen.add(name)
+            found.extend(_local_bases(classes[name], classes, seen))
+    return found
+
+
+def _is_case_class(node: ast.ClassDef, classes: dict[str, ast.ClassDef]) -> bool:
+    """A unittest.TestCase subclass, as far as the module's own source shows."""
+    for item in _local_bases(node, classes, {node.name}):
+        if any(_dotted(base).rsplit(".", 1)[-1].endswith("TestCase") for base in item.bases):
+            return True
+    return False
+
+
+def _opted_out(node: ast.ClassDef) -> bool:
+    """`__test__ = False` in the class body, the documented way to say a class holds no tests."""
+    for item in node.body:
+        if isinstance(item, ast.Assign) and isinstance(item.value, ast.Constant) and item.value.value is False:
+            if any(isinstance(target, ast.Name) and target.id == "__test__" for target in item.targets):
+                return True
+    return False
+
+
+def declared_tests(source: bytes) -> tuple[list[str], dict[str, str]] | None:
+    """Tests a test module declares, read from its baseline source (None when it does not parse).
+
+    Returns (test ids, {id: FAIL detail} for test classes that cannot be run). An id is a top-level
+    `test_*` function (or one imported by name), or `Class.method` for each `test*` method, own or
+    inherited from a class in the same module, of a `Test*` class or a unittest.TestCase subclass.
+    A `Test*` class with its own __init__, and a test class nested in a test class, cannot be run and
+    are listed as failures, never dropped. Fixed before any code runs, so nothing can hide a test.
+    """
+    try:
+        tree = ast.parse(source)
+    except (SyntaxError, ValueError):
+        return None
+    classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
+    ids: set[str] = set()
+    unsupported: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+            ids.add(node.name)
+        elif isinstance(node, ast.ImportFrom):
+            ids.update(name for name in (alias.asname or alias.name for alias in node.names) if name.startswith("test_"))
+        elif isinstance(node, ast.ClassDef):
+            case = _is_case_class(node, classes)
+            if not (case or node.name.startswith("Test")) or _opted_out(node):
+                continue
+            chain = _local_bases(node, classes, {node.name})
+            members = [item for owner in chain for item in owner.body]
+            if not case and any(isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name == "__init__" for item in members):
+                unsupported[node.name] = "unsupported_test_class:init"
+                continue
+            for item in node.body:
+                if isinstance(item, ast.ClassDef) and (item.name.startswith("Test") or _is_case_class(item, classes)):
+                    unsupported[f"{node.name}.{item.name}"] = "unsupported_test_class:nested"
+            for item in members:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)) and item.name.startswith("test"):
+                    ids.add(f"{node.name}.{item.name}")
+    return sorted(ids), unsupported
+
+
+def grading_steps(root: Path) -> int:
+    """Processes the protocol will start for the test modules under root: one import per module and one
+    per declared test. Used to size the protocol's time limit before it runs."""
+    steps = 0
+    pending = [root]
+    while pending:
+        current = pending.pop()
+        try:
+            entries = sorted(current.iterdir())
+        except OSError:
+            continue
+        for path in entries:
+            if path.is_symlink():
+                continue
+            if path.is_dir():
+                if not walk_skipped(path):
+                    pending.append(path)
+                continue
+            relative = path.relative_to(root).as_posix()
+            if not (path.is_file() and is_test_module(relative)):
+                continue
+            steps += 1
+            try:
+                declared = declared_tests(path.read_bytes())
+            except OSError:
+                continue
+            if declared is not None:
+                steps += len(declared[0])
+    return steps

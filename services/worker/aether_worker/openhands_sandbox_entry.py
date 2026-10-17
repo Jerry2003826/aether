@@ -39,6 +39,8 @@ finally:
 
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
+# Seconds past the protocol's own budget before the entry kills it (the protocol stops 3 s before it).
+_PROTOCOL_KILL_MARGIN_SECONDS = 5
 EXECUTOR = "openhands.sdk.Agent"
 _STATE_DIR = ".aether-state"
 _OBJECTIVE = "AETHER_OBJECTIVE"
@@ -168,13 +170,24 @@ def _failure(detail: str) -> dict[str, object]:
     }
 
 
+class GradingTimeout(RuntimeError):
+    """The protocol produced no result line: it hung past its limit, was killed or crashed.
+
+    A graded failure (grading_timeout), not tampering: nothing was forged.
+    """
+
+    detail = "grading_timeout"
+
+
 def _protocol_payload(stdout: str, nonce: str) -> dict[str, object]:
     """The protocol's result: the one stdout line signed with this run's nonce.
 
     Candidate code cannot learn the nonce (the protocol reads and deletes its file before any candidate
-    code runs), so a forged, missing or duplicated result fails the job as grading_unverified.
+    code runs), so a forged (unsigned) or duplicated result fails the job as grading_unverified. No result
+    line at all is grading_timeout.
     """
     signed: list[dict[str, object]] = []
+    unsigned = 0
     for line in stdout.splitlines():
         if not (line.startswith("{") and line.endswith("}")):
             continue
@@ -184,6 +197,10 @@ def _protocol_payload(stdout: str, nonce: str) -> dict[str, object]:
             continue
         if isinstance(body, dict) and body.get("nonce") == nonce:
             signed.append(body)
+        elif isinstance(body, dict) and "cases" in body:
+            unsigned += 1
+    if not signed and not unsigned:
+        raise GradingTimeout()
     if len(signed) != 1:
         raise GradingViolation("grading_unverified")
     body = signed[0]
@@ -596,21 +613,31 @@ def main() -> None:
         not_dumpable()
         nonce = secrets.token_hex(16)
         secret = _nonce_file(nonce)
+        # The limit grows with the suite (one fresh process per test), under a hard cap; the protocol
+        # gets the same budget and stops starting tests just before it, so it still reports.
+        budget = grading_files.protocol_timeout_seconds(grading_files.grading_steps(job))
         try:
             workspace = LocalWorkspace(working_dir=str(job))
             result = workspace.execute_command(
-                f"AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
+                f"AETHER_PROTOCOL_BUDGET_SECONDS={budget} AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
                 cwd=str(job),
-                timeout=40,
+                timeout=budget + _PROTOCOL_KILL_MARGIN_SECONDS,
             )
         finally:
             secret.unlink(missing_ok=True)
             secret.parent.rmdir()
+            # Nothing the protocol started may outlive it, on the timeout path too.
+            stop_agent_processes()
         payload = _protocol_payload(result.stdout or "", nonce)
     except SystemExit:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
+    except GradingTimeout as exc:
+        # Exit 1 like a failed test: a graded failure that is not tampering, with its own detail.
+        failure = _failure(exc.detail)
+        failure.update(agent_report)
+        emit(failure, 1)
     except GradingViolation as exc:
         # The offending file is already deleted. Exit 1 (a graded failure, not a runner crash) so the
         # worker records the job as FAILED and keeps the agent's patch for review.

@@ -10,20 +10,24 @@ Isolation: three kinds of process, and candidate code only ever runs in the last
   grader     this process. Reads (and deletes) the nonce file first, takes the snapshot, reads the
              test names from the baseline source, and aggregates verdicts. It never imports or runs
              workspace code. Its one stdout line, signed with the nonce, is the result.
-  test       one fresh process per test (plus one per module to import it and find its tests). It
-             runs the trusted test module and oracle from the snapshot and replies on a pipe only it
-             holds. A test without a well-formed reply (crash, early exit, timeout) is a FAIL.
+  test       one fresh process per test id (a function, or a method of a Test* / TestCase class),
+             plus one per module to import it and find its tests. It runs the trusted test module and
+             oracle from the snapshot and replies on a pipe only it holds. A test without a well-formed
+             reply (crash, early exit) is FAIL no_result; one past its limit is FAIL timeout.
   candidate  started by the test process. Candidate modules there are proxies: attribute access and
              calls cross a pipe and only data comes back (builtin values, or opaque handles that refuse
              comparison and truth), so candidate code can neither reach the test's frames, oracle or
              result, nor hand back an object that compares equal to everything.
+Limits (grading_files): a candidate call < a test process < the whole run, which grows with the
+number of tests under a hard cap. Unsupported uses of candidate objects (isinstance on a candidate
+class, except on a candidate exception class, a callback passed into candidate code, comparing a
+candidate object) fail as candidate_object_unsupported:<reason>. See ADR-F44.
 The grader and test processes are made non-dumpable (best effort, Linux), which keeps same-uid
 processes out of their /proc fd/mem/environ and ptrace.
 """
 
 from __future__ import annotations
 
-import ast
 import base64
 import builtins
 import hashlib
@@ -34,11 +38,13 @@ import inspect
 import json
 import os
 import select
+import signal
 import struct
 import subprocess
 import sys
 import time
 import types
+import unittest
 from pathlib import Path
 from typing import Any
 
@@ -51,31 +57,7 @@ try:
 finally:
     sys.path.remove(_HERE)
 
-# Never walked: VCS data, caches, virtualenvs and vendored dependency trees.
-_SKIP_DIRS = frozenset(
-    {
-        "__pycache__",
-        ".git",
-        ".hg",
-        ".svn",
-        ".aether-state",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-        ".tox",
-        ".nox",
-        "node_modules",
-        "site-packages",
-    }
-)
-# Skipped only when they really are virtualenvs (pyvenv.cfg); otherwise they may be candidate packages.
-_VENV_DIRS = frozenset({".venv", "venv", "env"})
-
-
-def _skipped(path: Path) -> bool:
-    if path.name in _SKIP_DIRS:
-        return True
-    return path.name in _VENV_DIRS and (path / "pyvenv.cfg").is_file()
+_skipped = grading_files.walk_skipped
 
 
 def _guarded(name: str) -> bool:
@@ -162,9 +144,7 @@ def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False):
     return spec
 
 
-def _is_test_module(name: str) -> bool:
-    base = name.rsplit("/", 1)[-1]
-    return base.endswith(".py") and (base.startswith("test_") or base.endswith("_test.py"))
+_is_test_module = grading_files.is_test_module
 
 
 def _is_candidate(name: str) -> bool:
@@ -202,6 +182,9 @@ _MAX_DEPTH = 100
 _CALL_TIMEOUT_ENV = "AETHER_PROTOCOL_CALL_TIMEOUT_SECONDS"
 _NONCE_ENV = "AETHER_PROTOCOL_NONCE_FILE"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
+# The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
+_BUDGET_ENV = "AETHER_PROTOCOL_BUDGET_SECONDS"
+_RESULT_MARGIN_SECONDS = 3.0
 
 
 class _ChannelClosed(Exception):
@@ -272,13 +255,15 @@ class _Session:
         env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_PROTOCOL_")}
         try:
             self._process = subprocess.Popen(  # this interpreter running this file
-                [sys.executable, "-I", str(Path(__file__).resolve()), "--candidate", str(child_in), str(child_out)],
+                [sys.executable, "-I", str(Path(__file__).resolve()), "--candidate", str(child_in), str(child_out), str(os.getpid())],
                 cwd=self._root,
                 env=env,
                 stdin=subprocess.DEVNULL,
-                # Candidate output never reaches the grader's stdout, where the signed result goes.
-                stdout=sys.stderr.fileno(),
-                stderr=sys.stderr.fileno(),
+                # Candidate output is discarded: it never reaches the grader's stdout, where the signed
+                # result goes, and a candidate process that outlives its test holds none of the sandbox
+                # entry's pipes open.
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 pass_fds=(child_in, child_out),
                 # Stays in the test process's group, which the grader kills after every test.
             )
@@ -342,6 +327,8 @@ class _Session:
 
 class _Current:
     session: _Session | None = None
+    # The first unsupported use of a candidate object in this test process, if any.
+    unsupported: str | None = None
 
 
 def _session() -> _Session:
@@ -445,17 +432,26 @@ def _encode_data(value: object, depth: int, nested) -> list[object]:
     return []
 
 
-def _encode_argument(value: object) -> list[object]:
-    encoded = _encode_trusted(value)
-    if not encoded:
-        raise TypeError(f"cannot pass a {type(value).__name__} to candidate code; pass data")
-    return encoded
+class CandidateObjectUnsupported(TypeError):
+    """A test used a candidate object in a way the isolation cannot support (see ADR-F44)."""
+
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _unsupported(reason: str) -> CandidateObjectUnsupported:
+    """The error to raise, remembered so the test's FAIL detail names it even if the test catches it."""
+    if _Current.unsupported is None:
+        _Current.unsupported = reason
+    return CandidateObjectUnsupported(reason)
 
 
 def _encode_tree(value: object, depth: int = 0) -> list[object]:
     encoded = _encode_trusted(value, depth)
     if not encoded:
-        raise TypeError(f"cannot pass a {type(value).__name__} to candidate code; pass data")
+        # A function, class or other trusted object cannot cross into the candidate process.
+        raise _unsupported("callable_passed_to_candidate" if callable(value) else "object_passed_to_candidate")
     return encoded
 
 
@@ -528,10 +524,19 @@ class _Remote:
         return f"<candidate {self._aether_type}>"
 
     def _refuse(self, *_args: object) -> bool:
-        raise TypeError(f"a candidate {self._aether_type} cannot be compared or tested for truth; compare its data")
+        raise _unsupported("compare_candidate_object")
+
+    def __bool__(self) -> bool:
+        raise _unsupported("truth_of_candidate_object")
+
+    # isinstance(x, candidate_class) / issubclass(...) look these up on the type of the class argument.
+    def __instancecheck__(self, _instance: object) -> bool:
+        raise _unsupported("isinstance_candidate_class")
+
+    def __subclasscheck__(self, _subclass: object) -> bool:
+        raise _unsupported("issubclass_candidate_class")
 
     __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse  # type: ignore[assignment]
-    __bool__ = _refuse  # type: ignore[assignment]
     __hash__ = object.__hash__
 
 
@@ -622,60 +627,81 @@ def _read_nonce() -> str:
             pass
 
 
-def _call_timeout() -> float:
+def _seconds(name: str, default: float, ceiling: float) -> float:
+    """A limit from the environment (tests shorten them); never above the documented ceiling."""
     try:
-        value = float(os.environ.get(_CALL_TIMEOUT_ENV, "") or 30)
+        value = float(os.environ.get(name, "") or default)
     except ValueError:
-        return 30.0
-    return value if 0 < value < 3600 else 30.0
-
-
-def _declared_tests(source: bytes) -> list[str] | None:
-    """test_* names a test module declares at top level, read from its baseline source (None: no parse).
-
-    These are fixed before any code runs, so nothing can hide a test or shrink the count.
-    """
-    try:
-        tree = ast.parse(source)
-    except (SyntaxError, ValueError):
-        return None
-    names: set[str] = set()
-    for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-            names.add(node.name)
-        elif isinstance(node, ast.ImportFrom):
-            names.update(alias.asname or alias.name for alias in node.names)
-    return sorted(name for name in names if name.startswith("test_"))
+        return default
+    return value if 0 < value <= ceiling else default
 
 
 def _test_timeout() -> float:
-    try:
-        value = float(os.environ.get(_TEST_TIMEOUT_ENV, "") or 60)
-    except ValueError:
-        return 60.0
-    return value if 0 < value < 3600 else 60.0
+    return _seconds(_TEST_TIMEOUT_ENV, grading_files.PROTOCOL_TEST_TIMEOUT_SECONDS, grading_files.PROTOCOL_TEST_TIMEOUT_SECONDS)
+
+
+def _call_timeout(test_timeout: float) -> float:
+    """One call into candidate code ends before its test process does, so a hang is reported as such."""
+    configured = _seconds(_CALL_TIMEOUT_ENV, grading_files.PROTOCOL_CALL_TIMEOUT_SECONDS, grading_files.PROTOCOL_CALL_TIMEOUT_SECONDS)
+    return min(configured, test_timeout * 0.75)
 
 
 def _child_env() -> dict[str, str]:
     return {key: value for key, value in os.environ.items() if not key.startswith("AETHER_PROTOCOL_")}
 
 
+_PR_SET_PDEATHSIG = 1
+
+
+def _die_with_parent(parent: int) -> None:
+    """SIGKILL this process when its parent dies (Linux), so a killed grader leaves nothing behind."""
+    try:
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(_PR_SET_PDEATHSIG, signal.SIGKILL, 0, 0, 0)
+    except (OSError, AttributeError):
+        pass
+    if os.getppid() != parent:
+        os._exit(1)
+
+
+# Process groups of the test processes still running; killed on every way out of the grader.
+_LIVE: set[int] = set()
+
+
+def _kill_live() -> None:
+    for group in list(_LIVE):
+        try:
+            os.killpg(group, signal.SIGKILL)
+        except OSError:
+            pass
+        _LIVE.discard(group)
+
+
+def _on_signal(signum: int, _frame: object) -> None:
+    _kill_live()
+    os._exit(128 + signum)
+
+
+_TIMED_OUT = {"kind": "result", "verdict": "FAIL", "detail": "timeout"}
+
+
 def _run_in_child(root: Path, request: dict[str, object], timeout: float) -> dict[str, object] | None:
     """Run one step (collect a module, or one test) in a fresh test process; its reply or None.
 
     The reply arrives on a pipe only that process holds, never on stdout. The test process runs trusted
-    test code only; candidate code runs in its own process behind it. No reply (a crash, an early exit,
-    a timeout, a malformed message) is None, which the caller records as FAIL.
+    test code only; candidate code runs in its own process behind it. A timeout is a FAIL "timeout"
+    result; no reply (a crash, an early exit, a malformed message) is None, also a FAIL.
     """
     request_read, request_write = os.pipe()
     reply_read, reply_write = os.pipe()
     try:
         process = subprocess.Popen(  # this interpreter running this file
-            [sys.executable, "-I", str(Path(__file__).resolve()), "--runner", str(request_read), str(reply_write)],
+            [sys.executable, "-I", str(Path(__file__).resolve()), "--runner", str(request_read), str(reply_write), str(os.getpid())],
             cwd=root,
             env=_child_env(),
             stdin=subprocess.DEVNULL,
-            # Nothing a test process (or the candidate behind it) prints reaches the stdout the signed result goes to.
+            # Nothing a test process prints reaches the stdout the signed result goes to.
             stdout=sys.stderr.fileno(),
             stderr=sys.stderr.fileno(),
             pass_fds=(request_read, reply_write),
@@ -685,6 +711,7 @@ def _run_in_child(root: Path, request: dict[str, object], timeout: float) -> dic
         for fd in (request_read, request_write, reply_read, reply_write):
             os.close(fd)
         return None
+    _LIVE.add(process.pid)
     os.close(request_read)
     os.close(reply_write)
     reply: object = None
@@ -693,7 +720,9 @@ def _run_in_child(root: Path, request: dict[str, object], timeout: float) -> dic
         os.close(request_write)
         request_write = -1
         reply = _receive(reply_read, time.monotonic() + timeout)
-    except (TimeoutError, _ChannelClosed, OSError, ValueError):
+    except TimeoutError:
+        reply = dict(_TIMED_OUT)
+    except (_ChannelClosed, OSError, ValueError):
         reply = None
     finally:
         for fd in (request_write, reply_read):
@@ -704,10 +733,11 @@ def _run_in_child(root: Path, request: dict[str, object], timeout: float) -> dic
                     pass
         # The test process, the candidate process and anything they started that stayed in the group.
         try:
-            os.killpg(process.pid, 9)
+            os.killpg(process.pid, signal.SIGKILL)
         except OSError:
             pass
         process.wait()
+        _LIVE.discard(process.pid)
     return reply if isinstance(reply, dict) else None
 
 
@@ -715,11 +745,27 @@ def _case(name: str, verdict: str, detail: str) -> dict[str, str]:
     return {"name": name, "verdict": verdict, "detail": detail}
 
 
+def _deadline(steps: int) -> float:
+    """When the grader stops starting tests: the entry's budget for this run (it sizes it from the same
+    formula), less a margin for writing the result, and never more than the formula itself."""
+    limit = float(grading_files.protocol_timeout_seconds(steps))
+    budget = _seconds(_BUDGET_ENV, limit, grading_files.PROTOCOL_CAP_SECONDS)
+    return time.monotonic() + max(1.0, min(limit, budget) - _RESULT_MARGIN_SECONDS)
+
+
+def _probe_ids(probe: dict[str, object]) -> tuple[list[str], dict[str, str]]:
+    found = probe.get("names")
+    names = [name for name in found if type(name) is str and name] if isinstance(found, list) else []
+    raw = probe.get("unsupported")
+    unsupported = {key: str(value)[:200] for key, value in raw.items() if type(key) is str} if isinstance(raw, dict) else {}
+    return names, unsupported
+
+
 def run_suite(root: Path) -> dict[str, Any]:
     """Grade the workspace. This process never imports or runs workspace code, trusted or candidate.
 
-    Every test function runs in its own fresh test process; the test names come from the baseline
-    source, and a test without a well-formed reply from its own process is a FAIL.
+    Every test (function, or method of a test class) runs in its own fresh test process; the test ids
+    come from the baseline source, and a test without a well-formed reply from its own process is a FAIL.
     """
     started = time.monotonic()
     cases: list[dict[str, str]] = []
@@ -730,13 +776,27 @@ def run_suite(root: Path) -> dict[str, Any]:
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
-    timeout = _test_timeout()
+    declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
+    deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
+    test_timeout = _test_timeout()
+    call_timeout = _call_timeout(test_timeout)
     tampered = False
+
+    def remaining() -> float:
+        return min(test_timeout, deadline - time.monotonic())
+
     for relative, import_name, base in tests:
         if _tampered(root, baseline):
             tampered = True
             break
         label = relative[:-3].replace("/", ".")
+        declared, unsupported = declared_by_module[relative]
+        if remaining() <= 0:
+            # Out of time before this module started: every declared test is a timed-out failure.
+            for name in [*declared, *unsupported] or [""]:
+                failed += 1
+                cases.append(_case(label + ("." + name if name else ""), "FAIL", "timeout"))
+            continue
         request: dict[str, object] = {
             "sources": encoded,
             # Only this test's own directory: bare-name helpers resolve relative to it.
@@ -744,26 +804,39 @@ def run_suite(root: Path) -> dict[str, Any]:
             "relative": relative,
             "import_name": import_name,
             "label": label,
+            "call_timeout": call_timeout,
         }
-        declared = _declared_tests(sources[relative]) or []
         # Importing the module once on its own: an import failure fails the module, and tests the module
-        # defines without a top-level def (a loop, an assignment) are found and run as well.
-        probe = _run_in_child(root, {**request, "test": None}, timeout)
-        if probe is None or probe.get("kind") not in {"import_failed", "collected"}:
+        # defines without a top-level def (a loop, an assignment, an imported test class) are run as well.
+        probe = _run_in_child(root, {**request, "test": None}, remaining())
+        if probe is None or probe.get("kind") not in {"import_failed", "collected", "result"}:
             failed += 1
             cases.append(_case(label, "FAIL", "import:no_result"))
+            continue
+        if probe["kind"] == "result":
+            failed += 1
+            cases.append(_case(label, "FAIL", "import:" + str(probe.get("detail", ""))[:200]))
             continue
         if probe["kind"] == "import_failed":
             failed += 1
             cases.append(_case(label, "FAIL", "import:" + str(probe.get("detail", ""))[:200]))
             continue
-        found = probe.get("names")
-        extra = [name for name in found if type(name) is str and name.startswith("test_")] if isinstance(found, list) else []
-        for name in sorted(set(declared) | set(extra)):
+        found, found_unsupported = _probe_ids(probe)
+        unsupported = {**found_unsupported, **unsupported}
+        # Classes that cannot be run are failures, counted, never dropped.
+        for name in sorted(unsupported):
+            failed += 1
+            cases.append(_case(label + "." + name, "FAIL", unsupported[name]))
+        for name in sorted((set(declared) | set(found)) - set(unsupported)):
             if _tampered(root, baseline):
                 tampered = True
                 break
-            reply = _run_in_child(root, {**request, "test": name, "required": name in declared}, timeout)
+            budget = remaining()
+            if budget <= 0:
+                failed += 1
+                cases.append(_case(label + "." + name, "FAIL", "timeout"))
+                continue
+            reply = _run_in_child(root, {**request, "test": name, "required": name in declared}, budget)
             verdict = reply.get("verdict") if reply is not None and reply.get("kind") == "result" else None
             detail = str(reply.get("detail", ""))[:200] if reply is not None else ""
             if verdict == "SKIP":
@@ -806,12 +879,157 @@ def _trusted_test(value: object) -> bool:
     return callable(value) and not isinstance(value, (_Remote, _RemoteModule))
 
 
+def _trusted_class(value: object) -> bool:
+    return isinstance(value, type) and not issubclass(value, (_Remote, _RemoteModule))
+
+
+def _result(verdict: str, detail: str = "") -> dict[str, object]:
+    return {"kind": "result", "verdict": verdict, "detail": detail}
+
+
+def _failure_detail(exc: BaseException) -> str:
+    if isinstance(exc, CandidateError) and str(exc) == "candidate_timeout":
+        return "timeout"
+    if isinstance(exc, CandidateObjectUnsupported):
+        return "candidate_object_unsupported:" + exc.reason
+    if isinstance(exc, TypeError) and str(exc).startswith("catching classes that do not inherit from BaseException"):
+        # `except candidate.SomeError:`: the class is a proxy, never a real exception class.
+        return "candidate_object_unsupported:except_candidate_exception_class"
+    if _Current.unsupported is not None:
+        return "candidate_object_unsupported:" + _Current.unsupported
+    return type(exc).__name__
+
+
+def _call_test(fn: object) -> dict[str, object]:
+    try:
+        value = fn()  # type: ignore[operator]
+    except BaseException as exc:  # noqa: BLE001 - any failure, even SystemExit, is a FAIL verdict
+        return _result("FAIL", _failure_detail(exc))
+    if inspect.iscoroutine(value):
+        value.close()
+        return _result("FAIL", "async")
+    # Calling a generator function runs none of its body, so it must not count as a pass.
+    if inspect.isasyncgen(value):
+        return _result("FAIL", "unsupported_async_generator")
+    if inspect.isgenerator(value):
+        value.close()
+        return _result("FAIL", "unsupported_generator")
+    return _result("PASS")
+
+
+class _CaseResult(unittest.TestResult):
+    """Keeps the type of the first failure; skips and expected failures are never a pass."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.detail = ""
+
+    def _note(self, err) -> None:
+        if not self.detail:
+            self.detail = _failure_detail(err[1]) if err[1] is not None else err[0].__name__
+
+    def addError(self, test, err) -> None:  # noqa: N802 - unittest API
+        super().addError(test, err)
+        self._note(err)
+
+    def addFailure(self, test, err) -> None:  # noqa: N802 - unittest API
+        super().addFailure(test, err)
+        self._note(err)
+
+    def addSubTest(self, test, subtest, err) -> None:  # noqa: N802 - unittest API
+        super().addSubTest(test, subtest, err)
+        if err is not None:
+            self._note(err)
+
+
+def _run_case_method(cls: type, method: str) -> dict[str, object]:
+    fn = getattr(cls, method, None)
+    if not issubclass(cls, unittest.IsolatedAsyncioTestCase):
+        if inspect.iscoroutinefunction(fn):
+            return _result("FAIL", "async")
+        if inspect.isasyncgenfunction(fn):
+            return _result("FAIL", "unsupported_async_generator")
+    if inspect.isgeneratorfunction(fn):
+        return _result("FAIL", "unsupported_generator")
+    try:
+        case = cls(method)
+    except BaseException as exc:  # noqa: BLE001 - a case that cannot be built fails
+        return _result("FAIL", _failure_detail(exc))
+    outcome = _CaseResult()
+    case.run(outcome)
+    if outcome.detail:
+        return _result("FAIL", outcome.detail)
+    if outcome.skipped:
+        return _result("FAIL", "skipped")
+    if outcome.expectedFailures:
+        return _result("FAIL", "expected_failure")
+    if outcome.unexpectedSuccesses:
+        return _result("FAIL", "unexpected_success")
+    if outcome.testsRun != 1 or not outcome.wasSuccessful():
+        return _result("FAIL", "no_result")
+    return _result("PASS")
+
+
+def _run_class_method(cls: type, method: str) -> dict[str, object]:
+    """A pytest-style Test* class: a fresh instance; setup_class/setup_method and their teardowns run."""
+    if "__init__" in {name for klass in cls.__mro__[:-1] for name in vars(klass)}:
+        return _result("FAIL", "unsupported_test_class:init")
+    fn = getattr(cls, method, None)
+    if not _trusted_test(fn):
+        return _result("FAIL", "not_a_test")
+    steps: list[tuple[str, object]] = []
+    try:
+        instance = cls()
+        bound = getattr(instance, method)
+        for name, args in (("setup_class", ()), ("setup_method", (bound,))):
+            hook = getattr(cls if name == "setup_class" else instance, name, None)
+            if callable(hook):
+                hook(*args)
+                steps.append((name, hook))
+    except BaseException as exc:  # noqa: BLE001 - a failing fixture fails the test
+        return _result("FAIL", _failure_detail(exc))
+    outcome = _call_test(bound)
+    for name, partner in (("teardown_method", "setup_method"), ("teardown_class", "setup_class")):
+        hook = getattr(cls if name == "teardown_class" else instance, name, None)
+        if not callable(hook) or not any(step == partner for step, _ in steps):
+            continue
+        try:
+            hook(bound) if name == "teardown_method" else hook()
+        except BaseException as exc:  # noqa: BLE001 - a failing teardown fails the test
+            if outcome["verdict"] == "PASS":
+                outcome = _result("FAIL", _failure_detail(exc))
+    return outcome
+
+
+def _collect(module: types.ModuleType) -> dict[str, object]:
+    """Tests the imported module exposes: functions, and methods of test classes (own or imported)."""
+    names: set[str] = set()
+    unsupported: dict[str, str] = {}
+    for attr, value in vars(module).items():
+        if attr.startswith("test_") and _trusted_test(value) and not isinstance(value, type):
+            names.add(attr)
+            continue
+        if not _trusted_class(value) or getattr(value, "__test__", True) is False:
+            continue
+        own = getattr(value, "__module__", None) == module.__name__
+        if issubclass(value, unittest.TestCase):
+            names.update(f"{attr}.{method}" for method in unittest.TestLoader().getTestCaseNames(value))
+        elif attr.startswith("Test"):
+            if "__init__" in {name for klass in value.__mro__[:-1] for name in vars(klass)}:
+                # A class this module defines must run; one it merely imports (e.g. a test client) is not a test.
+                if own:
+                    unsupported[attr] = "unsupported_test_class:init"
+                continue
+            names.update(f"{attr}.{method}" for method in dir(value) if method.startswith("test") and callable(getattr(value, method, None)))
+    return {"kind": "collected", "names": sorted(names), "unsupported": unsupported}
+
+
 def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
     relative, import_name, label = request["relative"], request["import_name"], request["label"]
     sys.meta_path.insert(0, _GraderFinder(root, sources, _module_map(sources, bases)))
-    _Current.session = _Session(root, sources, bases, _call_timeout())
+    _Current.session = _Session(root, sources, bases, float(request["call_timeout"]))
     try:
         try:
             if import_name:
@@ -823,35 +1041,30 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
                 sys.modules[label] = module
                 module.__spec__.loader.exec_module(module)
         except BaseException as exc:  # noqa: BLE001 - any failure to import is a FAIL verdict
-            return {"kind": "import_failed", "detail": type(exc).__name__}
+            return {"kind": "import_failed", "detail": _failure_detail(exc)}
         name = request["test"]
         if name is None:
-            names = sorted(attr for attr, value in vars(module).items() if attr.startswith("test_") and _trusted_test(value))
-            return {"kind": "collected", "names": names}
+            return _collect(module)
+        owner, _, method = name.rpartition(".")
+        if owner:
+            cls = vars(module).get(owner)
+            if not _trusted_class(cls):
+                return _result("FAIL", "not_a_test")
+            if issubclass(cls, unittest.TestCase):
+                return _run_case_method(cls, method)
+            return _run_class_method(cls, method)
         fn = vars(module).get(name)
-        if not _trusted_test(fn):
+        if not _trusted_test(fn) or isinstance(fn, type):
             # A declared test that is gone or became a candidate object fails; a non-test name is skipped.
-            return {"kind": "result", "verdict": "FAIL" if request.get("required") else "SKIP", "detail": "not_a_test"}
-        try:
-            value = fn()
-        except BaseException as exc:  # noqa: BLE001 - any failure, even SystemExit, is a FAIL verdict
-            return {"kind": "result", "verdict": "FAIL", "detail": type(exc).__name__}
-        if inspect.iscoroutine(value):
-            value.close()
-            return {"kind": "result", "verdict": "FAIL", "detail": "async"}
-        # Calling a generator function runs none of its body, so it must not count as a pass.
-        if inspect.isasyncgen(value):
-            return {"kind": "result", "verdict": "FAIL", "detail": "unsupported_async_generator"}
-        if inspect.isgenerator(value):
-            value.close()
-            return {"kind": "result", "verdict": "FAIL", "detail": "unsupported_generator"}
-        return {"kind": "result", "verdict": "PASS", "detail": ""}
+            return _result("FAIL" if request.get("required") else "SKIP", "not_a_test")
+        return _call_test(fn)
     finally:
         _Current.session.close()
         _Current.session = None
 
 
-def _runner_main(read_fd: int, write_fd: int) -> None:
+def _runner_main(read_fd: int, write_fd: int, parent: int) -> None:
+    _die_with_parent(parent)
     _not_dumpable()
     sys.dont_write_bytecode = True
     request = _receive(read_fd)
@@ -977,16 +1190,25 @@ class _CandidateFinder(importlib.abc.MetaPathFinder):
 
 
 def main() -> None:
-    if len(sys.argv) == 4 and sys.argv[1] == "--candidate":
+    if len(sys.argv) == 5 and sys.argv[1] == "--candidate":
+        _die_with_parent(int(sys.argv[4]))
         _candidate_main(int(sys.argv[2]), int(sys.argv[3]))
         os._exit(0)
-    if len(sys.argv) == 4 and sys.argv[1] == "--runner":
-        _runner_main(int(sys.argv[2]), int(sys.argv[3]))
+    if len(sys.argv) == 5 and sys.argv[1] == "--runner":
+        _runner_main(int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4]))
         sys.stdout.flush()
         os._exit(0)
     nonce = _read_nonce()
     _not_dumpable()
-    body = run_suite(Path.cwd())
+    # Every way out of the grader stops the test processes it started (their candidate processes die
+    # with them): a signal kills them and exits with no result line, which the entry reports as
+    # grading_timeout; a SIGKILL cannot be caught, so each child also dies with its parent.
+    for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(signum, _on_signal)
+    try:
+        body = run_suite(Path.cwd())
+    finally:
+        _kill_live()
     if nonce:
         body["nonce"] = nonce
     sys.stdout.write(json.dumps(body, separators=(",", ":")) + "\n")

@@ -1153,6 +1153,20 @@ def _job_objective(row: dict[str, Any]) -> str:
 
 # Case details the sandbox entry reports when the agent tampered with grading (exit code 1).
 GRADING_VIOLATIONS = frozenset({"grading_startup_hook", "grading_shadow_module", "grading_unverified"})
+# The protocol produced no result line (hung past its limit, killed, crashed). A graded failure with its
+# own error code; never a violation, since nothing was shown to be forged.
+GRADING_TIMEOUT = "grading_timeout"
+
+
+def _runner_details(sandbox: dict[str, Any]) -> set[str]:
+    result = sandbox.get("result")
+    if not isinstance(result, dict):
+        return set()
+    return {
+        str(case["detail"])
+        for case in result.get("cases") or []
+        if isinstance(case, dict) and case.get("name") == "runner" and isinstance(case.get("detail"), str)
+    }
 
 
 def _grading_violation(sandbox: dict[str, Any]) -> str | None:
@@ -1242,6 +1256,8 @@ def _coding_terminal(
         return "FAILED", "model_not_called"
     if _agent_patch(sandbox) is None:
         return "FAILED", "agent_no_change"
+    if not passed and GRADING_TIMEOUT in _runner_details(sandbox):
+        return "FAILED", GRADING_TIMEOUT
     return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
 
 
