@@ -16,7 +16,13 @@ from aether_worker.coding_sandbox import (
     container_name,
 )
 from aether_worker.net_guard import fixtures_enabled
-from aether_worker.openhands_image import build_openhands_sandbox, coding_runtime_image, launch_image
+from aether_worker.openhands_image import (
+    ImageUnavailable,
+    build_openhands_sandbox,
+    coding_runtime_image,
+    ensure_openhands_sandbox,
+    launch_image,
+)
 from aether_worker.role_http import serve_role
 from aether_worker.runner import JOB_IMAGE, _docker, probe_docker_daemon
 from aether_worker.threat_launch import ThreatLaunchError, docker_cleanup, docker_runner, execute_container
@@ -37,8 +43,9 @@ def main() -> None:
     if not token:
         raise SystemExit("runner 缺少 AETHER_LOOPBACK_TOKEN")
     os.environ["AETHER_PROCESS_ROLE"] = "runner"
+    # The image is ensured by prepare_image before this role starts (role_launch), so the
+    # worker's readiness wait never includes a first build on a clean host.
     started = probe_docker_daemon()
-    _ensure_coding_image(started)
 
     def health() -> dict[str, str]:
         return {"role": "runner", **started}
@@ -116,7 +123,10 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
 
 
 def _ensure_coding_image(started: dict[str, str]) -> None:
-    """Build the labeled image when this runner can see Docker and the image is absent."""
+    """Label check and local build only, no pull. Not on the startup path: prepare_image is.
+
+    Kept for callers that already hold a probe result and must not reach a registry.
+    """
     if started.get("runtime") != "enabled":
         return
     try:
@@ -125,6 +135,26 @@ def _ensure_coding_image(started: dict[str, str]) -> None:
         build_openhands_sandbox()
     except (DockerException, OSError):
         sys.stderr.write("openhands sandbox image build failed\n")
+
+
+def prepare_image() -> int:
+    """Ensure the OpenHands sandbox image (local, else pull, else build). Exit status for the one-shot step.
+
+    No Docker means nothing to prepare (0). A failed pull and build is reported (1); the
+    roles still start and a coding job then fails as image_unavailable.
+    """
+    started = probe_docker_daemon()
+    if started.get("runtime") != "enabled":
+        return 0
+    try:
+        ensure_openhands_sandbox()
+    except ImageUnavailable as exc:
+        sys.stderr.write(f"openhands sandbox image unavailable: {exc.reason}\n")
+        return 1
+    except (DockerException, OSError):
+        sys.stderr.write("openhands sandbox image build failed\n")
+        return 1
+    return 0
 
 
 def _run(
@@ -151,4 +181,7 @@ def _logs(name: object, limit: object = None) -> dict[str, str]:
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--prepare-image"]:
+        os.environ["AETHER_PROCESS_ROLE"] = "runner"
+        raise SystemExit(prepare_image())
     main()
