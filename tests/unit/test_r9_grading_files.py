@@ -120,7 +120,7 @@ def test_new_top_level_modules_that_shadow_imports_are_detected() -> None:
 
     for name in sorted(_SHADOW_ROOTS):
         assert is_shadow_module(name) or is_shadow_module(name + "/__init__.py"), name
-    for name in ("pytest.py", "_pytest/__init__.py", "pluggy.py", "json.py", "json/__init__.py", "os.py", "openhands/x.py"):
+    for name in ("pytest.py", "_pytest/__init__.py", "pluggy.py", "json.py", "json/__init__.py", "os.py", "pluggy/__init__.py"):
         assert is_shadow_module(name), name
     for name in ("helper.py", "newmod.py", "app.py", "pkg/json.py", "README.md"):
         assert not is_shadow_module(name), name
