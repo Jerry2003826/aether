@@ -7,6 +7,7 @@ INSERT INTO model_requests, and UPDATE ... SET with `col = :p`, `col = col +/- :
 
 from __future__ import annotations
 
+import copy
 import json
 import re
 from contextlib import contextmanager
@@ -87,7 +88,12 @@ class FakeLedgerDatabase:
 
     @contextmanager
     def transaction(self, **_scope: Any) -> Iterator["FakeLedgerDatabase"]:
-        yield self
+        saved = copy.deepcopy((self.accounts, self.requests))
+        try:
+            yield self
+        except BaseException:
+            self.accounts, self.requests = saved
+            raise
 
     def execute(self, clause: Any, params: dict[str, Any] | None = None) -> _Result:
         sql = " ".join(str(clause).split())
@@ -104,6 +110,14 @@ class FakeLedgerDatabase:
         if "FROM budget_accounts" in sql:
             row = self.accounts.get((params["project_id"], params["task_id"]))
             return _Result([] if row is None else [dict(row)])
+        if sql.startswith("SELECT count(*) FROM model_requests") and "LIKE :prefix" in sql:
+            prefix = params["prefix"].rstrip("%")
+            count = sum(
+                1
+                for (project_id, task_id, key) in self.requests
+                if project_id == params["project_id"] and task_id == params["task_id"] and key.startswith(prefix)
+            )
+            return _Result([{"count": count}])
         if "FROM model_requests" in sql:
             row = self.requests.get((params["project_id"], params["task_id"], params.get("request_key", "")))
             if row is None or ("usage_status = 'reserved'" in sql and row["usage_status"] != "reserved"):
