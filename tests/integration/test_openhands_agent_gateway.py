@@ -1,16 +1,13 @@
-"""The coding sandbox's OpenHands agent calls a scripted model and the ledger settles tokens."""
+"""The coding sandbox's OpenHands agent calls a test-only fake upstream and the ledger settles tokens."""
 
 from __future__ import annotations
 
 import json
 import os
-import re
 import select
 import subprocess
 import sys
-import threading
 import time
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 from sqlalchemy import text
@@ -22,9 +19,10 @@ from aether_worker.coding_sandbox import release_coding_container
 from aether_worker.coding_workspace import unified_patch
 from aether_worker.runner import docker_available
 from aether_worker.service import route_pending
+from tests.integration.fake_coding_upstream import PROVIDER_KEY, FakeCodingModel, editing_upstream
 from tests.integration.test_console_records import _headers, _session
 
-_PROVIDER_KEY = "gateway-provider-key"
+_PROVIDER_KEY = PROVIDER_KEY
 _LOOPBACK = "loop-token-unit"
 _SOURCE = "def value():\n    return 0\n"
 WORKSPACE = {
@@ -51,109 +49,6 @@ _ISOLATED_ENV = (
 )
 
 
-class _FakeModel:
-    def __init__(self, rounds: tuple[tuple[str, int, int], ...] | None = None) -> None:
-        self.authorizations: list[str] = []
-        self.models: list[str] = []
-        self.tool_names: set[str] = set()
-        self.usages: list[tuple[int, int]] = []
-        self.problems: list[str] = []
-        self._rounds = rounds or (("edit", 20, 11), ("finish", 20, 7))
-        self._calls = 0
-        self._lock = threading.Lock()
-
-    def reply(self, raw: bytes, authorization: str) -> dict:
-        with self._lock:
-            self.authorizations.append(authorization)
-            self._calls += 1
-            call = self._calls
-            loaded = json.loads(raw)
-            model = loaded.get("model")
-            if isinstance(model, str):
-                self.models.append(model)
-            for tool in loaded.get("tools") or []:
-                function = tool.get("function") if isinstance(tool, dict) else None
-                name = function.get("name") if isinstance(function, dict) else None
-                if isinstance(name, str):
-                    self.tool_names.add(name)
-            text_body = raw.decode("utf-8", "replace")
-            if "aether_job_token" in loaded:
-                self.problems.append("job token reached the model")
-            if _PROVIDER_KEY in text_body:
-                self.problems.append("provider key reached the model body")
-        kind, prompt, completion = self._rounds[min(call, len(self._rounds)) - 1]
-        target = _app_path(text_body)
-        if kind == "edit" and not target.startswith("/"):
-            self.problems.append("missing app.py path")
-        if kind == "view":
-            arguments = json.dumps({"command": "view", "path": target})
-            name = "file_editor"
-            call_id = "call_view"
-        elif kind == "edit":
-            arguments = json.dumps({"command": "str_replace", "path": target, "old_str": "return 0", "new_str": "return 42"})
-            name = "file_editor"
-            call_id = "call_edit"
-        else:
-            arguments = json.dumps({"message": "done"})
-            name = "finish"
-            call_id = "call_finish"
-        with self._lock:
-            self.usages.append((prompt, completion))
-        return {
-            "id": call_id,
-            "object": "chat.completion",
-            "created": 0,
-            "model": "coder",
-            "choices": [
-                {
-                    "index": 0,
-                    "finish_reason": "tool_calls",
-                    "message": {
-                        "role": "assistant",
-                        "content": None,
-                        "tool_calls": [
-                            {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
-                        ],
-                    },
-                }
-            ],
-            "usage": {"prompt_tokens": prompt, "completion_tokens": completion, "total_tokens": prompt + completion},
-        }
-
-
-_REPOSITORY = re.compile(r"The repository is the directory (/[^;\s\"]+);")
-
-
-def _app_path(text: str) -> str:
-    """app.py under the workspace the entry names in its system prompt.
-
-    The user message is the job objective verbatim and carries no sandbox path.
-    """
-    found = _REPOSITORY.search(text)
-    if found is None:
-        return ""
-    return f"{found.group(1)}/app.py"
-
-
-def _handler(model: _FakeModel) -> type[BaseHTTPRequestHandler]:
-    class Handler(BaseHTTPRequestHandler):
-        def do_POST(self) -> None:
-            length = int(self.headers.get("content-length") or "0")
-            raw = self.rfile.read(length)
-            payload = model.reply(raw, self.headers.get("authorization") or "")
-            encoded = json.dumps(payload).encode()
-            self.send_response(200)
-            self.send_header("content-type", "application/json")
-            self.send_header("content-length", str(len(encoded)))
-            self.end_headers()
-            self.wfile.write(encoded)
-
-        def log_message(self, _format: str, *_args: object) -> None:
-            return
-
-    return Handler
-
-
 def _ready(proc: subprocess.Popen[bytes]) -> str:
     deadline = time.monotonic() + 20
     pending = ""
@@ -177,19 +72,18 @@ def _ready(proc: subprocess.Popen[bytes]) -> str:
 
 
 def test_openhands_agent_edits_through_the_gateway_and_settles_tokens(client, role_urls) -> None:
-    _exercise(client, role_urls, _FakeModel(), "r8-agent")
+    _exercise(client, role_urls, FakeCodingModel(), "r8-agent")
 
 
 def test_large_token_rounds_extend_the_reservation_and_settle_actual_usage(client, role_urls) -> None:
     rounds = (("view", 3000, 40), ("edit", 3100, 48), ("finish", 3200, 24))
-    _exercise(client, role_urls, _FakeModel(rounds), "r8-large", minimum_requests=3)
+    _exercise(client, role_urls, FakeCodingModel(rounds), "r8-large", minimum_requests=3)
 
 
-def _exercise(client, role_urls, model: _FakeModel, prefix: str, *, minimum_requests: int = 2) -> None:
+def _exercise(client, role_urls, model: FakeCodingModel, prefix: str, *, minimum_requests: int = 2) -> None:
     _require_docker()
-    server = ThreadingHTTPServer(("127.0.0.1", 0), _handler(model))
-    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
-    server_thread.start()
+    upstream = editing_upstream(model)
+    upstream_base = upstream.__enter__()
     saved = {name: os.environ.get(name) for name in _ISOLATED_ENV}
     gateway: subprocess.Popen[bytes] | None = None
     job_id = ""
@@ -199,7 +93,7 @@ def _exercise(client, role_urls, model: _FakeModel, prefix: str, *, minimum_requ
             child_env.pop(name, None)
             os.environ.pop(name, None)
         child_env["AETHER_LOOPBACK_TOKEN"] = _LOOPBACK
-        child_env["AETHER_LIVE_MODEL_BASE"] = f"http://127.0.0.1:{server.server_address[1]}/v1"
+        child_env["AETHER_LIVE_MODEL_BASE"] = upstream_base
         gateway = subprocess.Popen(
             [sys.executable, "-m", "aether_gateway"],
             stdin=subprocess.PIPE,
@@ -257,8 +151,7 @@ def _exercise(client, role_urls, model: _FakeModel, prefix: str, *, minimum_requ
                 gateway.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 gateway.kill()
-        server.shutdown()
-        server.server_close()
+        upstream.__exit__(None, None, None)
         for name, value in saved.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -273,7 +166,7 @@ def _assert_settled(
     project_id: str,
     task_id: str,
     job_id: str,
-    model: _FakeModel,
+    model: FakeCodingModel,
     *,
     minimum_requests: int,
 ) -> None:

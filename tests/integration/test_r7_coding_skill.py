@@ -14,6 +14,7 @@ from sqlalchemy import text
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
+from tests.integration.fake_coding_upstream import PROVIDER_KEY, FakeCodingModel, editing_upstream
 from tests.integration.test_worker_process import (
     ORIGIN_VALUE,
     PASSPHRASE,
@@ -112,28 +113,35 @@ def test_public_coding_job_and_skill_eval_reach_terminal_states(role_urls, clean
     artifact_root = tmp_path / "artifacts"
     secret_path = ROOT / "secrets" / f"r7-{uuid.uuid4().hex}.json"
     secret = issue_bootstrap_secret(secret_path)
-    env = _service_env(
-        role_urls,
-        address=address,
-        api_port=api_port,
-        queue=queue,
-        artifact_root=artifact_root,
-        secret_path=secret_path,
-        index_root=tmp_path / "indexes",
-    )
-    api_logs: list[str] = []
-    worker_logs: list[str] = []
-    api = _start([sys.executable, "-m", "aether_api.main"], env, api_logs)
-    worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
-    try:
-        _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-        _wait_line(worker_logs, "aether-worker-ready", worker)
-        with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=30) as http:
-            _exercise(http, role_urls, worker, worker_logs, secret, artifact_root)
-    finally:
-        _stop(worker)
-        _stop(api)
-        secret_path.unlink(missing_ok=True)
+    model = FakeCodingModel()
+    with editing_upstream(model) as upstream_base:
+        # The worker's gateway role relays the sandbox's model socket calls to this test-only upstream.
+        env = _service_env(
+            role_urls,
+            address=address,
+            api_port=api_port,
+            queue=queue,
+            artifact_root=artifact_root,
+            secret_path=secret_path,
+            index_root=tmp_path / "indexes",
+            extra={"AETHER_LIVE_MODEL_BASE": upstream_base, "AETHER_LIVE_MODEL_KEY": PROVIDER_KEY},
+        )
+        env.pop("AETHER_LIVE_MODEL_ALIAS", None)
+        api_logs: list[str] = []
+        worker_logs: list[str] = []
+        api = _start([sys.executable, "-m", "aether_api.main"], env, api_logs)
+        worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
+        try:
+            _wait_http(f"http://127.0.0.1:{api_port}/health/live")
+            _wait_line(worker_logs, "aether-worker-ready", worker)
+            with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=30) as http:
+                _exercise(http, role_urls, worker, worker_logs, secret, artifact_root)
+        finally:
+            _stop(worker)
+            _stop(api)
+            secret_path.unlink(missing_ok=True)
+    assert model.problems == []
+    assert model.authorizations and set(model.authorizations) == {f"Bearer {PROVIDER_KEY}"}
 
 
 def _exercise(http: httpx.Client, role_urls, proc, logs: list[str], secret: str, artifact_root: Path) -> None:
@@ -197,7 +205,7 @@ def _wait_approval(database: Database, owner_id: str, project_id: str, task_id: 
 
 def _coding(http, csrf, owner_id, project_id, task_id, database, store, proc, logs) -> None:
     _wait_approval(database, owner_id, project_id, task_id, proc, logs)
-    # The no-upstream model really edits app.py from return 0 to return 42 (SCRIPTED_EDIT_COMMAND).
+    # The test-only upstream really edits app.py from return 0 to return 42 with file_editor.
     # The first attempt's tests want 43, so the edited code still fails; the retry's tests want 42.
     broken = _upload(http, csrf, project_id, "r7-code-broken", "broken.json", _workspace(0, 43), "application/json")
     failed = http.post(
