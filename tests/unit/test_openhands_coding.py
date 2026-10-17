@@ -329,9 +329,98 @@ def test_runner_stays_up_when_the_openhands_image_build_fails(monkeypatch) -> No
     _ensure_coding_image({"runtime": "enabled"})
 
 
+_ESCAPER = (
+    "import os, sys, time\n"
+    "pid_file, target = sys.argv[1], sys.argv[2]\n"
+    "with open(pid_file, 'w') as handle:\n"
+    "    handle.write(str(os.getpid()))\n"
+    "body = 'import app\\n\\ndef test_value():\\n    assert True\\n'\n"
+    "deadline = time.monotonic() + 60\n"
+    "while time.monotonic() < deadline:\n"
+    "    try:\n"
+    "        with open(target, 'w') as handle:\n"
+    "            handle.write(body)\n"
+    "    except OSError:\n"
+    "        pass\n"
+    "    time.sleep(0.01)\n"
+)
+
+
+def _alive(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()[0]
+    except (OSError, IndexError):
+        return False
+    return state != "Z"
+
+
+def test_background_process_cannot_rewrite_tests_after_restore(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    escaper = tmp_path / "escaper.py"
+    escaper.write_text(_ESCAPER, encoding="utf-8")
+    pid_file = tmp_path / "escaper.pid"
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    work.mkdir()
+    baseline = "import app\n\ndef test_value():\n    assert app.value() == 42\n"
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    (work / "test_app.py").write_text(baseline, encoding="utf-8")
+    # The agent starts a writer that leaves its process group and session twice.
+    command = (
+        f"(setsid sh -c 'setsid {sys.executable} {escaper} {pid_file} {job / 'test_app.py'} "
+        f">/dev/null 2>&1 </dev/null &' &) ; sleep 1"
+    )
+    fake = _SocketModel(terminal_command=command)
+    fake.start()
+    protocol = Path("services/worker/aether_worker/coding_protocol.py")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    pid = 0
+    try:
+        completed = subprocess.run(
+            [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
+            cwd=tmp_path,
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+        assert pid_file.is_file(), completed.stdout + completed.stderr
+        pid = int(pid_file.read_text(encoding="ascii"))
+        left = _alive(pid)
+        line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+        assert line, completed.stdout + completed.stderr
+        body = json.loads(line[len("RESULT ") :])
+        assert not left, f"agent process {pid} survived the agent run; passed={body['passed']}"
+        assert completed.returncode != 0
+        assert body["passed"] == 0
+        assert body["failed"] >= 1
+        assert (job / "test_app.py").read_text(encoding="utf-8") == baseline
+    finally:
+        fake.close()
+        if pid and _alive(pid):
+            os.kill(pid, 9)
+
+
 class _SocketModel:
-    def __init__(self, *, finish_only: bool = False, rewrite_tests: bool = False) -> None:
+    def __init__(
+        self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
+    ) -> None:
         self.finish_only = finish_only
+        self.terminal_command = terminal_command
         self.rewrite_tests = rewrite_tests
         self.path = Path(os.environ.get("TMPDIR", "/tmp")) / f"aether-model-test-{os.getpid()}.sock"
         self.authorizations: list[str] = []
@@ -365,7 +454,11 @@ class _SocketModel:
             if isinstance(name, str):
                 self.tool_names.add(name)
         text = raw.decode("utf-8", "replace")
-        if self._calls == 1 and self.rewrite_tests:
+        if self._calls == 1 and self.terminal_command:
+            arguments = json.dumps({"command": self.terminal_command})
+            name = "terminal"
+            call_id = "call_terminal"
+        elif self._calls == 1 and self.rewrite_tests:
             target = str(Path(_app_path(text)).with_name("test_app.py"))
             arguments = json.dumps(
                 {"command": "str_replace", "path": target, "old_str": "assert app.value() == 42", "new_str": "assert True"}
