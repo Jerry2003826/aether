@@ -1406,7 +1406,8 @@ def _log_job(
 ) -> None:
     logger = _logger()
     logger.info(
-        "coding_job job=%s fencing=%s state=%s error=%s model_requests=%s edit_calls=%s input_tokens=%s output_tokens=%s patch_source=%s",
+        "coding_job job=%s fencing=%s state=%s error=%s model_requests=%s edit_calls=%s input_tokens=%s output_tokens=%s patch_source=%s"
+        " result_line_bytes=%s",
         job_id,
         fencing,
         state,
@@ -1416,7 +1417,14 @@ def _log_job(
         "" if measured is None else measured[0],
         "" if measured is None else measured[1],
         patch_source,
+        # Set by the entry only when it dropped a patch too large for the RESULT line (patch_too_large).
+        _result_line_bytes(result),
     )
+
+
+def _result_line_bytes(result: dict[str, Any]) -> int | str:
+    value = result.get("result_line_bytes")
+    return value if type(value) is int and value > 0 else ""
 
 
 def _logger() -> logging.Logger:

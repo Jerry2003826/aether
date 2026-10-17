@@ -210,15 +210,15 @@ def credential_present() -> bool:
 
 
 def emit(body: dict[str, object], code: int) -> None:
-    patch = body.get("patch")
-    if isinstance(patch, str) and len(patch.encode("utf-8")) > MAX_PATCH_BYTES:
-        body["patch"] = ""
-        body["patch_omitted"] = "too_large"
     line = "RESULT " + json.dumps(body, separators=(",", ":"))
-    if len(line) > MAX_RESULT_LINE_BYTES and body.get("patch"):
-        # Escaped past the worker's window: a cut line would lose the RESULT prefix (sandbox_failed).
+    patch = body.get("patch")
+    if isinstance(patch, str) and patch and (len(patch.encode("utf-8")) > MAX_PATCH_BYTES or len(line) > MAX_RESULT_LINE_BYTES):
+        # Too large raw, or escaped past the worker's window (a cut line would lose the RESULT prefix
+        # and read as sandbox_failed). The patch is dropped; result_line_bytes is the size of the line
+        # it would have needed (ASCII: json.dumps escapes everything else), for the job log.
         body["patch"] = ""
         body["patch_omitted"] = "too_large"
+        body["result_line_bytes"] = len(line)
         line = "RESULT " + json.dumps(body, separators=(",", ":"))
     sys.stdout.write(line + "\n")
     sys.stdout.flush()
