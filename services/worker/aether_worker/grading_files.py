@@ -36,7 +36,22 @@ CACHE_DIRS = frozenset(
     }
 )
 TEST_DIRS = frozenset({"tests", "test"})
-SUPPORT_FILES = frozenset({"oracle.py", "conftest.py", "pytest.ini", "pyproject.toml", "setup.cfg", "tox.ini"})
+# Grading runs the stdlib coding_protocol on root test_*.py and never pytest (pytest is not installed
+# in the sandbox image), so no pytest config is read at grading time. Every config is still restored
+# from the baseline or deleted, so a pytest-based grader could not be redirected by an added one.
+SUPPORT_FILES = frozenset(
+    {
+        "oracle.py",
+        "conftest.py",
+        "pytest.ini",
+        ".pytest.ini",
+        "pytest.toml",
+        ".pytest.toml",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+    }
+)
 STARTUP_HOOKS = frozenset({"sitecustomize.py", "usercustomize.py"})
 IGNORED_DIRS = frozenset({".git"})
 
