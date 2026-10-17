@@ -228,6 +228,16 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 operation_id=str(row["operation_id"]),
             )
             proxy: CodingModelProxy | None = None
+            drained = False
+
+            def drain_once() -> None:
+                # Settle and close only after calls still in flight finished; at most once per job.
+                nonlocal drained
+                if proxy is None or drained:
+                    return
+                drained = True
+                _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+
             try:
                 proxy = CodingModelProxy(database, job_token=model_token)
                 _renew_lease(
@@ -257,7 +267,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                         ),
                     )
                 except CodingSandboxError as exc:
-                    _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+                    drain_once()
                     stopped = _sandbox_stop(
                         database,
                         store,
@@ -274,7 +284,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                         return stopped
                     raise
                 # A call can still be forwarding after the agent exits; settle only once it is done.
-                _drain_proxy(proxy, ledger, owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
+                drain_once()
                 _settle(
                     ledger,
                     owner_id=owner_id,
@@ -287,7 +297,12 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
                 reserved = False
             finally:
                 if proxy is not None:
-                    proxy.close()
+                    try:
+                        drain_once()
+                    except Exception:  # noqa: BLE001 - keep the error that got us here
+                        _LOG.exception("coding_proxy_drain_failed job=%s", job_id)
+                    finally:
+                        proxy.close()
             detail = _request_detail(
                 ledger,
                 owner_id=owner_id,
