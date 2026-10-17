@@ -196,3 +196,10 @@ def test_a_call_crossing_the_revoke_that_outlasts_the_drain_is_charged_its_reser
     account = job.db.account(_PROJECT, _TASK)
     assert account["spent_micro_usd"] == 150 + _CALL
     assert account["held_micro_usd"] == 0
+
+
+def test_channel_revoked_must_be_passed_explicitly() -> None:
+    # A caller that forgets it must fail loudly, not silently skip the model-channel check.
+    sandbox = {"exit_code": 0, "result": dict(_GRADED)}
+    with pytest.raises(TypeError, match="channel_revoked"):
+        _coding_terminal(sandbox, upstream_error=None, measured=(3, 4), usage_missing=False)  # type: ignore[call-arg]
