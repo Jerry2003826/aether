@@ -113,6 +113,20 @@ def _read_bounded(response: Any, *, deadline: float, limit: int, per_read: float
         chunks.append(chunk)
 
 
+def _read_error_body(exc: urllib.error.HTTPError, *, deadline: float, limit: int, per_read: float) -> str:
+    """A non-2xx body, read through the response urllib wrapped, under the same bounds."""
+    response = exc.fp
+    if response is None:
+        return ""
+    if not hasattr(response, "read1"):
+        # Not a socket-backed response (an in-memory body): only the size needs bounding.
+        raw = response.read(limit + 1)
+        if len(raw) > limit:
+            raise _read_cut("size")
+        return raw.decode(errors="replace")
+    return _read_bounded(response, deadline=deadline, limit=limit, per_read=per_read).decode(errors="replace")
+
+
 def estimate_input_tokens(prompt: str) -> int:
     """Tokens held for the request body before it is sent. Never zero."""
     size = len(prompt.encode("utf-8"))
@@ -1254,10 +1268,18 @@ class ModelGateway:
                 content_type = response.headers.get("content-type", "")
                 status = getattr(response, "status", 200)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode(errors="replace")
+            status_code = exc.code if isinstance(exc.code, int) else 0
+            try:
+                # The error body gets the same overall deadline and byte cap as a 2xx body.
+                detail = _read_error_body(exc, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
+            except GatewayDenied as cut:
+                raise GatewayDenied(cut.code, sent=True, upstream_status=status_code or None) from exc
+            except TimeoutError as timed_out:
+                raise GatewayDenied("upstream_error", sent=True, upstream_status=status_code or None) from timed_out
+            finally:
+                exc.close()
             if self.provider_key and self.provider_key in detail:
                 raise GatewayDenied("secret_leak", sent=True) from exc
-            status_code = exc.code if isinstance(exc.code, int) else 0
             provider = _provider_error_code(detail)
             code = f"upstream_http_{status_code}" if 400 <= status_code <= 599 else "upstream_error"
             raise GatewayDenied(code, sent=True, upstream_status=status_code or None, provider_error=provider) from exc
