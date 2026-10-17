@@ -157,6 +157,8 @@ def run_grader_container(
             "--network",
             "none",
             "--read-only",
+            "--cap-drop",
+            "ALL",
             "--security-opt",
             "no-new-privileges",
             "--pids-limit",

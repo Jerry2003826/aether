@@ -76,7 +76,17 @@ SOURCE_FILES = (
     ("src-en", "boiling-en.txt"),
     (DISTRACTOR, "piano-zh.txt"),
 )
-VERIFY_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
+VERIFY_FLAGS = (
+    "--network",
+    "none",
+    "--read-only",
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--pids-limit",
+    "32",
+)
 VERIFY_IMAGE = SANDBOX_IMAGE
 _FORWARD_KEYS = {"model", "messages", "max_tokens", "temperature", "tools", "tool_choice"}
 
