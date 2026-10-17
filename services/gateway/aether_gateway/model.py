@@ -897,6 +897,8 @@ class ModelGateway:
             if int(used or 0) >= 1:
                 # The job's own reservation admitted one request, which covers its first call.
                 # Every later call is one more model request against max_requests.
+                # A slot counted here is not refunded if the call is then never sent (lease
+                # lost, upstream refused before contact): intentionally conservative.
                 if account is None or int(account["requests_admitted"]) + 1 > int(account["max_requests"]):
                     raise GatewayDenied("budget_exceeded")
                 conn.execute(
