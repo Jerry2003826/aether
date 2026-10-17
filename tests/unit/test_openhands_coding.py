@@ -1068,6 +1068,7 @@ class _SocketModel:
         self.bodies: list[bytes] = []
         self.tool_names: set[str] = set()
         self.models: list[str] = []
+        self.revoked = False
         self._calls = 0
         self._server = _UnixServer(str(self.path), _Handler)
         self._server.model = self
@@ -1169,7 +1170,14 @@ class _Handler(socketserver.StreamRequestHandler):
         parsed = _read_http(self.rfile)
         if parsed is None:
             return
-        _method, _path, headers, raw = parsed
+        _method, path, headers, raw = parsed
+        if path == "/aether/revoke":
+            # Like the host proxy: the job token ends the channel and the socket goes away.
+            self.server.model.revoked = headers.get("authorization", "") == "Bearer job-token-unit"
+            self.wfile.write(b"HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}")
+            if self.server.model.revoked:
+                self.server.model.path.unlink(missing_ok=True)
+            return
         payload = self.server.model.reply(raw, headers.get("authorization", ""))
         encoded = json.dumps(payload).encode()
         head = (
@@ -1343,3 +1351,43 @@ def test_an_untouched_baseline_module_named_like_stdlib_does_not_fail_the_job(tm
     )
     assert completed.returncode == 0, completed.stdout + completed.stderr
     assert body["cases"] == [{"name": "test_app.test_value", "verdict": "PASS", "detail": ""}]
+
+
+def test_candidate_code_cannot_use_the_model_channel_during_grading(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    # At agent time the terminal has the model env; the agent bakes the socket path into app.py.
+    script = (
+        "import os, sys\n"
+        "job = sys.argv[1]\n"
+        "socket_path = os.environ.get('AETHER_MODEL_SOCKET', '')\n"
+        "open(job + '/app.py', 'w').write(\n"
+        "    'import os, socket\\n'\n"
+        "    f'SOCKET = {socket_path!r}\\n'\n"
+        "    'def value():\\n    return 42\\n'\n"
+        "    'def channel():\\n'\n"
+        "    '    seen = sorted(n for n in (\"AETHER_JOB_TOKEN\", \"AETHER_MODEL_SOCKET\", \"AETHER_MODEL_ALIAS\") if n in os.environ)\\n'\n"
+        "    '    try:\\n'\n"
+        "    '        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as s:\\n'\n"
+        "    '            s.connect(SOCKET)\\n'\n"
+        "    '        reachable = True\\n'\n"
+        "    '    except OSError:\\n'\n"
+        "    '        reachable = False\\n'\n"
+        "    '    return [seen, bool(SOCKET), reachable]\\n'\n"
+        ")\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_app.py": (
+                "import app\n\n"
+                "def test_value():\n    assert app.value() == 42\n\n"
+                "def test_no_model_channel():\n    assert app.channel() == [[], True, False]\n"
+            ),
+        },
+    )
+    assert body["cases"] == [
+        {"name": "test_app.test_no_model_channel", "verdict": "PASS", "detail": ""},
+        {"name": "test_app.test_value", "verdict": "PASS", "detail": ""},
+    ], completed.stdout + completed.stderr
