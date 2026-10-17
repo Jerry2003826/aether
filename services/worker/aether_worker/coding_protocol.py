@@ -112,7 +112,9 @@ class _SnapshotLoader(importlib.abc.Loader):
         exec(code, module.__dict__)  # noqa: S102 - running the suite is the point
 
 
-def _module_map(sources: dict[str, bytes], bases: list[str]) -> dict[str, tuple[str, bool]]:
+def _module_map(
+    sources: dict[str, bytes], bases: list[str], declared: frozenset[str] | None = None
+) -> dict[str, tuple[str, bool]]:
     """Import name -> (relative path, is package). The test's own non-package directory first (so a test
     there imports its sibling helper by bare name, as with pytest's default prepend mode), then the root.
 
@@ -125,9 +127,12 @@ def _module_map(sources: dict[str, bytes], bases: list[str]) -> dict[str, tuple[
     The protocol runs in the sandbox interpreter, so grading_files.shadow_names() is the grading set.
     """
     # The one exception: a top-level package that holds test modules (e.g. a `test/` package) keeps its
-    # name, or its tests could not be imported at all.
-    holders = {name.split("/", 1)[0] for name in sources if "/" in name and _is_test_module(name)}
-    shadowed = grading_files.shadow_names() - {top for top in holders if f"{top}/__init__.py" in sources}
+    # name, or its tests could not be imported at all. Only a BASELINE package (its __init__.py and a
+    # test module in `declared`) qualifies, so the agent cannot claim `json` by adding json/test_x.py.
+    # Without a baseline (the protocol run directly) the workspace itself is the baseline.
+    listed = sources.keys() if declared is None else declared
+    holders = {name.split("/", 1)[0] for name in listed if "/" in name and _is_test_module(name)}
+    shadowed = grading_files.shadow_names() - {top for top in holders if f"{top}/__init__.py" in listed}
     found: dict[str, tuple[str, bool]] = {}
     for base in [*bases, ""]:
         prefix = base + "/" if base else ""
@@ -267,11 +272,19 @@ class CandidateError(Exception):
 class _Session:
     """One candidate process. Started lazily; a new one for every test process (so for every test)."""
 
-    def __init__(self, root: Path, sources: dict[str, bytes], bases: list[str], timeout: float) -> None:
+    def __init__(
+        self,
+        root: Path,
+        sources: dict[str, bytes],
+        bases: list[str],
+        timeout: float,
+        declared: frozenset[str] | None = None,
+    ) -> None:
         self._root = root
         self._sources = sources
         self._bases = bases
         self._timeout = timeout
+        self._declared = declared
         self._process: subprocess.Popen[bytes] | None = None
         self._to: int | None = None
         self._from: int | None = None
@@ -301,7 +314,15 @@ class _Session:
             os.close(child_out)
         self._to, self._from = to_child, from_child
         candidates = {name: base64.b64encode(data).decode("ascii") for name, data in self._sources.items() if _is_candidate(name)}
-        self._request({"op": "init", "sources": candidates, "bases": self._bases, "all": sorted(self._sources)})
+        self._request(
+            {
+                "op": "init",
+                "sources": candidates,
+                "bases": self._bases,
+                "all": sorted(self._sources),
+                "declared": None if self._declared is None else sorted(self._declared),
+            }
+        )
 
     def _request(self, message: dict[str, object]) -> object:
         if self._dead is not None:
@@ -1129,11 +1150,10 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
     relative, import_name, label = request["relative"], request["import_name"], request["label"]
-    declared = request.get("declared")
-    sys.meta_path.insert(
-        0, _GraderFinder(root, sources, _module_map(sources, bases), None if declared is None else frozenset(declared))
-    )
-    _Current.session = _Session(root, sources, bases, float(request["call_timeout"]))
+    listed = request.get("declared")
+    declared = None if listed is None else frozenset(listed)
+    sys.meta_path.insert(0, _GraderFinder(root, sources, _module_map(sources, bases, declared), declared))
+    _Current.session = _Session(root, sources, bases, float(request["call_timeout"]), declared)
     try:
         try:
             if import_name:
@@ -1217,7 +1237,10 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         if op == "init":
             sources = {name: base64.b64decode(data) for name, data in message["sources"].items()}
             root = Path.cwd()
-            modules = _module_map(dict.fromkeys(message["all"], b""), list(message["bases"]))
+            listed = message.get("declared")
+            modules = _module_map(
+                dict.fromkeys(message["all"], b""), list(message["bases"]), None if listed is None else frozenset(listed)
+            )
             sys.meta_path.insert(0, _CandidateFinder(root, sources, modules))
             # Appended, after the stdlib and site-packages: a workspace file the module map refuses (a
             # stdlib or dependency name) cannot come back in through the path finder.
