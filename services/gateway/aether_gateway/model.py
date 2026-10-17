@@ -737,7 +737,7 @@ class ModelGateway:
             account = conn.execute(
                 text(
                     "SELECT id, limit_micro_usd, spent_micro_usd, held_micro_usd, token_limit, tokens_used, tokens_held, "
-                    "verification_reserve_fraction FROM budget_accounts "
+                    "max_requests, requests_admitted, verification_reserve_fraction FROM budget_accounts "
                     "WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"
                 ),
                 {"project_id": project_id, "task_id": task_id},
@@ -819,6 +819,15 @@ class ModelGateway:
             ).scalar()
             if int(used or 0) >= CODING_MAX_MODEL_CALLS:
                 raise GatewayDenied("budget_exceeded")
+            if int(used or 0) >= 1:
+                # The job's own reservation admitted one request, which covers its first call.
+                # Every later call is one more model request against max_requests.
+                if account is None or int(account["requests_admitted"]) + 1 > int(account["max_requests"]):
+                    raise GatewayDenied("budget_exceeded")
+                conn.execute(
+                    text("UPDATE budget_accounts SET requests_admitted = requests_admitted + 1, version = version + 1 WHERE id = :id"),
+                    {"id": account["id"]},
+                )
             child_detail = {
                 "reserved_tokens": call_tokens,
                 "input_estimate_tokens": call_tokens - CODING_CALL_OUTPUT_CAP,
