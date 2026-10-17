@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ast
+import difflib
 import json
 import os
 import socketserver
@@ -519,6 +520,99 @@ def test_entry_fails_without_an_objective_and_never_calls_the_model(tmp_path: Pa
 def _mkdir(path: Path) -> Path:
     path.mkdir()
     return path
+
+
+_LATE_WRITER = (
+    "import os, signal, sys, time\n"
+    "target, ready = sys.argv[1], sys.argv[2]\n"
+    "def late(*_args):\n"
+    "    with open(target, 'w') as handle:\n"
+    "        handle.write('def value():\\n    return 99\\n')\n"
+    "    os._exit(0)\n"
+    "signal.signal(signal.SIGTERM, late)\n"
+    "with open(ready, 'w') as handle:\n"
+    "    handle.write(str(os.getpid()))\n"
+    "deadline = time.monotonic() + 60\n"
+    "while time.monotonic() < deadline:\n"
+    "    time.sleep(0.05)\n"
+)
+
+
+def _expected_patch(work: Path, job: Path) -> str:
+    """The diff the grader actually sees: baseline workspace against the graded job copy."""
+    chunks: list[str] = []
+    names = sorted(
+        {path.relative_to(root).as_posix() for root in (work, job) for path in root.rglob("*") if path.is_file()}
+    )
+    for name in names:
+        if name.startswith(".aether-state/") or "__pycache__" in name:
+            continue
+        old = (work / name).read_text(encoding="utf-8") if (work / name).is_file() else ""
+        new = (job / name).read_text(encoding="utf-8") if (job / name).is_file() else ""
+        if old != new:
+            chunks.extend(
+                difflib.unified_diff(
+                    old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=f"a/{name}", tofile=f"b/{name}"
+                )
+            )
+    return "".join(chunks)
+
+
+def test_published_patch_matches_the_workspace_that_is_graded(tmp_path: Path) -> None:
+    """A background process that edits app.py after the agent finishes, before it is stopped."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    writer = tmp_path / "late_writer.py"
+    writer.write_text(_LATE_WRITER, encoding="utf-8")
+    ready = tmp_path / "writer.pid"
+    job = tmp_path / "job"
+    command = (
+        f"(setsid sh -c 'setsid {sys.executable} {writer} {job / 'app.py'} {ready} "
+        f">/dev/null 2>&1 </dev/null &' &) ; sleep 1"
+    )
+    fake = _SocketModel(terminal_command=command)
+    fake.start()
+    protocol = tmp_path / "protocol.py"
+    protocol.write_text(
+        "import json, sys\n"
+        "body = {'passed': 1, 'failed': 0, 'errors': 0, 'cases': [], 'graded': open('app.py').read()}\n"
+        "sys.stdout.write(json.dumps(body) + '\\n')\n",
+        encoding="utf-8",
+    )
+    work = tmp_path / "work"
+    work.mkdir()
+    (work / "app.py").write_text("def value():\n    return 0\n", encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if key != "AETHER_OBJECTIVE"}
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_OBJECTIVE": "Make value() return 42.",
+            "AETHER_SANDBOX_PROTOCOL": str(protocol),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+        }
+    )
+    pid = 0
+    try:
+        completed = _run_entry(tmp_path, env)
+        assert ready.is_file(), completed.stdout + completed.stderr
+        pid = int(ready.read_text(encoding="ascii"))
+    finally:
+        fake.close()
+        if pid and _alive(pid):
+            os.kill(pid, 9)
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    graded = (job / "app.py").read_text(encoding="utf-8")
+    assert body["agent_completed"] is True
+    assert body["graded"] == graded
+    assert "return 99" in graded
+    assert body["patch"] == _expected_patch(work, job)
+    assert "+    return 99" in body["patch"]
 
 
 _TAMPER = (
