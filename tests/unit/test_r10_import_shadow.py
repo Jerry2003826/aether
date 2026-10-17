@@ -10,6 +10,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROTOCOL = Path("services/worker/aether_worker/coding_protocol.py").resolve()
 
 
@@ -136,5 +138,55 @@ def test_a_test_package_named_like_stdlib_still_runs_its_tests(tmp_path: Path) -
         },
     )
     code, body = _grade(tmp_path)
+    assert _verdicts(body) == {"test.test_pkg.test_value": ("PASS", "")}, body
+    assert code == 0, body
+
+
+@pytest.mark.parametrize("reserved", ["json", "fractions"])
+def test_a_new_test_package_cannot_claim_a_reserved_name(tmp_path: Path, reserved: str) -> None:
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    _write(
+        work,
+        {
+            "app.py": f"import {reserved}\n\ndef module_file():\n    return getattr({reserved}, '__file__', '')\n",
+            "test_app.py": (
+                f"import {reserved}\nimport app\n\n"
+                f"def test_test_process_gets_the_real_module():\n    assert 'shadow' not in getattr({reserved}, '__file__', '')\n\n"
+                "def test_candidate_process_gets_the_real_module():\n    assert 'job' not in app.module_file()\n"
+            ),
+        },
+    )
+    shutil.copytree(work, job)
+    _write(
+        job,
+        {
+            # Added by the agent: a package named like stdlib that "holds" a test module.
+            f"{reserved}/__init__.py": "raise RuntimeError('shadow package served')\n",
+            f"{reserved}/test_x.py": "def test_x():\n    pass\n",
+        },
+    )
+    code, body = _grade(job, baseline=work)
+    verdicts = _verdicts(body)
+    assert verdicts.get("test_app.test_test_process_gets_the_real_module") == ("PASS", ""), body
+    assert verdicts.get("test_app.test_candidate_process_gets_the_real_module") == ("PASS", ""), body
+    # The added test module itself can never pass: its package name is not the agent's to take.
+    assert all(verdict == "FAIL" for name, (verdict, _) in verdicts.items() if name.startswith(f"{reserved}.")), body
+    assert code == 1, body
+
+
+def test_a_baseline_test_package_named_like_stdlib_still_runs_with_a_baseline(tmp_path: Path) -> None:
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    _write(
+        work,
+        {
+            "app.py": "def value():\n    return 42\n",
+            "test/__init__.py": "",
+            "test/test_pkg.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    shutil.copytree(work, job)
+    code, body = _grade(job, baseline=work)
     assert _verdicts(body) == {"test.test_pkg.test_value": ("PASS", "")}, body
     assert code == 0, body
