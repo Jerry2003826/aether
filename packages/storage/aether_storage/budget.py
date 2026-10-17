@@ -63,6 +63,24 @@ def _unknown_charge(unknown_tokens: int, *, actual: int, reserved_tokens: int, r
     return tokens, micro
 
 
+def _replay_matches(existing, amount: int) -> bool:
+    """True when amount is what this row was first reserved with, before any top-up.
+
+    A replay (another worker re-running the same request_key) compares against that,
+    so a top-up does not turn the replay into idempotency_mismatch and strand the
+    enlarged hold. A row topped up before extended_micro_usd was recorded has no
+    exact figure; the request digest, which covers the original amount, decides it
+    as long as the row still holds at least that much.
+    """
+    reserved = int(existing["reserved_micro_usd"])
+    detail = _detail(existing["usage_detail"])
+    if not int(detail.get("reservation_extensions") or 0):
+        return reserved == amount
+    if "extended_micro_usd" in detail:
+        return reserved - int(detail.get("extended_micro_usd") or 0) == amount
+    return reserved >= amount
+
+
 class BudgetError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
@@ -101,6 +119,8 @@ def apply_reservation_extension(
         raise BudgetError("invalid_amount")
     detail["reserved_tokens"] = int(detail.get("reserved_tokens") or 0) + tokens
     detail["reservation_extensions"] = int(detail.get("reservation_extensions") or 0) + 1
+    detail["extended_micro_usd"] = int(detail.get("extended_micro_usd") or 0) + amount
+    detail["extended_tokens"] = int(detail.get("extended_tokens") or 0) + tokens
     conn.execute(
         text(
             "UPDATE model_requests SET reserved_micro_usd = reserved_micro_usd + :amount, usage_detail = CAST(:detail AS jsonb) "
@@ -175,7 +195,7 @@ class BudgetLedger:
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
             ).mappings().first()
             if existing is not None:
-                if existing["reserved_micro_usd"] != amount or existing["request_sha256"] != digest:
+                if existing["request_sha256"] != digest or not _replay_matches(existing, amount):
                     raise BudgetError("idempotency_mismatch")
                 return True
             fraction = float(account["verification_reserve_fraction"])
