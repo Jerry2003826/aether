@@ -4,11 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from aether_worker.grading_files import CANDIDATE_FILES, grading_paths, is_grading_path
+from aether_worker.grading_files import grading_paths, is_grading_path
 
 
 def test_is_grading_path_covers_support_files_and_caches() -> None:
-    assert "app.py" in CANDIDATE_FILES
     assert not is_grading_path("app.py")
     for name in (
         "test_app.py",
@@ -17,7 +16,6 @@ def test_is_grading_path_covers_support_files_and_caches() -> None:
         "pytest.ini",
         "pyproject.toml",
         "setup.cfg",
-        "__init__.py",
         "evil.pth",
         "pkg/conftest.py",
         "__pycache__/app.cpython-312.pyc",
@@ -32,7 +30,7 @@ def test_is_grading_path_covers_support_files_and_caches() -> None:
     assert not is_grading_path("./app.py")
 
 
-def test_grading_paths_lists_every_non_candidate_file(tmp_path: Path) -> None:
+def test_grading_paths_lists_grading_files_and_skips_git(tmp_path: Path) -> None:
     for name in ("app.py", "oracle.py", "test_app.py", "sub/conftest.py", ".pytest_cache/x", "__pycache__/a.pyc"):
         path = tmp_path / name
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -46,3 +44,54 @@ def test_grading_paths_lists_every_non_candidate_file(tmp_path: Path) -> None:
         ".pytest_cache/x",
         "__pycache__/a.pyc",
     }
+
+
+def test_grading_scope_is_an_explicit_denylist() -> None:
+    from aether_worker import grading_files
+
+    assert not hasattr(grading_files, "CANDIDATE_FILES")
+    for name in ("app.py", "helper.py", "pkg/new_module.py", "pkg/__init__.py", "README.md", "src/lib/core.py"):
+        assert not is_grading_path(name), name
+    for name in (
+        "test_app.py",
+        "pkg/test_core.py",
+        "core_test.py",
+        "tests/helpers.py",
+        "pkg/tests/data.json",
+        "oracle.py",
+        "pkg/oracle.py",
+        "conftest.py",
+        "pytest.ini",
+        "pyproject.toml",
+        "setup.cfg",
+        "tox.ini",
+        "sitecustomize.py",
+        "usercustomize.py",
+        "evil.pth",
+        "__pycache__/helper.cpython-312.pyc",
+        ".pytest_cache/v/cache/lastfailed",
+    ):
+        assert is_grading_path(name), name
+
+
+def test_startup_hooks_and_job_editable_override() -> None:
+    from aether_worker.grading_files import is_startup_hook
+
+    for name in ("sitecustomize.py", "usercustomize.py", "x.pth", "pkg/evil.pth"):
+        assert is_startup_hook(name), name
+    for name in ("helper.py", "conftest.py", "test_app.py"):
+        assert not is_startup_hook(name), name
+    # A job-level editable list wins over the denylist, except for interpreter startup hooks.
+    assert not is_grading_path("pyproject.toml", editable={"pyproject.toml"})
+    assert is_grading_path("pyproject.toml", editable={"other.toml"})
+    assert is_grading_path("sitecustomize.py", editable={"sitecustomize.py"})
+    assert is_grading_path("__pycache__/a.pyc", editable={"__pycache__/a.pyc"})
+
+
+def test_grading_paths_uses_the_denylist(tmp_path: Path) -> None:
+    for name in ("app.py", "helper.py", "oracle.py", "tests/test_x.py", "__pycache__/a.pyc", "setup.cfg"):
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("x", encoding="utf-8")
+    assert grading_paths(tmp_path) == {"oracle.py", "tests/test_x.py", "__pycache__/a.pyc", "setup.cfg"}
+    assert grading_paths(tmp_path, editable={"setup.cfg"}) == {"oracle.py", "tests/test_x.py", "__pycache__/a.pyc"}

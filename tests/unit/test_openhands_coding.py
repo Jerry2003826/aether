@@ -594,6 +594,110 @@ def test_tampered_support_files_are_restored_before_grading(tmp_path: Path) -> N
     assert completed.returncode != 0
 
 
+_EDIT_SOURCES = (
+    "import sys\n"
+    "job = sys.argv[1]\n"
+    "open(job + '/helper.py', 'w').write('import newmod\\n\\ndef value():\\n    return newmod.ANSWER\\n')\n"
+    "open(job + '/newmod.py', 'w').write('ANSWER = 42\\n')\n"
+    "open(job + '/oracle.py', 'w').write('def expected():\\n    return -1\\n')\n"
+    "open(job + '/conftest.py', 'w').write('raise SystemExit(1)\\n')\n"
+)
+
+
+def _run_tamper_job(tmp_path: Path, script: str, files: dict[str, str]) -> tuple[subprocess.CompletedProcess[str], dict]:
+    tamper = tmp_path / "tamper.py"
+    tamper.write_text(script, encoding="utf-8")
+    work = tmp_path / "work"
+    job = tmp_path / "job"
+    work.mkdir()
+    for name, text in files.items():
+        (work / name).write_text(text, encoding="utf-8")
+    fake = _SocketModel(terminal_command=f"{sys.executable} {tamper} {job}")
+    fake.start()
+    protocol = Path("services/worker/aether_worker/coding_protocol.py")
+    env = os.environ.copy()
+    env.update(
+        {
+            "OPENHANDS_SUPPRESS_BANNER": "1",
+            "AETHER_SANDBOX_WORK": str(work),
+            "AETHER_SANDBOX_JOB": str(job),
+            "AETHER_SANDBOX_PROTOCOL": str(protocol.resolve()),
+            "AETHER_MODEL_SOCKET": str(fake.path),
+            "AETHER_JOB_TOKEN": "job-token-unit",
+            "AETHER_MODEL_ALIAS": "openai/coder",
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AETHER_OBJECTIVE": f"Edit {job / 'helper.py'} so value() returns 42.",
+        }
+    )
+    try:
+        completed = subprocess.run(
+            [str(_PYTHON.absolute()), "-I", str(_ENTRY.resolve())],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    return completed, json.loads(line[len("RESULT ") :])
+
+
+def test_edited_and_new_source_files_are_graded_while_support_files_are_restored(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    oracle = "def expected():\n    return 42\n"
+    conftest = "# baseline conftest\n"
+    completed, body = _run_tamper_job(
+        tmp_path,
+        _EDIT_SOURCES,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "helper.py": "def value():\n    return 0\n",
+            "oracle.py": oracle,
+            "conftest.py": conftest,
+            "test_helper.py": "import helper\nimport oracle\n\ndef test_value():\n    assert helper.value() == oracle.expected()\n",
+        },
+    )
+    job = tmp_path / "job"
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    assert body["passed"] == 1 and body["failed"] == 0
+    assert (job / "helper.py").read_text(encoding="utf-8").startswith("import newmod")
+    assert (job / "newmod.py").read_text(encoding="utf-8") == "ANSWER = 42\n"
+    assert (job / "oracle.py").read_text(encoding="utf-8") == oracle
+    assert (job / "conftest.py").read_text(encoding="utf-8") == conftest
+    assert "+++ b/helper.py" in body["patch"]
+    assert "+++ b/newmod.py" in body["patch"]
+
+
+def test_added_startup_hook_is_deleted_and_fails_the_job(tmp_path: Path) -> None:
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    script = (
+        "import sys\n"
+        "job = sys.argv[1]\n"
+        "open(job + '/app.py', 'w').write('def value():\\n    return 42\\n')\n"
+        "open(job + '/usercustomize.py', 'w').write('import os\\n')\n"
+        "open(job + '/hook.pth', 'w').write('import os\\n')\n"
+    )
+    completed, body = _run_tamper_job(
+        tmp_path,
+        script,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_app.py": "import app\n\ndef test_value():\n    assert app.value() == 42\n",
+        },
+    )
+    job = tmp_path / "job"
+    assert completed.returncode == 2
+    assert body["passed"] == 0
+    assert body["cases"] == [{"name": "runner", "verdict": "FAIL", "detail": "grading_startup_hook"}]
+    assert not (job / "usercustomize.py").exists()
+    assert not (job / "hook.pth").exists()
+    assert "+++ b/app.py" in body["patch"]
+
+
 class _SocketModel:
     def __init__(
         self, *, finish_only: bool = False, rewrite_tests: bool = False, terminal_command: str = ""
