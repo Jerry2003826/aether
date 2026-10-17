@@ -373,3 +373,52 @@ def test_a_test_whose_process_dies_fails_and_every_collected_test_is_reported(tm
     assert verdicts.get("test_value.test_b_crash") == "FAIL", body
     assert verdicts.get("test_value.test_a") == "PASS", body
     assert verdicts.get("test_value.test_c") == "PASS", body
+
+
+def _unsupported(root: Path, files: dict[str, str], case: str, reason: str) -> None:
+    _write(root, files)
+    code, body, output = _grade(root)
+    _assert_failed(code, body, output, case)
+    detail = next(item["detail"] for item in body["cases"] if item["name"] == case)
+    assert detail == "candidate_object_unsupported:" + reason, body
+
+
+def test_isinstance_against_a_candidate_class_is_reported_as_unsupported(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": "class Box:\n    pass\ndef make():\n    return Box()\n",
+            "test_box.py": "import app\n\ndef test_box():\n    assert isinstance(app.make(), app.Box)\n",
+        },
+        "test_box.test_box",
+        "isinstance_candidate_class",
+    )
+
+
+def test_catching_a_candidate_exception_class_is_reported_as_unsupported(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": "class Invalid(Exception):\n    pass\ndef check(n):\n    raise Invalid(str(n))\n",
+            "test_invalid.py": (
+                "import app\n\n"
+                "def test_invalid():\n"
+                "    try:\n        app.check(-1)\n    except app.Invalid:\n        pass\n"
+                "    else:\n        raise AssertionError('no error')\n"
+            ),
+        },
+        "test_invalid.test_invalid",
+        "except_candidate_exception_class",
+    )
+
+
+def test_passing_a_callback_into_candidate_code_is_reported_as_unsupported(tmp_path: Path) -> None:
+    _unsupported(
+        tmp_path,
+        {
+            "app.py": "def apply(fn, value):\n    return fn(value)\n",
+            "test_apply.py": "import app\n\ndef test_apply():\n    assert app.apply(lambda n: n + 1, 1) == 2\n",
+        },
+        "test_apply.test_apply",
+        "callable_passed_to_candidate",
+    )

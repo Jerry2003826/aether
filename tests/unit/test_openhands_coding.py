@@ -1281,3 +1281,23 @@ def test_candidate_output_cannot_forge_the_protocol_result(tmp_path: Path) -> No
     assert completed.returncode == 1, completed.stdout + completed.stderr
     assert body["passed"] == 0 and body["failed"] >= 1, body
     assert "nonce" not in body
+
+
+def test_a_protocol_that_reports_nothing_is_a_grading_timeout_not_a_violation(tmp_path: Path) -> None:
+    """No result line at all (the grader hung, was killed or crashed) is grading_timeout; only a forged,
+    unsigned or duplicated result line is the grading_unverified violation."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    fake = _SocketModel(finish_only=True)
+    fake.start()
+    try:
+        env = _entry_env(tmp_path, fake, AETHER_OBJECTIVE=_OBJECTIVE)
+        Path(env["AETHER_SANDBOX_PROTOCOL"]).write_text("import sys\nsys.stderr.write('stuck\\n')\nraise SystemExit(1)\n", encoding="utf-8")
+        completed = _run_entry(tmp_path, env)
+    finally:
+        fake.close()
+    line = next((item for item in reversed(completed.stdout.splitlines()) if item.startswith("RESULT ")), "")
+    assert line, completed.stdout + completed.stderr
+    body = json.loads(line[len("RESULT ") :])
+    assert completed.returncode == 1, completed.stdout + completed.stderr
+    details = [case["detail"] for case in body["cases"] if case["name"] == "runner"]
+    assert details == ["grading_timeout"], body

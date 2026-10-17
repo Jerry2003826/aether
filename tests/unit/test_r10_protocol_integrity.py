@@ -341,3 +341,112 @@ def test_generator_tests_are_rejected_not_passed_unrun(tmp_path: Path) -> None:
     assert cases["test_gen.test_sync_gen"] == ("FAIL", "unsupported_generator"), body
     assert cases["test_gen.test_plain"] == ("PASS", ""), body
     assert (code, body["passed"], body["failed"]) == (1, 1, 2), body
+
+
+def _verdicts(body: dict) -> dict[str, tuple[str, str]]:
+    return {case["name"]: (case["verdict"], case["detail"]) for case in body["cases"]}
+
+
+def test_a_failing_method_in_a_test_class_fails_the_suite(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_mod.py": (
+                "import app\n\n"
+                "def test_top():\n    assert app.value() == 0\n\n"
+                "class TestStrict:\n"
+                "    def setup_method(self, method):\n        self.expected = 42\n\n"
+                "    def test_x(self):\n        assert app.value() == self.expected\n\n"
+                "    def test_ok(self):\n        assert self.expected == 42\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert _verdicts(body) == {
+        "test_mod.test_top": ("PASS", ""),
+        "test_mod.TestStrict.test_x": ("FAIL", "AssertionError"),
+        "test_mod.TestStrict.test_ok": ("PASS", ""),
+    }, body
+    assert (code, body["passed"], body["failed"]) == (1, 2, 1), body
+
+
+def test_unittest_testcase_methods_run_with_setup_and_teardown(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_case.py": (
+                "import unittest\n"
+                "import app\n\n"
+                "class StrictCase(unittest.TestCase):\n"
+                "    def setUp(self):\n        self.expected = 42\n\n"
+                "    def tearDown(self):\n        if getattr(self, 'poison', False):\n            raise RuntimeError('teardown')\n\n"
+                "    def test_value(self):\n        self.assertEqual(app.value(), self.expected)\n\n"
+                "    def test_setup_ran(self):\n        self.assertEqual(self.expected, 42)\n\n"
+                "    def test_teardown_fails(self):\n        self.poison = True\n\n"
+                "    @unittest.skip('later')\n"
+                "    def test_skipped(self):\n        pass\n\n"
+                "    @unittest.expectedFailure\n"
+                "    def test_expected_failure(self):\n        self.assertEqual(1, 2)\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    verdicts = _verdicts(body)
+    assert verdicts["test_case.StrictCase.test_value"] == ("FAIL", "AssertionError"), body
+    assert verdicts["test_case.StrictCase.test_setup_ran"] == ("PASS", ""), body
+    assert verdicts["test_case.StrictCase.test_teardown_fails"] == ("FAIL", "RuntimeError"), body
+    # Only a real pass counts: a skip or an expected failure is never a PASS.
+    assert verdicts["test_case.StrictCase.test_skipped"] == ("FAIL", "skipped"), body
+    assert verdicts["test_case.StrictCase.test_expected_failure"] == ("FAIL", "expected_failure"), body
+    assert (code, body["passed"]) == (1, 1), body
+
+
+def test_test_classes_the_grader_cannot_run_fail_explicitly(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_odd.py": (
+                "def test_top():\n    assert True\n\n"
+                "class TestWithInit:\n"
+                "    def __init__(self, value):\n        self.value = value\n\n"
+                "    def test_value(self):\n        assert self.value == 1\n\n"
+                "class TestOuter:\n"
+                "    class TestInner:\n"
+                "        def test_hidden(self):\n            assert False\n\n"
+                "    def test_outer(self):\n        assert True\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    verdicts = _verdicts(body)
+    assert verdicts["test_odd.test_top"] == ("PASS", ""), body
+    assert verdicts["test_odd.TestWithInit"] == ("FAIL", "unsupported_test_class:init"), body
+    assert verdicts["test_odd.TestOuter.TestInner"] == ("FAIL", "unsupported_test_class:nested"), body
+    assert verdicts["test_odd.TestOuter.test_outer"] == ("PASS", ""), body
+    assert code == 1 and body["failed"] == 2, body
+
+
+def test_inherited_test_methods_are_collected_for_each_class(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "app.py": "def value():\n    return 0\n",
+            "test_inherit.py": (
+                "import app\n\n"
+                "class TestBase:\n"
+                "    expected = 0\n"
+                "    def test_value(self):\n        assert app.value() == self.expected\n\n"
+                "class TestStricter(TestBase):\n"
+                "    expected = 42\n"
+            ),
+        },
+    )
+    code, body = _grade(tmp_path)
+    assert _verdicts(body) == {
+        "test_inherit.TestBase.test_value": ("PASS", ""),
+        "test_inherit.TestStricter.test_value": ("FAIL", "AssertionError"),
+    }, body
+    assert code == 1, body
