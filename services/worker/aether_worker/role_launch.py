@@ -84,6 +84,12 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
     token = secrets.token_urlsafe(32)
     secrets_to_hide = [verifier_url, provider_key, token, _password(verifier_url)]
     _prepare_runner_image(secrets_to_hide)
+    # No provider key, no gateway: an empty AETHER_GATEWAY_BASE is how the worker learns that live
+    # research has no model (_missing_live_settings -> live_provider_unconfigured, before any
+    # reservation). A keyless gateway would admit research and turn the provider's 401 into a sent call.
+    start_gateway = bool(provider_key.strip())
+    if not start_gateway:
+        sys.stderr.write("AETHER_LIVE_MODEL_KEY 未配置：不启动模型网关，live 研究以 live_provider_unconfigured 进入待审，配置后重启 worker 再恢复\n")
     children: list[subprocess.Popen[str]] = []
     try:
         verifier_proc, verifier_errors = _open(
@@ -93,17 +99,19 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
             {"verifier_url": verifier_url},
         )
         children.append(verifier_proc)
-        gateway_proc, gateway_errors = _open(
-            "aether_gateway",
-            _gateway_env(token),
-            secrets_to_hide,
-            {"provider_key": provider_key, "worker_url": os.environ["AETHER_WORKER_DATABASE_URL"]},
-        )
-        children.append(gateway_proc)
+        gateway: tuple[subprocess.Popen[str], list[str]] | None = None
+        if start_gateway:
+            gateway = _open(
+                "aether_gateway",
+                _gateway_env(token),
+                secrets_to_hide,
+                {"provider_key": provider_key, "worker_url": os.environ["AETHER_WORKER_DATABASE_URL"]},
+            )
+            children.append(gateway[0])
         runner_proc, runner_errors = _open("aether_worker.runner_process", _runner_env(token), secrets_to_hide, None)
         children.append(runner_proc)
         verifier_base = _await_role(verifier_proc, verifier_errors, secrets_to_hide)
-        gateway_base = _await_role(gateway_proc, gateway_errors, secrets_to_hide)
+        gateway_base = "" if gateway is None else _await_role(gateway[0], gateway[1], secrets_to_hide)
         runner_base = _await_role(runner_proc, runner_errors, secrets_to_hide)
         scrub_privileged_env()
         os.environ["AETHER_VERIFIER_BASE"] = verifier_base

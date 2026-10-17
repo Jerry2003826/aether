@@ -1612,6 +1612,13 @@ def _ensure_live_answer(
                 blocked = _block_execution(database, owner_id, project_id, task_id)
                 if blocked is not None:
                     return {"status": blocked, "task_id": task_id}
+                if denied.code == "live_model_key_missing":
+                    # The gateway has no provider key: the same explicit, resumable review as a worker
+                    # that sees no gateway at all; nothing was sent and the reservation is released.
+                    return _needs_review(
+                        database, owner_id=owner_id, project_id=project_id, task_id=task_id,
+                        reason="没有配置可用的模型供应商", code="live_provider_unconfigured", missing=["AETHER_LIVE_MODEL_KEY"],
+                    )
                 return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型网关拒绝了这次调用", code="gateway_denied")
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key)
             return _needs_review(database, owner_id=owner_id, project_id=project_id, task_id=task_id, reason="模型上游失败", code="upstream_error")

@@ -27,6 +27,12 @@ def main() -> None:
         return gateway_health(provider_key=key, upstream_base=base)
 
     def post(path: str, body: dict) -> tuple[int, dict]:
+        if path == "/v1/complete":
+            refused = unconfigured(provider_key=key, upstream_base=base)
+            if refused is not None:
+                # Before the grant is spent or the provider contacted: the worker releases the
+                # reservation (sent=False) and the task can resume once the key is configured.
+                return 409, {"denied": True, "code": refused, "sent": False}
         gateway = ModelGateway(database, upstream_base=base, provider_key=key, timeout=gateway_timeout(path, body))
         if path == "/v1/chat/completions":
             try:
@@ -46,6 +52,15 @@ def main() -> None:
         return 200, result
 
     serve_role(token, health, post)
+
+
+def unconfigured(*, provider_key: str, upstream_base: str) -> str | None:
+    """Why this gateway cannot call the model, or None. Never includes the key's value."""
+    if not provider_key.strip():
+        return "live_model_key_missing"
+    if not upstream_base:
+        return "model_unavailable"
+    return None
 
 
 def gateway_health(*, provider_key: str, upstream_base: str) -> dict[str, object]:
