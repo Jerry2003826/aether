@@ -1,7 +1,7 @@
 """Stdlib test protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands.
 
 Integrity: before any candidate code runs, every Python source and grading file under the workspace
-(virtualenvs, node_modules, VCS and cache dirs skipped) is read into memory and hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
+(virtualenvs with pyvenv.cfg, node_modules, VCS and cache dirs skipped) is read into memory and hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
 are served from that in-memory snapshot, so a file rewritten during the run has no effect on any
 module loaded afterwards. Those files are hashed again before each test module and after the run;
 one that is missing or changed fails the suite with `grading_tampered`. New files are fine.
@@ -42,13 +42,18 @@ _SKIP_DIRS = frozenset(
         ".ruff_cache",
         ".tox",
         ".nox",
-        ".venv",
-        "venv",
-        "env",
         "node_modules",
         "site-packages",
     }
 )
+# Skipped only when they really are virtualenvs (pyvenv.cfg); otherwise they may be candidate packages.
+_VENV_DIRS = frozenset({".venv", "venv", "env"})
+
+
+def _skipped(path: Path) -> bool:
+    if path.name in _SKIP_DIRS:
+        return True
+    return path.name in _VENV_DIRS and (path / "pyvenv.cfg").is_file()
 
 
 def _guarded(name: str) -> bool:
@@ -69,7 +74,7 @@ def _files(root: Path) -> dict[str, Path]:
             if path.is_symlink():
                 continue
             if path.is_dir():
-                if path.name not in _SKIP_DIRS:
+                if not _skipped(path):
                     pending.append(path)
                 continue
             name = path.relative_to(root).as_posix()

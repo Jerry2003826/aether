@@ -116,6 +116,7 @@ def test_new_files_and_non_grading_data_written_during_the_run_are_fine(tmp_path
         {
             "app.py": "def value():\n    return 42\n",
             "data.json": "{}\n",
+            ".venv/pyvenv.cfg": "home = /usr/bin\n",
             ".venv/lib/site.py": "x = 1\n",
             "node_modules/pkg/index.js": "module.exports = 1\n",
             "test_a.py": (
