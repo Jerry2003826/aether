@@ -16,7 +16,13 @@ from aether_worker.container_runtime import execute_docker
 from aether_worker.openhands_image import ensure_openhands_sandbox
 from aether_worker.runner import docker_available
 
-from tests.unit.test_r10_candidate_files import _APP, _LEAKS, _TESTS
+from tests.unit.test_r10_candidate_files import (
+    _APP,
+    _HELPER_FILES,
+    _HELPER_LEAKS,
+    _LEAKS,
+    _TESTS,
+)
 
 _NONCE = "n0nce-docker-candidate-files"
 _DRIVER = (
@@ -72,3 +78,18 @@ def test_candidate_cannot_read_tests_in_the_coding_sandbox(tmp_path: Path) -> No
         assert verdicts.get(name) == "FAIL", (name, body)
     for name in ("test_reads_are_denied", "test_candidate_files_still_work", "test_baseline_mount_denied"):
         assert verdicts.get("test_secret." + name) == "PASS", (name, body)
+
+
+def test_grading_helpers_are_not_readable_in_the_coding_sandbox(tmp_path: Path) -> None:
+    for name, text in _HELPER_FILES.items():
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    for path in [tmp_path, *tmp_path.rglob("*")]:
+        path.chmod(0o755 if path.is_dir() else 0o644)
+    code, body = _grade_in_sandbox(tmp_path)
+    verdicts = {case["name"]: case["verdict"] for case in body["cases"]}
+    assert code == 1, body
+    for name in _HELPER_LEAKS:
+        assert verdicts.get(name) == "FAIL", (name, body)
+    assert verdicts.get("tests.test_helper.test_helper_is_denied") == "PASS", body

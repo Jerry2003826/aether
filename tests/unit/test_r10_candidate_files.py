@@ -151,3 +151,70 @@ def test_without_the_filesystem_lock_no_candidate_code_runs(tmp_path: Path, monk
     assert body["passed"] == 0, body
     assert {case["detail"] for case in body["cases"]} == {"import:candidate_isolation_unavailable"}, body
     assert not marker.exists()
+
+
+_HELPER_APP = (
+    "import os\n"
+    "import re\n"
+    "\n"
+    "def secret(path):\n"
+    "    try:\n"
+    "        with open(path, encoding='utf-8') as handle:\n"
+    "            found = re.search(r'EXPECTED = (\\d+)', handle.read())\n"
+    "    except OSError:\n"
+    "        return -1\n"
+    "    return int(found.group(1)) if found else -1\n"
+    "\n"
+    "def via_parent():\n"
+    "    return secret(f'/proc/{os.getppid()}/cwd/tests/check.py')\n"
+    "\n"
+    "def imported():\n"
+    "    try:\n"
+    "        import check\n"
+    "    except ImportError:\n"
+    "        return -1\n"
+    "    return check.EXPECTED\n"
+)
+# A grading helper next to the tests, imported by bare name: grading (restored from the baseline by
+# the entry, never served to candidate code), so it must not be readable either. (A helper at the
+# workspace root is not grading: it is candidate code the agent may edit, and the candidate imports it.)
+_HELPER_TESTS = (
+    "import check\n"
+    "import app\n"
+    "\n"
+    "def test_relative():\n"
+    "    assert app.secret('tests/check.py') == check.EXPECTED\n"
+    "\n"
+    "def test_absolute():\n"
+    "    assert app.secret(check.__file__) == check.EXPECTED\n"
+    "\n"
+    "def test_parent_cwd():\n"
+    "    assert app.via_parent() == check.EXPECTED\n"
+    "\n"
+    "def test_import():\n"
+    "    assert app.imported() == check.EXPECTED\n"
+    "\n"
+    "def test_helper_is_denied():\n"
+    "    assert app.secret('tests/check.py') == -1\n"
+    "    assert app.secret('check.py') == -1\n"
+    "    assert app.secret(check.__file__) == -1\n"
+    "    assert app.via_parent() == -1\n"
+    "    assert app.imported() == -1\n"
+)
+_HELPER_FILES = {
+    "app.py": _HELPER_APP,
+    "tests/check.py": "EXPECTED = 58213\n",
+    "tests/test_helper.py": _HELPER_TESTS,
+}
+_HELPER_LEAKS = tuple(f"tests.test_helper.{name}" for name in ("test_relative", "test_absolute", "test_parent_cwd", "test_import"))
+
+
+def test_grading_helpers_next_to_tests_are_not_readable(tmp_path: Path) -> None:
+    _write(tmp_path, _HELPER_FILES)
+    code, body, output = _grade(tmp_path)
+    assert body is not None, output
+    verdicts = {case["name"]: case["verdict"] for case in body["cases"]}
+    assert code == 1, body
+    for name in _HELPER_LEAKS:
+        assert verdicts.get(name) == "FAIL", (name, body)
+    assert verdicts.get("tests.test_helper.test_helper_is_denied") == "PASS", body
