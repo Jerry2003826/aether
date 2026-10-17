@@ -42,7 +42,6 @@ READ_TIMEOUT_ENV = "AETHER_CODING_PROXY_READ_TIMEOUT_SECONDS"
 MAX_CONNECTIONS_ENV = "AETHER_CODING_PROXY_MAX_CONNECTIONS"
 DEFAULT_READ_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_CONNECTIONS = 8
-_REJECT_SEND_SECONDS = 0.2
 
 
 def proxy_limits() -> tuple[float, int]:
@@ -76,12 +75,30 @@ class CodingModelProxy:
             self._server = _UnixServer(str(self.socket_path), _Handler)
             self._server.read_timeout, limit = proxy_limits()
             self._server.slots = threading.BoundedSemaphore(limit)
+            self._server.changed = threading.Condition()
         except OSError:
             shutil.rmtree(self.directory, ignore_errors=True)
             raise
         self._server.proxy = self
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    @property
+    def active_connections(self) -> int:
+        """Connections currently holding a slot (read-only, for monitoring and tests)."""
+        with self._server.changed:
+            return self._server.active
+
+    @property
+    def peak_connections(self) -> int:
+        """Most connections that ever held a slot at once."""
+        with self._server.changed:
+            return self._server.peak
+
+    def wait_until_active(self, count: int, *, timeout: float) -> bool:
+        """Block until exactly `count` connections hold a slot, or `timeout` passes."""
+        with self._server.changed:
+            return self._server.changed.wait_for(lambda: self._server.active == count, timeout=timeout)
 
     def close(self) -> None:
         if self._closed:
@@ -135,6 +152,19 @@ class _UnixServer(socketserver.ThreadingUnixStreamServer):
     proxy: CodingModelProxy
     read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS
     slots: threading.BoundedSemaphore
+    changed: threading.Condition
+    active = 0
+    peak = 0
+
+    def _count(self, delta: int) -> None:
+        with self.changed:
+            self.active += delta
+            self.peak = max(self.peak, self.active)
+            self.changed.notify_all()
+
+    def _release(self) -> None:
+        self._count(-1)
+        self.slots.release()
 
     def process_request(self, request, client_address) -> None:
         """Start a handler thread only while a connection slot is free; otherwise refuse at once."""
@@ -143,17 +173,18 @@ class _UnixServer(socketserver.ThreadingUnixStreamServer):
             _refuse(request)
             self.shutdown_request(request)
             return
+        self._count(1)
         try:
             super().process_request(request, client_address)
         except BaseException:
-            self.slots.release()
+            self._release()
             raise
 
     def process_request_thread(self, request, client_address) -> None:
         try:
             super().process_request_thread(request, client_address)
         finally:
-            self.slots.release()
+            self._release()
 
     def server_bind(self) -> None:
         super().server_bind()
@@ -204,8 +235,13 @@ class _Handler(socketserver.StreamRequestHandler):
         method, path, headers, raw = parsed
         status, payload = self.server.proxy.respond(method, path, headers, raw)
         error = payload.get("error") if status >= 400 else ""
+        try:
+            _write_json(self.wfile, status, payload)
+        except (TimeoutError, OSError):
+            # The client stopped reading. One line, no socketserver traceback.
+            _logger().info("coding_proxy status=%s error=write_timeout", status)
+            return
         _logger().info("coding_proxy status=%s error=%s", status, error if isinstance(error, str) else "")
-        _write_json(self.wfile, status, payload)
 
 
 def _refuse(request: socket.socket) -> None:
@@ -217,9 +253,10 @@ def _refuse(request: socket.socket) -> None:
         "connection: close\r\n"
         "\r\n"
     )
+    # One non-blocking send on the accept thread: a peer with a full buffer just gets nothing.
     try:
-        request.settimeout(_REJECT_SEND_SECONDS)
-        request.sendall(head.encode("ascii") + encoded)
+        request.setblocking(False)
+        request.send(head.encode("ascii") + encoded)
     except OSError:
         pass
 
