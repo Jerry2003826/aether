@@ -46,7 +46,7 @@ def test_patch_is_the_candidate_diff_and_paths_cannot_escape() -> None:
     patch = unified_patch(parsed["base_files"], parsed["files"])
     assert "return 0" in patch
     assert "return 42" in patch
-    assert patch.startswith("--- ")
+    assert patch.startswith("diff --git a/app.py b/app.py\n")
     escaped = _workspace()
     escaped["files"] = {"../app.py": "x"}
     with pytest.raises(WorkspaceError) as rejected:
