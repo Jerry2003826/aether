@@ -1,7 +1,6 @@
 import hashlib
 import importlib.util
 import json
-import os
 import shutil
 import threading
 import urllib.error
@@ -371,8 +370,9 @@ def test_stop_gateway_response_records_finish_reason(monkeypatch) -> None:
     assert _research_verdict(False, None) == ("fail", "citation_mismatch")
 
 
-def test_authorized_snapshot_fails_before_any_patch() -> None:
-    destination = Path(os.environ.get("TMPDIR", "/tmp")) / "aether-f26-snapshot-check"
+def test_authorized_snapshot_fails_before_any_patch(tmp_path: Path) -> None:
+    # This test's own directory: a fixed name under TMPDIR is shared with every other pytest session.
+    destination = tmp_path / "aether-f26-snapshot-check"
     _copy_snapshot(destination)
     try:
         result = _local_check(destination)
