@@ -87,7 +87,7 @@ def test_the_worker_records_patch_unavailable_not_sandbox_failed(monkeypatch: py
     stdout = "RESULT " + json.dumps(body) + "\n"
     monkeypatch.setattr(coding_sandbox, "_bounded_logs", lambda _name, **_kwargs: {"stdout": stdout, "stderr": ""})
     monkeypatch.setattr(coding_sandbox, "_exit_code", lambda _name: 2)
-    monkeypatch.setattr(coding_sandbox, "_sandbox_docker", lambda _args: None)
+    monkeypatch.setattr(coding_sandbox, "_sandbox_docker", lambda args: subprocess.CompletedProcess(args, 0, "", ""))
     with pytest.raises(CodingSandboxError) as caught:
         coding_sandbox._collect_exit("aether-coding-job")
     assert caught.value.code == "patch_unavailable"
@@ -99,7 +99,7 @@ def test_other_runner_failures_stay_sandbox_failed(monkeypatch: pytest.MonkeyPat
     stdout = "RESULT " + json.dumps(body) + "\n"
     monkeypatch.setattr(coding_sandbox, "_bounded_logs", lambda _name, **_kwargs: {"stdout": stdout, "stderr": ""})
     monkeypatch.setattr(coding_sandbox, "_exit_code", lambda _name: 2)
-    monkeypatch.setattr(coding_sandbox, "_sandbox_docker", lambda _args: None)
+    monkeypatch.setattr(coding_sandbox, "_sandbox_docker", lambda args: subprocess.CompletedProcess(args, 0, "", ""))
     with pytest.raises(CodingSandboxError) as caught:
         coding_sandbox._collect_exit("aether-coding-job")
     assert caught.value.code == "sandbox_failed"
