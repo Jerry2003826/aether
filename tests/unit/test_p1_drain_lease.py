@@ -75,7 +75,7 @@ class _Job:
             lambda *_a, **_k: job.stopped.append("stop") or {"coding_job_id": _JOB, "state": "FAILED", "error_code": "sandbox_failed"},
         )
         monkeypatch.setattr(coding_jobs, "run_coding_sandbox", self.sandbox)
-        monkeypatch.setattr(CodingModelProxy, "wait_until_active", lambda proxy, count, *, timeout: job.wait(count, timeout))
+        monkeypatch.setattr(CodingModelProxy, "wait_until_forwarding", lambda proxy, count, *, timeout: job.wait(count, timeout))
         real_drain = CodingModelProxy.drain
         real_close = CodingModelProxy.close
 

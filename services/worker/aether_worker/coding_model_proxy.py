@@ -50,6 +50,8 @@ DEFAULT_MAX_CONNECTIONS = 8
 # this long for it before settling; the default outlasts one forwarded call (30 s).
 DRAIN_ENV = "AETHER_CODING_PROXY_DRAIN_SECONDS"
 DEFAULT_DRAIN_SECONDS = 35.0
+# After an answer given from the request head alone, unread body bytes are dropped for this long.
+_DISCARD_SECONDS = 0.5
 
 
 def proxy_limits() -> tuple[float, int]:
@@ -90,6 +92,8 @@ class CodingModelProxy:
         self._listening = True
         self._listen_lock = threading.Lock()
         self._revoke_lock = threading.Lock()
+        # Signalled (under the revoke lock) whenever a forwarded call finishes; drain waits on it.
+        self._forwarding_done = threading.Condition(self._revoke_lock)
         self._revoked_by: str | None = None
         self._forwarding = 0
         self._stopped = threading.Event()
@@ -132,30 +136,38 @@ class CodingModelProxy:
         heartbeat: Callable[[], None] | None = None,
         heartbeat_seconds: float | None = None,
     ) -> int:
-        """Stop accepting connections, then wait for the ones in flight. Returns how many are left.
+        """Close the channel, then wait for the calls being forwarded. Returns how many are left.
 
-        The listener is closed first, so nothing new starts while we wait. Handler threads
-        are not interrupted: a call that is still forwarding keeps going and may still answer.
-        0 means every in-flight call finished (its usage is recorded) within the timeout.
+        The channel is revoked first (as the worker), so no new call starts while we wait: a
+        connection that is idle or still sending its request gets 401 revoked and is never a
+        call. What is counted is forwarding_calls, the calls already handed to the gateway, not
+        open connections. Handler threads are not interrupted: a call that is still forwarding
+        keeps going and may still answer. 0 means every forwarded call finished (its usage is
+        recorded) within the timeout.
 
         With a heartbeat, the wait is cut into slices of at most heartbeat_seconds and the
         heartbeat runs between slices, so a caller can keep a lease alive for the whole wait.
         An exception from the heartbeat ends the drain and propagates.
         """
-        self._stop_listening()
+        self._revoke("worker")
         total = drain_seconds() if timeout is None else timeout
         if heartbeat is None or heartbeat_seconds is None or heartbeat_seconds <= 0:
-            self.wait_until_active(0, timeout=total)
-            return self.active_connections
+            self.wait_until_forwarding(0, timeout=total)
+            return self.forwarding_calls
         deadline = time.monotonic() + total
         while True:
             remaining = deadline - time.monotonic()
-            if remaining <= 0 or self.wait_until_active(0, timeout=min(heartbeat_seconds, remaining)):
+            if remaining <= 0 or self.wait_until_forwarding(0, timeout=min(heartbeat_seconds, remaining)):
                 break
             if deadline - time.monotonic() <= 0:
                 break
             heartbeat()
-        return self.active_connections
+        return self.forwarding_calls
+
+    def wait_until_forwarding(self, count: int, *, timeout: float) -> bool:
+        """Block until exactly `count` calls are being forwarded, or `timeout` passes."""
+        with self._forwarding_done:
+            return self._forwarding_done.wait_for(lambda: self._forwarding == count, timeout=timeout)
 
     @property
     def forwarding_calls(self) -> int:
@@ -224,7 +236,13 @@ class CodingModelProxy:
             self.socket_path.unlink(missing_ok=True)
         self._stop_listening()
 
-    def respond(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
+    def screen(self, method: str, path: str, headers: dict[str, str]) -> tuple[int, dict] | None:
+        """The answer that does not depend on the body, or None when the body decides.
+
+        Called after the request head and before the body is read: an unknown path is 404, a
+        wrong token is 401 unauthorized, and once the channel is revoked a chat call is 401
+        revoked whatever its body holds, so nothing is read, parsed, forwarded or charged.
+        """
         if method != "POST" or (path not in _CHAT_PATHS and path != REVOKE_PATH):
             return 404, {"error": "not_found"}
         expected = f"Bearer {self.job_token}"
@@ -232,9 +250,24 @@ class CodingModelProxy:
         # Constant-time; a non-ASCII header can never match (and str compare_digest rejects it).
         if not presented.isascii() or not secrets.compare_digest(presented, expected):
             return 401, {"error": "unauthorized"}
+        if path != REVOKE_PATH and self.revoked:
+            return 401, {"error": "revoked"}
+        return None
+
+    def respond(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
+        screened = self.screen(method, path, headers)
+        if screened is not None:
+            return screened
+        return self.respond_screened(method, path, headers, raw)
+
+    def respond_screened(self, method: str, path: str, headers: dict[str, str], raw: bytes) -> tuple[int, dict]:
+        """respond() for a request that screen() already let through (the token is not compared again)."""
         if path == REVOKE_PATH:
             self._revoke("sandbox")
             return 200, {"revoked": True}
+        if self.revoked:
+            # Revoked while the body was on its way: the channel decides, not the body.
+            return 401, {"error": "revoked"}
         try:
             loaded = json.loads(raw.decode()) if raw else {}
         except (UnicodeError, json.JSONDecodeError):
@@ -242,8 +275,8 @@ class CodingModelProxy:
         if not isinstance(loaded, dict):
             return 400, {"error": "body_rejected"}
         # Checked under the revoke lock right before forwarding: once revoke() has returned, no call
-        # starts forwarding. A call that got here first is in flight (its connection holds a slot),
-        # so drain waits for it and its usage settles normally.
+        # starts forwarding. A call that got here first is counted in forwarding_calls, so drain
+        # waits for it and its usage settles normally.
         with self._revoke_lock:
             if self._revoked_by is not None:
                 return 401, {"error": "revoked"}
@@ -255,8 +288,9 @@ class CodingModelProxy:
         except (LoopbackError, OSError, TimeoutError, json.JSONDecodeError):
             return 502, {"error": "relay_failed"}
         finally:
-            with self._revoke_lock:
+            with self._forwarding_done:
                 self._forwarding -= 1
+                self._forwarding_done.notify_all()
 
     def _forward(self, body: dict) -> dict:
         base = os.environ.get("AETHER_GATEWAY_BASE", "").rstrip("/")
@@ -335,6 +369,9 @@ class _DeadlineReader(io.RawIOBase):
     def readable(self) -> bool:
         return True
 
+    def shorten(self, deadline: float) -> None:
+        self._deadline = min(self._deadline, deadline)
+
     def readinto(self, buffer) -> int:
         remaining = self._deadline - time.monotonic()
         if remaining <= 0:
@@ -353,17 +390,59 @@ class _Handler(socketserver.StreamRequestHandler):
 
     def handle(self) -> None:
         try:
-            parsed = _read_http(self.rfile)
+            head = _read_head(self.rfile)
+            screened = None
+            parsed = None
+            if head is not None:
+                screened = self.server.proxy.screen(*head)
+                if screened is None:
+                    parsed = _read_body(self.rfile, *head)
         except (TimeoutError, OSError):
             _logger().info("coding_proxy status=408 error=read_timeout")
             return
         # The reply gets the same bound, so a client that stops reading cannot pin the thread.
         self.connection.settimeout(self.server.read_timeout)
+        if screened is not None:
+            # Answered from the head alone; the body is never read or parsed.
+            status, payload = screened
+            self._answer(status, payload)
+            self._discard(head[2])
+            return
         if parsed is None:
-            _write_json(self.wfile, 400, {"error": "body_rejected"})
+            self._answer(400, {"error": "body_rejected"})
             return
         method, path, headers, raw = parsed
-        status, payload = self.server.proxy.respond(method, path, headers, raw)
+        status, payload = self.server.proxy.respond_screened(method, path, headers, raw)
+        self._answer(status, payload)
+
+    def _discard(self, headers: dict[str, str]) -> None:
+        """Signal end of reply, then drop a short-lived trickle of the unread body (best effort).
+
+        Closing a Unix socket with unread bytes can turn the client's next read into a reset, so
+        the answer is followed by EOF and whatever the client already sent is read and dropped,
+        for at most _DISCARD_SECONDS.
+        """
+        try:
+            self.connection.shutdown(socket.SHUT_WR)
+        except OSError:
+            return
+        try:
+            remaining = int(headers.get("content-length") or "0")
+        except ValueError:
+            return
+        raw = self.rfile.raw
+        if isinstance(raw, _DeadlineReader):
+            raw.shorten(time.monotonic() + _DISCARD_SECONDS)
+        try:
+            while 0 < remaining:
+                block = self.rfile.read1(min(remaining, 65536))
+                if not block:
+                    return
+                remaining -= len(block)
+        except (TimeoutError, OSError):
+            return
+
+    def _answer(self, status: int, payload: dict) -> None:
         error = payload.get("error") if status >= 400 else ""
         try:
             _write_json(self.wfile, status, payload)
@@ -423,6 +502,14 @@ def _grant_socket(path: str | os.PathLike[str]) -> None:
 
 
 def _read_http(reader) -> tuple[str, str, dict[str, str], bytes] | None:
+    head = _read_head(reader)
+    if head is None:
+        return None
+    return _read_body(reader, *head)
+
+
+def _read_head(reader) -> tuple[str, str, dict[str, str]] | None:
+    """Request line and headers: (METHOD, path without query, lower-cased headers), or None."""
     start = reader.readline(_MAX_LINE)
     if not start:
         return None
@@ -441,6 +528,12 @@ def _read_http(reader) -> tuple[str, str, dict[str, str], bytes] | None:
         headers[name.strip().lower()] = value.strip()
     else:
         return None
+    return parts[0].upper(), parts[1].split("?", 1)[0], headers
+
+
+def _read_body(
+    reader, method: str, path: str, headers: dict[str, str]
+) -> tuple[str, str, dict[str, str], bytes] | None:
     try:
         length = int(headers.get("content-length") or "0")
     except ValueError:
@@ -450,7 +543,7 @@ def _read_http(reader) -> tuple[str, str, dict[str, str], bytes] | None:
     raw = _read_exact(reader, length)
     if raw is None:
         return None
-    return parts[0].upper(), parts[1].split("?", 1)[0], headers, raw
+    return method, path, headers, raw
 
 
 def _read_exact(reader, length: int) -> bytes | None:
