@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 
 import pytest
-from aether_worker import service
+from aether_worker import container_runtime, service
 from aether_worker.goal_effect import WorkerEndpoints
 
 
@@ -26,9 +26,20 @@ def _endpoints() -> WorkerEndpoints:
     )
 
 
+_GIT_MISSING = "worker_git_missing"
+
+
 def _serve_until_connect(monkeypatch: pytest.MonkeyPatch, path: str) -> list[str]:
     order: list[str] = []
     monkeypatch.setenv("PATH", path)
+
+    # The worker's start opens no Docker client (the runner sweeps leftover containers); a real
+    # daemon or the host's Docker credentials must never reach this test.
+    def no_docker() -> object:
+        order.append("docker_client")
+        raise AssertionError("serve() opened a docker client")
+
+    monkeypatch.setattr(container_runtime, "docker_client", no_docker)
     monkeypatch.setattr(service, "configure", lambda endpoints: order.append("configure"))
 
     async def connect(*args: object, **kwargs: object) -> object:
@@ -44,7 +55,9 @@ def _serve_until_connect(monkeypatch: pytest.MonkeyPatch, path: str) -> list[str
 
 
 def _git_warnings(caplog: pytest.LogCaptureFixture) -> list[logging.LogRecord]:
-    return [record for record in caplog.records if "git" in record.getMessage()]
+    """The worker's own git-missing records. Other loggers may mention "git" (docker.auth logs a
+    registry user such as githubactions at DEBUG); they are not this warning."""
+    return [record for record in caplog.records if record.name == "aether.worker" and _GIT_MISSING in record.getMessage()]
 
 
 def test_serve_warns_once_when_git_is_not_on_path_and_keeps_starting(
@@ -71,5 +84,6 @@ def test_serve_does_not_warn_when_git_is_on_path(
     git = shutil.which("git")
     assert git is not None
     caplog.set_level(logging.DEBUG)
-    _serve_until_connect(monkeypatch, os.path.dirname(git))
+    order = _serve_until_connect(monkeypatch, os.path.dirname(git))
     assert _git_warnings(caplog) == []
+    assert order == ["configure", "connect"]
