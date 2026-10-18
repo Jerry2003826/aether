@@ -212,10 +212,6 @@ def credential_present() -> bool:
     return any(any(part in name for part in markers) for name in os.environ)
 
 
-# An unexpected error's message is logged to stderr cut to this many characters.
-_ERROR_MESSAGE_CHARS = 500
-
-
 def emit(body: dict[str, object], code: int) -> None:
     line = "RESULT " + json.dumps(body, separators=(",", ":"))
     patch = body.get("patch")
@@ -831,11 +827,10 @@ def main() -> None:
         failure.update(agent_report)
         emit(failure, 1)
     except Exception as exc:
-        # The detail stays the type name; the message goes to stderr on one bounded line for the job
-        # log. Unredacted here (the sandbox has no secret scanner): the worker redacts both log tails
-        # with secret_scan.redact_trace before it stores them (coding_sandbox._log_tails).
-        message = " ".join(str(exc).split())[:_ERROR_MESSAGE_CHARS]
-        sys.stderr.write(f"entry_failed {type(exc).__name__}: {message}\n")
+        # Only the type, never the message: Docker's own json log keeps container output until the
+        # container is removed, and an unconfirmed stop, a worker crash or a failed rm -f can leave
+        # it; no redaction reaches that copy (see coding_sandbox._log_tails for the stored tails).
+        sys.stderr.write(f"entry_failed {type(exc).__name__}\n")
         sys.stderr.flush()
         emit(_failure(type(exc).__name__), 2)
     payload.update(agent_report)
