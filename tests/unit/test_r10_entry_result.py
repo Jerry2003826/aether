@@ -224,3 +224,46 @@ def test_the_published_patch_reproduces_non_utf8_files_byte_for_byte(tmp_path: P
     found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
     assert found == graded, patch
     assert not (applied / "gone.bin").exists(), patch
+
+
+def test_the_published_patch_reproduces_utf8_text_byte_for_byte(tmp_path: Path) -> None:
+    """Same root cause as the non-UTF-8 case: valid UTF-8 text is also published byte for byte. A last
+    line without a newline stays without one, a change to that newline alone is a change, and the line
+    separators str.splitlines knows but patch tools do not (CR, FF, U+2028, ...) stay inside their line."""
+    baseline = {
+        "both.py": b"X = 1",
+        "drop.py": b"X = 1\n",
+        "add.py": b"X = 1",
+        "cr.txt": b"a\rb\n",
+        "seps.py": "S = '\u2028\x0c\x1c\x85'\nT = 1\n".encode(),
+    }
+    graded = {
+        "both.py": b"X = 2",
+        "drop.py": b"X = 1",
+        "add.py": b"X = 1\n",
+        "cr.txt": b"a\rc\n",
+        "seps.py": "S = '\u2028\x0c\x1c\x85'\nT = 2\n".encode(),
+    }
+    job = tmp_path / "job"
+    applied = tmp_path / "applied"
+    for root in (job, applied):
+        root.mkdir()
+        for name, data in baseline.items():
+            (root / name).write_bytes(data)
+    change = "".join(f"(job / {name!r}).write_bytes({data!r})\n" for name, data in graded.items())
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n" + change + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    patch = completed.stdout.decode("utf-8")
+    assert _agent_patch({"result": {"patch": patch}}) == patch
+    (tmp_path / "published.diff").write_bytes(completed.stdout)
+    done = subprocess.run(
+        ["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr + patch
+    found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
+    assert found == graded, patch
