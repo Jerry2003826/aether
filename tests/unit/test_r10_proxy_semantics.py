@@ -17,7 +17,7 @@ import sys
 from pathlib import Path
 
 _PROTOCOL = Path("services/worker/aether_worker/coding_protocol.py").resolve()
-_NONCE = "n0nce-7c2d4e9a1b3f5a60"
+_NONCE = "nonce-for-proxy-semantics-tests"
 
 
 def _grade(root: Path) -> tuple[int, dict[str, str], str]:

@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 
 _PROTOCOL = Path("services/worker/aether_worker/coding_protocol.py").resolve()
-_NONCE = "n0nce-5b1e9d03c7a24f86"
+_NONCE = "nonce-for-pytest-collection-tests"
 
 
 def _write(root: Path, files: dict[str, str]) -> None:
