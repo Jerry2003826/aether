@@ -977,10 +977,9 @@ class _Remote:
         return value
 
     def __iter__(self):
-        value = self._aether("list")
-        if type(value) is not list:
-            raise TypeError("candidate iteration did not produce a list")
-        return iter(value)
+        # The candidate's own iterator, one `next` per item (Codex r4308195951): never a copy taken at
+        # once, so state changes between items and infinite generators behave as in-process.
+        return self._operate("iter", self)
 
     def __contains__(self, item: object) -> bool:
         value = self._aether("contains", item=_encode_tree(item))
@@ -1028,10 +1027,7 @@ class _Remote:
         return self._operate("next", self)
 
     def __reversed__(self):
-        value = self._operate("reversed", self)
-        if type(value) is not list:
-            raise TypeError("candidate reversal did not produce a list")
-        return iter(value)
+        return self._operate("reversed", self)
 
     def __format__(self, spec: str) -> str:
         return self._operate("format", self, spec)  # type: ignore[return-value]
@@ -1151,7 +1147,8 @@ _OPERATIONS: dict[str, Any] = {
     "ceil": math.ceil,
     "fspath": os.fspath,
     "next": next,
-    "reversed": lambda value: list(reversed(value)),
+    "iter": iter,
+    "reversed": reversed,
     "format": format,
     "delitem": operator.delitem,
     "enter": lambda value: type(value).__enter__(value),
@@ -2245,8 +2242,6 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             return ["n"]
         if op == "len":
             return encode(len(target))
-        if op == "list":
-            return encode(list(target))
         if op == "contains":
             return encode(decode(message["item"]) in target)
         if op == "str":
