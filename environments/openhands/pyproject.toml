@@ -9,6 +9,10 @@ dependencies = [
   "openhands-workspace==1.54.0",
   "openhands-agent-server==1.54.0",
   "func-timeout==4.3.5",
+  # The grading protocol collects and runs the trusted suite with pytest (ADR-F44); the same pytest and
+  # pluggy as the control-plane lock, under which the protocol's unit tests run.
+  "pytest==9.1.1",
+  "pluggy==1.6.0",
 ]
 
 [tool.uv]
