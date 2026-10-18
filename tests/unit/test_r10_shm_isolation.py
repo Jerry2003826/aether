@@ -178,3 +178,30 @@ def test_candidate_multiprocessing_still_works_under_the_protocol(tmp_path: Path
     body = json.loads(completed.stdout.strip().splitlines()[-1])
     assert body["cases"] == [{"name": "test_app.test_mp", "verdict": "PASS", "detail": ""}], (body, completed.stderr[-2000:])
     assert completed.returncode == 0
+
+
+@pytest.mark.parametrize("configured", [None, "", "relative/shm", "/nonexistent/aether-shm"], ids=["unset", "empty", "relative", "missing"])
+def test_the_protocol_grades_nothing_without_its_shared_memory_directory(tmp_path: Path, configured: str | None) -> None:
+    """No AETHER_PROTOCOL_SHM_DIR (or not an existing absolute directory): no fallback to /dev/shm,
+    which nobody emptied; nothing is graded and no candidate code runs."""
+    work = tmp_path / "work"
+    work.mkdir()
+    marker = Path(tempfile.mkdtemp(prefix="aether-unit-marker-", dir="/dev/shm"))
+    try:
+        (work / "app.py").write_text(
+            f"open({str(marker / 'ran')!r}, 'w').write('ran')\n\ndef value():\n    return 42\n", encoding="utf-8"
+        )
+        (work / "test_app.py").write_text("import app\n\ndef test_value():\n    assert app.value() == 42\n", encoding="utf-8")
+        env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_")}
+        if configured is not None:
+            env["AETHER_PROTOCOL_SHM_DIR"] = configured
+        completed = subprocess.run(
+            [sys.executable, "-I", str(_PROTOCOL)], cwd=work, env=env, capture_output=True, text=True, timeout=120, check=False
+        )
+        body = json.loads(completed.stdout.strip().splitlines()[-1])
+        assert body["cases"] == [{"name": "suite", "verdict": "FAIL", "detail": "shared_memory_unconfigured"}], body
+        assert body["passed"] == 0 and body["failed"] == 1, body
+        assert completed.returncode == 1
+        assert not (marker / "ran").exists()
+    finally:
+        shutil.rmtree(marker, ignore_errors=True)
