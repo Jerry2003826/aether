@@ -65,6 +65,7 @@ import tempfile
 import time
 import types
 import unittest
+from collections.abc import Collection
 from pathlib import Path
 from typing import Any
 
@@ -873,18 +874,23 @@ def _decode(node: object, session: _Session, depth: int = 0) -> object:
 
 
 def _decode_data_handle(rest: list[object], session: _Session, depth: int) -> object:
-    """["v", handle, qualname, base, snapshot, hooks, rebuild]: see _RemoteData."""
+    """["v", handle, qualname, base, snapshot, hooks, rebuild, ancestry]: see _RemoteData."""
     if not (
-        len(rest) == 6
+        len(rest) == 7
         and type(rest[0]) is int
         and type(rest[1]) is str
         and rest[2] in _DATA_BASES
         and isinstance(rest[4], list)
         and all(hook in _DATA_HOOKS for hook in rest[4])
         and (rest[5] == "" or rest[5] in _STDLIB_KINDS)
+        and (rest[6] is None or (isinstance(rest[6], list) and all(name in _ANCESTRY for name in rest[6])))
     ):
         raise CandidateError("candidate_protocol")
+    if rest[6] is None:
+        # Its class derives from a class the test cannot stand in for: isinstance would differ.
+        raise _unsupported(_ANCESTRY_UNAVAILABLE)
     handle, kind, base, hooks, rebuild = rest[0], rest[1][:200], rest[2], frozenset(rest[4]), rest[5]
+    ancestry = tuple(rest[6])
     snapshot = None
     if base in _IMMUTABLE_BASES:
         # Immutable: the data cannot change, so it is read once, in the test process.
@@ -893,7 +899,7 @@ def _decode_data_handle(rest: list[object], session: _Session, depth: int) -> ob
             raise CandidateError("candidate_protocol")
     elif rest[3] is not None:
         raise CandidateError("candidate_protocol")
-    return session.remote(handle, lambda: _RemoteData(session, handle, kind, base, snapshot, hooks, rebuild))
+    return session.remote(handle, lambda: _RemoteData(session, handle, kind, base, snapshot, hooks, rebuild, ancestry))
 
 
 def _encode_trusted(value: object, depth: int = 0) -> list[object]:
@@ -959,6 +965,55 @@ _DATA_HOOKS = ("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__ha
 # Stdlib classes with their own comparison: the test rebuilds them from the data with its own copy of
 # the class (the candidate's copy is never trusted) and compares that.
 _STDLIB_KINDS: dict[str, type] = {"collections.Counter": collections.Counter, "collections.OrderedDict": collections.OrderedDict}
+
+
+# The classes a candidate's builtin-subclass instance may name as its ancestry (Codex r4308421630): the
+# builtin data types and the stdlib classes in this table, each by identity with the copy this process
+# imported before any candidate code ran. The test process builds its stand-in class from its own copies.
+_ANCESTRY: dict[str, type] = {
+    **{cls.__name__: cls for cls in (int, float, complex, str, bytes, bytearray, tuple, frozenset, list, dict, set)},
+    "collections.OrderedDict": collections.OrderedDict,
+    "collections.defaultdict": collections.defaultdict,
+    "collections.Counter": collections.Counter,
+    **{f"enum.{cls.__name__}": cls for cls in (enum.Enum, enum.ReprEnum, enum.IntEnum, enum.StrEnum, enum.Flag, enum.IntFlag)},
+}
+_ANCESTRY_UNAVAILABLE = "subclass_ancestry_unavailable"
+
+
+def _ancestry(kind: type, candidate_modules: Collection[str]) -> list[str] | None:
+    """Candidate side: the trusted classes of kind's MRO, most derived first. The candidate's own classes
+    (defined in a candidate module) are left out: isinstance against them is refused anyway. None when
+    the MRO holds any other class (a stdlib or library class outside _ANCESTRY, or one that only claims
+    a stdlib name): the test could not tell isinstance against it apart."""
+    found: list[str] = []
+    for cls in kind.__mro__:
+        if cls is object:
+            continue
+        key = next((name for name, known in _ANCESTRY.items() if known is cls), None)
+        if key is not None:
+            found.append(key)
+        elif not (type(cls.__module__) is str and cls.__module__ in candidate_modules):
+            return None
+    return found
+
+
+_STAND_INS: dict[tuple[str, tuple[str, ...]], type] = {}
+
+
+def _stand_in(kind: str, ancestry: tuple[str, ...]) -> type:
+    """Test side: a class of this process with the trusted ancestry, named as the candidate's class."""
+    key = (kind, ancestry)
+    found = _STAND_INS.get(key)
+    if found is None:
+        classes = [_ANCESTRY[name] for name in ancestry]
+        bases = tuple(cls for cls in classes if not any(other is not cls and issubclass(other, cls) for other in classes))
+        name = kind.rsplit(".", 1)[-1] or "candidate"
+        try:
+            found = types.new_class(name, bases, exec_body=lambda space: space.update({"__module__": "aether_candidate", "__qualname__": kind}))
+        except Exception:  # noqa: BLE001 - bases that cannot be combined here: refused, never approximated
+            raise _unsupported(_ANCESTRY_UNAVAILABLE) from None
+        _STAND_INS[key] = found
+    return found
 
 
 def _data_base(kind: type) -> type | None:
@@ -1249,16 +1304,32 @@ class _RemoteData(_Remote):
     defines one of them gets that use refused (ADR-F44), so it cannot make `result == expected` pass.
     """
 
-    __slots__ = ("_aether_base", "_aether_hooks", "_aether_rebuild", "_aether_snapshot")
+    __slots__ = ("_aether_ancestry", "_aether_base", "_aether_hooks", "_aether_rebuild", "_aether_snapshot")
 
     def __init__(
-        self, session: _Session, handle: int, kind: str, base: str, snapshot: object, hooks: frozenset[str], rebuild: str
+        self,
+        session: _Session,
+        handle: int,
+        kind: str,
+        base: str,
+        snapshot: object,
+        hooks: frozenset[str],
+        rebuild: str,
+        ancestry: tuple[str, ...] = (),
     ) -> None:
         super().__init__(session, handle, kind)
+        object.__setattr__(self, "_aether_ancestry", ancestry)
         object.__setattr__(self, "_aether_base", base)
         object.__setattr__(self, "_aether_snapshot", snapshot)
         object.__setattr__(self, "_aether_hooks", hooks)
         object.__setattr__(self, "_aether_rebuild", rebuild)
+
+    # isinstance/issubclass fall back to __class__ when type() does not match (Codex r4308421630): a
+    # stand-in with the candidate class's trusted ancestry, so `isinstance(result, list)`, the enum bases,
+    # Counter/OrderedDict and the ABCs they are registered with answer as in-process. type() stays this.
+    @property
+    def __class__(self) -> type:  # type: ignore[override]
+        return _stand_in(self._aether_type, self._aether_ancestry)
 
     def _aether_data(self, hook: str) -> object:
         if hook in self._aether_hooks:
@@ -2337,6 +2408,8 @@ def _runner_main(read_fd: int, write_fd: int, parent: int) -> None:
 
 def _candidate_main(read_fd: int, write_fd: int) -> None:
     handles: dict[int, object] = {}
+    # Import names of the candidate's own modules (set at init), for _ancestry.
+    candidate_modules: set[str] = set()
     # Shared builtin containers (see _MIRRORED): the candidate's own objects under the shared ids.
     mirrors: dict[int, object] = {}
     mirror_ids: dict[int, int] = {}
@@ -2377,7 +2450,7 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         held = keep(value)
         hooks, rebuild = _data_hooks(type(value), base)
         snapshot = _encode_data(_BASE_COPIES[base](value), depth, encode) if base.__name__ in _IMMUTABLE_BASES else None
-        return ["v", held[1], held[2], base.__name__, snapshot, hooks, rebuild]
+        return ["v", held[1], held[2], base.__name__, snapshot, hooks, rebuild, _ancestry(type(value), candidate_modules)]
 
     def exact(value: object) -> object:
         # str/bytes from a conversion (str(), format(), os.fspath(), bytes()) are text, not a handle.
@@ -2417,6 +2490,7 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
                 dict.fromkeys(message["all"], b""), list(message["bases"]), None if listed is None else frozenset(listed)
             )
             sys.meta_path.insert(0, _CandidateFinder(root, sources, modules))
+            candidate_modules.update(modules)
             # Appended, after the stdlib and site-packages: a workspace file the module map refuses (a
             # stdlib or dependency name) cannot come back in through the path finder.
             sys.path.extend([*(str(root / base) for base in message["bases"]), str(root)])
