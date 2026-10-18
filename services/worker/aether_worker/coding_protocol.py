@@ -128,16 +128,85 @@ def _tampered(root: Path, baseline: dict[str, str]) -> bool:
     return False
 
 
+class _TypeInspection(ast.NodeTransformer):
+    """Trusted sources only: `type(x)` (one argument) and reading `x.__class__` go through the guards
+    below (Codex r4309057196). A module that binds the name `type` itself keeps its own `type(...)`."""
+
+    def __init__(self, rewrite_type: bool) -> None:
+        self._rewrite_type = rewrite_type
+
+    def visit_Call(self, node: ast.Call) -> ast.AST:
+        self.generic_visit(node)
+        if (
+            self._rewrite_type
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "type"
+            and len(node.args) == 1
+            and not isinstance(node.args[0], ast.Starred)
+            and not node.keywords
+        ):
+            node.func = ast.copy_location(ast.Name(_TYPE_GUARD, ast.Load()), node.func)
+        return node
+
+    def visit_Attribute(self, node: ast.Attribute) -> ast.AST:
+        self.generic_visit(node)
+        if node.attr == "__class__" and isinstance(node.ctx, ast.Load):
+            return ast.copy_location(ast.Call(ast.Name(_CLASS_GUARD, ast.Load()), [node.value], []), node)
+        return node
+
+
+def _binds_type(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id == "type" and not isinstance(node.ctx, ast.Load):
+            return True
+        if isinstance(node, ast.arg) and node.arg == "type":
+            return True
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)) and node.name == "type":
+            return True
+        if isinstance(node, ast.alias) and (node.asname or node.name) == "type":
+            return True
+    return False
+
+
+_TYPE_GUARD = "__aether_type__"
+_CLASS_GUARD = "__aether_class__"
+
+
+def _type_guard(value: object) -> type:
+    """type(value), except for a candidate object: its runtime type exists only in the candidate."""
+    kind = type(value)
+    if issubclass(kind, (_Remote, _RemoteModule)):
+        raise _unsupported("type_of_candidate_object")
+    return kind
+
+
+def _class_guard(value: object) -> object:
+    """value.__class__, except for a candidate object (see _type_guard)."""
+    if issubclass(type(value), (_Remote, _RemoteModule)):
+        raise _unsupported("class_of_candidate_object")
+    return value.__class__
+
+
 class _SnapshotLoader(importlib.abc.Loader):
-    def __init__(self, source: bytes, origin: str) -> None:
+    def __init__(self, source: bytes, origin: str, trusted: bool = False) -> None:
         self._source = source
         self._origin = origin
+        # A trusted module in the test process (test module, trusted helper, conftest): compiled with the
+        # type-inspection guards. Candidate modules (in the candidate process) are compiled as written.
+        self._trusted = trusted
 
     def create_module(self, spec):
         return None
 
     def exec_module(self, module) -> None:
-        code = compile(self._source, self._origin, "exec", dont_inherit=True)
+        if self._trusted:
+            tree = ast.parse(self._source, self._origin)
+            tree = ast.fix_missing_locations(_TypeInspection(not _binds_type(tree)).visit(tree))
+            module.__dict__[_TYPE_GUARD] = _type_guard
+            module.__dict__[_CLASS_GUARD] = _class_guard
+            code = compile(tree, self._origin, "exec", dont_inherit=True)
+        else:
+            code = compile(self._source, self._origin, "exec", dont_inherit=True)
         exec(code, module.__dict__)  # noqa: S102 - running the suite is the point
 
 
@@ -371,9 +440,10 @@ def _shared_memory() -> str | None:
     return os.path.realpath(value)
 
 
-def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False):
+def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False, trusted: bool = False):
     origin = str(origin_path)
-    spec = importlib.machinery.ModuleSpec(fullname, _SnapshotLoader(data, origin), origin=origin, is_package=package)
+    loader = _SnapshotLoader(data, origin, trusted)
+    spec = importlib.machinery.ModuleSpec(fullname, loader, origin=origin, is_package=package)
     if package:
         spec.submodule_search_locations = [str(origin_path.parent)]
     spec.has_location = True
@@ -1500,7 +1570,7 @@ class _GraderFinder(importlib.abc.MetaPathFinder):
             if package:
                 spec.submodule_search_locations = []
             return spec
-        return _spec(fullname, self._root / name, self._sources[name], package)
+        return _spec(fullname, self._root / name, self._sources[name], package, trusted=True)
 
 
 def _not_dumpable() -> None:
@@ -2347,7 +2417,7 @@ def _load_conftest(name: str, data: bytes, root: Path) -> types.ModuleType:
     """One baseline conftest, executed from its bytes in this (trusted) process under a name no test
     module can take, the way pytest would before the test module."""
     label = "aether_conftest." + name[:-3].replace("/", ".")
-    module = importlib.util.module_from_spec(_spec(label, root / name, data))
+    module = importlib.util.module_from_spec(_spec(label, root / name, data, trusted=True))
     sys.modules[label] = module
     module.__spec__.loader.exec_module(module)
     return module
@@ -2378,7 +2448,7 @@ def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
             else:
                 # Loaded straight from the snapshot under its full dotted path, so same-named test
                 # files in different directories never hide each other.
-                module = importlib.util.module_from_spec(_spec(label, root / relative, sources[relative]))
+                module = importlib.util.module_from_spec(_spec(label, root / relative, sources[relative], trusted=True))
                 sys.modules[label] = module
                 module.__spec__.loader.exec_module(module)
         except BaseException as exc:  # noqa: BLE001 - any failure to import is a FAIL verdict
