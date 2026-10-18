@@ -1,4 +1,5 @@
-"""Stdlib test protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands.
+"""Grading protocol executed by OpenHands inside the sandbox. It does not score or import OpenHands.
+The trusted suite is collected and run by pytest (in the test processes only), under the isolation below.
 
 Integrity: before any candidate code runs, every Python source and grading file under the workspace
 (virtualenvs with pyvenv.cfg, node_modules, VCS and cache dirs skipped) is read into memory and hashed. All Python imports from the workspace (test modules, oracle.py, candidate code, packages)
@@ -10,16 +11,18 @@ Isolation: three kinds of process, and candidate code only ever runs in the last
   grader     this process. Reads (and deletes) the nonce file first, takes the snapshot, reads the
              test names from the baseline source, and aggregates verdicts. It never imports or runs
              workspace code. Its one stdout line, signed with the nonce, is the result.
-  test       one fresh process per test id (a function, or a method of a Test* / TestCase class),
-             plus one per module to import it and find its tests. It runs the trusted test module and
-             oracle from the snapshot and replies on a pipe only it holds. A test without a well-formed
-             reply (crash, early exit) is FAIL no_result; one past its limit is FAIL timeout.
+  test       one fresh process per test module. It imports the trusted test module and oracle from the
+             snapshot and runs pytest in-process on that module object (pytest never imports the file,
+             and reads no config, conftest, plugin or PYTEST_* variable), so collection, fixtures and
+             unittest/xunit scopes are pytest's own. It replies per test on a pipe only it holds. A test
+             without a well-formed reply (crash, early exit) is FAIL no_result, one past its limit FAIL
+             timeout; the module's remaining tests then run in a fresh test process.
   candidate  started by the test process. Candidate modules there are proxies: attribute access and
              calls cross a pipe and only data comes back (builtin values, or opaque handles that refuse
              comparison and truth), so candidate code can neither reach the test's frames, oracle or
              result, nor hand back an object that compares equal to everything. It sees only candidate
              files: its cwd is a fresh directory the grader fills with the workspace's non-grading files
-             for that one test, and before any candidate code runs it locks itself (Landlock) to that
+             for that one test process, and before any candidate code runs it locks itself (Landlock) to that
              directory, a private temp dir and the system/interpreter paths, so the grading workspace,
              tests and oracle are unreadable by any path (relative, absolute, /proc/<pid>/cwd). Without
              Landlock no candidate code runs: candidate_isolation_unavailable.
@@ -210,16 +213,15 @@ def _test_modules(sources: dict[str, bytes]) -> list[tuple[str, str, str]]:
         if not _is_test_module(name) or _is_candidate(name):
             continue
         parts = name[:-3].split("/")
-        if not all(part.isidentifier() for part in parts):
-            continue
         # Climb while the parent directory is a package; the first non-package directory is the base.
         depth = len(parts) - 1
         while depth > 0 and "/".join(parts[:depth]) + "/__init__.py" in sources:
             depth -= 1
         base = "/".join(parts[:depth])
         # A package under a non-package base is imported through the finder (relative imports work);
-        # a plain module there is loaded directly under its full dotted path.
-        importable = depth == 0 or depth < len(parts) - 1
+        # a plain module there is loaded directly under its full dotted path. A path that is no import
+        # name (test_bad-file.py) is loaded directly too: pytest collects it, so it is never dropped.
+        importable = (depth == 0 or depth < len(parts) - 1) and all(part.isidentifier() for part in parts)
         found.append((name, ".".join(parts[depth:]) if importable else "", base))
     return sorted(found, key=lambda item: (item[0].count("/"), item[0]))
 
@@ -293,7 +295,7 @@ class CandidateError(Exception):
 
 
 class _Session:
-    """One candidate process. Started lazily; a new one for every test process (so for every test)."""
+    """One candidate process. Started lazily; a new one for every test process (one per test module, and per resume)."""
 
     def __init__(
         self,
@@ -788,7 +790,7 @@ _DROPPED_NAMES_LOGGED = 20
 def _candidate_files(root: Path) -> dict[str, bytes]:
     """The workspace files candidate code may see: regular, non-grading files outside skipped dirs.
 
-    Read once, before any candidate code runs, and written into a fresh directory for every test.
+    Read once, before any candidate code runs, and written into a fresh directory for every test process.
     """
     found: dict[str, bytes] = {}
     dropped: list[str] = []
@@ -829,7 +831,7 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
 
 
 def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str) -> dict[str, Any]:
-    """A fresh directory for one test's candidate process: src/ (its cwd, the candidate files) and tmp/."""
+    """A fresh directory for one test process's candidate process: src/ (its cwd, the candidate files) and tmp/."""
     top = Path(tempfile.mkdtemp(prefix="aether-candidate-"))
     src, tmp = top / "src", top / "tmp"
     src.mkdir(mode=0o700)
@@ -1011,30 +1013,40 @@ def _on_signal(signum: int, _frame: object) -> None:
     os._exit(128 + signum)
 
 
-_TIMED_OUT = {"kind": "result", "verdict": "FAIL", "detail": "timeout"}
+# One reply per finished test; past this a test process is talking nonsense and is stopped.
+_MAX_REPLIES = 100_000
 
 
 def _run_in_child(
-    root: Path, request: dict[str, object], timeout: float, candidate: tuple[dict[str, bytes], list[str], str]
-) -> dict[str, object] | None:
-    """Run one step (collect a module, or one test) in a fresh test process; its reply or None.
+    root: Path,
+    request: dict[str, object],
+    step_timeout: float,
+    deadline: float,
+    candidate: tuple[dict[str, bytes], list[str], str],
+) -> tuple[list[dict[str, object]], str]:
+    """Run one step (a pytest session over one test module) in a fresh test process.
 
-    The reply arrives on a pipe only that process holds, never on stdout. The test process runs trusted
+    Returns the replies it sent, in order, and how it ended: "done", "restart" (its candidate process
+    died; the remaining tests need a fresh one), "timeout" (no reply within `step_timeout` of the last,
+    or the run's deadline passed) or "no_result" (a crash, an early exit, a malformed message).
+
+    Replies arrive on a pipe only that process holds, never on stdout. The test process runs trusted
     test code only; candidate code runs in its own process behind it, in a fresh candidate directory
-    (`candidate` = its files and the paths it must not read) that is removed after the step. A timeout
-    is a FAIL "timeout" result; no reply (a crash, an early exit, a malformed message) is None, also a FAIL.
+    (`candidate` = its files, the paths it must not read and the shared memory) removed after the step.
     """
     try:
         sandbox = _candidate_sandbox(*candidate)
     except OSError:
-        return None
+        return [], "no_result"
     try:
-        return _run_test_process(root, {**request, "sandbox": sandbox}, timeout)
+        return _run_test_process(root, {**request, "sandbox": sandbox}, step_timeout, deadline)
     finally:
         _remove_tree(sandbox["top"])
 
 
-def _run_test_process(root: Path, request: dict[str, object], timeout: float) -> dict[str, object] | None:
+def _run_test_process(
+    root: Path, request: dict[str, object], step_timeout: float, deadline: float
+) -> tuple[list[dict[str, object]], str]:
     request_read, request_write = os.pipe()
     reply_read, reply_write = os.pipe()
     try:
@@ -1052,20 +1064,33 @@ def _run_test_process(root: Path, request: dict[str, object], timeout: float) ->
     except OSError:
         for fd in (request_read, request_write, reply_read, reply_write):
             os.close(fd)
-        return None
+        return [], "no_result"
     _LIVE.add(process.pid)
     os.close(request_read)
     os.close(reply_write)
-    reply: object = None
+    replies: list[dict[str, object]] = []
+    ending = "no_result"
     try:
         _send(request_write, request)
         os.close(request_write)
         request_write = -1
-        reply = _receive(reply_read, time.monotonic() + timeout)
+        while len(replies) < _MAX_REPLIES:
+            # Every test gets its own limit, counted from the previous reply; the run's deadline caps it.
+            reply = _receive(reply_read, min(time.monotonic() + step_timeout, deadline))
+            if not isinstance(reply, dict):
+                break
+            kind = reply.get("kind")
+            if kind in {"done", "restart"}:
+                ending = str(kind)
+                break
+            replies.append(reply)
+            if kind == "import_failed":
+                ending = "done"
+                break
     except TimeoutError:
-        reply = dict(_TIMED_OUT)
+        ending = "timeout"
     except (_ChannelClosed, OSError, ValueError):
-        reply = None
+        ending = "no_result"
     finally:
         for fd in (request_write, reply_read):
             if fd >= 0:
@@ -1080,7 +1105,7 @@ def _run_test_process(root: Path, request: dict[str, object], timeout: float) ->
             pass
         process.wait()
         _LIVE.discard(process.pid)
-    return reply if isinstance(reply, dict) else None
+    return replies, ending
 
 
 def _case(name: str, verdict: str, detail: str) -> dict[str, str]:
@@ -1101,6 +1126,101 @@ def _probe_ids(probe: dict[str, object]) -> tuple[list[str], dict[str, str]]:
     raw = probe.get("unsupported")
     unsupported = {key: str(value)[:200] for key, value in raw.items() if type(key) is str} if isinstance(raw, dict) else {}
     return names, unsupported
+
+
+def _declared_found(name: str, found: list[str]) -> bool:
+    """A declared id pytest collected: the id itself, or its parametrized instances (`test_x[1]`)."""
+    return any(item == name or item.startswith(name + "[") for item in found)
+
+
+def _under(name: str, owners: dict[str, str]) -> bool:
+    return any(name == owner or name.startswith(owner + ".") for owner in owners)
+
+
+def _grade_module(
+    root: Path,
+    request: dict[str, object],
+    declared: list[str],
+    unsupported: dict[str, str],
+    test_timeout: float,
+    deadline: float,
+    candidate: tuple[dict[str, bytes], list[str], str],
+    tampered,
+) -> list[tuple[str, str, str]] | None:
+    """(test name, verdict, detail) for one test module, or None when grading files were tampered with.
+
+    One test process runs a pytest session over the module and replies per test. If it ends early (a
+    crash, a timeout, or its candidate process died), the test that was running fails and a fresh test
+    process, with a fresh candidate directory, runs the tests that have not reported yet.
+    """
+    order: list[str] | None = None
+    unsupported = dict(unsupported)
+    results: dict[str, tuple[str, str]] = {}
+    module_failure: tuple[str, str] | None = None
+    while True:
+        if tampered():
+            return None
+        if deadline - time.monotonic() <= 0:
+            break
+        replies, ending = _run_in_child(
+            root,
+            {**request, "skip": sorted(results), "exclude": sorted(unsupported)},
+            test_timeout,
+            deadline,
+            candidate,
+        )
+        progressed = False
+        for reply in replies:
+            kind = reply.get("kind")
+            if kind == "import_failed":
+                module_failure = ("FAIL", "import:" + str(reply.get("detail", ""))[:200])
+            elif kind == "collected" and order is None:
+                found, found_unsupported = _probe_ids(reply)
+                unsupported = {**found_unsupported, **unsupported}
+                order = [name for name in found if not _under(name, unsupported)]
+                if reply.get("error"):
+                    module_failure = ("FAIL", "collect:" + str(reply.get("error"))[:200])
+            elif kind == "result" and order is not None:
+                name = reply.get("name")
+                verdict = reply.get("verdict")
+                if type(name) is str and name in order and name not in results and verdict in {"PASS", "FAIL"}:
+                    results[name] = (str(verdict), "" if verdict == "PASS" else str(reply.get("detail", ""))[:200] or "no_result")
+                    progressed = True
+        if order is None:
+            # The module never got as far as its tests.
+            if module_failure is None:
+                module_failure = ("FAIL", "import:" + ("timeout" if ending == "timeout" else "no_result"))
+            break
+        if module_failure is not None and module_failure[1].startswith("import:"):
+            break
+        pending = [name for name in order if name not in results]
+        if ending == "done" or not pending:
+            for name in pending:
+                # The session finished without reporting it.
+                results[name] = ("FAIL", "no_result")
+            break
+        if ending == "restart" and progressed:
+            continue
+        # The test that was running when the process ended is the first that has not reported.
+        results[pending[0]] = ("FAIL", "timeout" if ending == "timeout" else "no_result")
+    graded: list[tuple[str, str, str]] = []
+    if module_failure is not None:
+        graded.append(("", *module_failure))
+        if order is None or module_failure[1].startswith("import:"):
+            # The module itself failed: its tests never ran, and are not listed one by one.
+            return graded
+    for name in sorted(unsupported):
+        graded.append((name, "FAIL", unsupported[name]))
+    found = order or []
+    for name in sorted(set(declared) - set(found)):
+        if _under(name, unsupported) or _declared_found(name, found):
+            continue
+        # A test the baseline source declares that pytest did not collect: gone, or no longer a test.
+        graded.append((name, "FAIL", "not_a_test"))
+    for name in sorted(found):
+        verdict, detail = results.get(name, ("FAIL", "timeout"))
+        graded.append((name, verdict, detail))
+    return graded
 
 
 def run_suite(root: Path) -> dict[str, Any]:
@@ -1156,55 +1276,16 @@ def run_suite(root: Path) -> dict[str, Any]:
             "call_timeout": call_timeout,
             "declared": None if baseline_modules is None else sorted(baseline_modules),
         }
-        # Importing the module once on its own: an import failure fails the module, and tests the module
-        # defines without a top-level def (a loop, an assignment, an imported test class) are run as well.
-        probe = _run_in_child(root, {**request, "test": None}, remaining(), candidate)
-        if probe is None or probe.get("kind") not in {"import_failed", "collected", "result"}:
-            failed += 1
-            cases.append(_case(label, "FAIL", "import:no_result"))
-            continue
-        if probe["kind"] == "result":
-            failed += 1
-            cases.append(_case(label, "FAIL", "import:" + str(probe.get("detail", ""))[:200]))
-            continue
-        if probe["kind"] == "import_failed":
-            failed += 1
-            cases.append(_case(label, "FAIL", "import:" + str(probe.get("detail", ""))[:200]))
-            continue
-        found, found_unsupported = _probe_ids(probe)
-        unsupported = {**found_unsupported, **unsupported}
-        # Classes that cannot be run are failures, counted, never dropped.
-        for name in sorted(unsupported):
-            failed += 1
-            cases.append(_case(label + "." + name, "FAIL", unsupported[name]))
-        for name in sorted((set(declared) | set(found)) - set(unsupported)):
-            if _tampered(root, baseline):
-                tampered = True
-                break
-            budget = remaining()
-            if budget <= 0:
-                failed += 1
-                cases.append(_case(label + "." + name, "FAIL", "timeout"))
-                continue
-            reply = _run_in_child(root, {**request, "test": name, "required": name in declared}, budget, candidate)
-            verdict = reply.get("verdict") if reply is not None and reply.get("kind") == "result" else None
-            detail = str(reply.get("detail", ""))[:200] if reply is not None else ""
-            if verdict == "SKIP":
-                continue
+        outcome = _grade_module(root, request, declared, unsupported, test_timeout, deadline, candidate, lambda: _tampered(root, baseline))
+        if outcome is None:
+            tampered = True
+            break
+        for name, verdict, detail in outcome:
             if verdict == "PASS":
                 passed += 1
-                cases.append(_case(label + "." + name, "PASS", ""))
-                continue
-            failed += 1
-            if reply is None:
-                detail = "no_result"
-            elif reply.get("kind") == "import_failed":
-                detail = "import:" + detail
-            elif verdict != "FAIL":
-                detail = "no_result"
-            cases.append(_case(label + "." + name, "FAIL", detail))
-        if tampered:
-            break
+            else:
+                failed += 1
+            cases.append(_case(label + ("." + name if name else ""), verdict, detail))
     if tampered or _tampered(root, baseline):
         failed += 1
         cases.append(_case("suite", "FAIL", "grading_tampered"))
@@ -1225,16 +1306,8 @@ def run_suite(root: Path) -> dict[str, Any]:
 # modules are proxies into a separate candidate process, so no candidate code runs here.
 
 
-def _trusted_test(value: object) -> bool:
-    return callable(value) and not isinstance(value, (_Remote, _RemoteModule))
-
-
 def _trusted_class(value: object) -> bool:
     return isinstance(value, type) and not issubclass(value, (_Remote, _RemoteModule))
-
-
-def _result(verdict: str, detail: str = "") -> dict[str, object]:
-    return {"kind": "result", "verdict": verdict, "detail": detail}
 
 
 def _failure_detail(exc: BaseException) -> str:
@@ -1252,187 +1325,206 @@ def _failure_detail(exc: BaseException) -> str:
     return type(exc).__name__
 
 
-def _call_test(fn: object) -> dict[str, object]:
-    try:
-        value = fn()  # type: ignore[operator]
-    except BaseException as exc:  # noqa: BLE001 - any failure, even SystemExit, is a FAIL verdict
-        return _result("FAIL", _failure_detail(exc))
-    if inspect.iscoroutine(value):
-        value.close()
-        return _result("FAIL", "async")
-    # Calling a generator function runs none of its body, so it must not count as a pass.
-    if inspect.isasyncgen(value):
-        return _result("FAIL", "unsupported_async_generator")
-    if inspect.isgenerator(value):
-        value.close()
-        return _result("FAIL", "unsupported_generator")
-    return _result("PASS")
+def _init_classes(module: types.ModuleType) -> dict[str, str]:
+    """Test classes this module defines that pytest refuses to collect (an `__init__`): counted failures.
 
-
-class _CaseResult(unittest.TestResult):
-    """Keeps the type of the first failure; skips and expected failures are never a pass."""
-
-    def __init__(self) -> None:
-        super().__init__()
-        self.detail = ""
-
-    def _note(self, err) -> None:
-        if not self.detail:
-            self.detail = _failure_detail(err[1]) if err[1] is not None else err[0].__name__
-
-    def addError(self, test, err) -> None:  # noqa: N802 - unittest API
-        super().addError(test, err)
-        self._note(err)
-
-    def addFailure(self, test, err) -> None:  # noqa: N802 - unittest API
-        super().addFailure(test, err)
-        self._note(err)
-
-    def addSubTest(self, test, subtest, err) -> None:  # noqa: N802 - unittest API
-        super().addSubTest(test, subtest, err)
-        if err is not None:
-            self._note(err)
-
-
-def _takes_argument(hook: object) -> bool:
-    try:
-        return bool(inspect.signature(hook).parameters)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return False
-
-
-def _call_hook(hook: object, argument: object) -> None:
-    hook(argument) if _takes_argument(hook) else hook()  # type: ignore[operator]
-
-
-def _with_xunit(module: types.ModuleType, setup: str, teardown: str, argument: object, run) -> dict[str, object]:
-    """pytest-style setup_<x>/teardown_<x> around `run`. A failing setup fails the test (and its
-    teardown does not run, as with pytest); a failing teardown fails a test that had passed."""
-    hook = vars(module).get(setup)
-    if hook is not None and _trusted_test(hook):
-        try:
-            _call_hook(hook, argument)
-        except BaseException as exc:  # noqa: BLE001 - a failing fixture fails the test
-            return _result("FAIL", _failure_detail(exc))
-    outcome = run()
-    closer = vars(module).get(teardown)
-    if closer is not None and _trusted_test(closer):
-        try:
-            _call_hook(closer, argument)
-        except BaseException as exc:  # noqa: BLE001 - a failing teardown fails the test
-            if outcome["verdict"] == "PASS":
-                outcome = _result("FAIL", _failure_detail(exc))
-    return outcome
-
-
-def _run_case_method(cls: type, method: str) -> dict[str, object]:
-    fn = getattr(cls, method, None)
-    if not issubclass(cls, unittest.IsolatedAsyncioTestCase):
-        if inspect.iscoroutinefunction(fn):
-            return _result("FAIL", "async")
-        if inspect.isasyncgenfunction(fn):
-            return _result("FAIL", "unsupported_async_generator")
-    if inspect.isgeneratorfunction(fn):
-        return _result("FAIL", "unsupported_generator")
-    try:
-        case = cls(method)
-    except BaseException as exc:  # noqa: BLE001 - a case that cannot be built fails
-        return _result("FAIL", _failure_detail(exc))
-    outcome = _CaseResult()
-    # Through a suite, so setUpModule/setUpClass and tearDownClass/tearDownModule run as with unittest;
-    # case.run() alone would skip them. The suite finds module fixtures through sys.modules.
-    unittest.TestSuite([case]).run(outcome)
-    if outcome.detail:
-        return _result("FAIL", outcome.detail)
-    if outcome.skipped:
-        return _result("FAIL", "skipped")
-    if outcome.expectedFailures:
-        return _result("FAIL", "expected_failure")
-    if outcome.unexpectedSuccesses:
-        return _result("FAIL", "unexpected_success")
-    if outcome.testsRun != 1 or not outcome.wasSuccessful():
-        return _result("FAIL", "no_result")
-    return _result("PASS")
-
-
-def _run_class_method(cls: type, method: str) -> dict[str, object]:
-    """A pytest-style Test* class: a fresh instance; setup_class/setup_method and their teardowns run.
-
-    As with pytest, each teardown runs whether or not its setup is defined; only a failing setup
-    stops them (the setup error is the verdict and nothing else runs)."""
-    if "__init__" in {name for klass in cls.__mro__[:-1] for name in vars(klass)}:
-        return _result("FAIL", "unsupported_test_class:init")
-    fn = getattr(cls, method, None)
-    if not _trusted_test(fn):
-        return _result("FAIL", "not_a_test")
-    try:
-        instance = cls()
-        bound = getattr(instance, method)
-        for name, args in (("setup_class", ()), ("setup_method", (bound,))):
-            hook = getattr(cls if name == "setup_class" else instance, name, None)
-            if callable(hook):
-                hook(*args)
-    except BaseException as exc:  # noqa: BLE001 - a failing fixture fails the test
-        return _result("FAIL", _failure_detail(exc))
-    outcome = _call_test(bound)
-    for name in ("teardown_method", "teardown_class"):
-        hook = getattr(cls if name == "teardown_class" else instance, name, None)
-        if not callable(hook):
-            continue
-        try:
-            hook(bound) if name == "teardown_method" else hook()
-        except BaseException as exc:  # noqa: BLE001 - a failing teardown fails the test
-            if outcome["verdict"] == "PASS":
-                outcome = _result("FAIL", _failure_detail(exc))
-    return outcome
-
-
-def _collect(module: types.ModuleType) -> dict[str, object]:
-    """Tests the imported module exposes: functions, and methods of test classes (own or imported)."""
-    names: set[str] = set()
-    unsupported: dict[str, str] = {}
+    One the module merely imports (e.g. a test client) is not a test."""
+    found: dict[str, str] = {}
     for attr, value in vars(module).items():
-        if attr.startswith("test_") and _trusted_test(value) and not isinstance(value, type):
-            names.add(attr)
+        if not attr.startswith("Test") or not _trusted_class(value) or issubclass(value, unittest.TestCase):
             continue
-        if not _trusted_class(value) or getattr(value, "__test__", True) is False:
+        if getattr(value, "__test__", True) is False or getattr(value, "__module__", None) != module.__name__:
             continue
-        own = getattr(value, "__module__", None) == module.__name__
-        if issubclass(value, unittest.TestCase):
-            names.update(f"{attr}.{method}" for method in unittest.TestLoader().getTestCaseNames(value))
-        elif attr.startswith("Test"):
-            if "__init__" in {name for klass in value.__mro__[:-1] for name in vars(klass)}:
-                # A class this module defines must run; one it merely imports (e.g. a test client) is not a test.
-                if own:
-                    unsupported[attr] = "unsupported_test_class:init"
-                continue
-            names.update(f"{attr}.{method}" for method in dir(value) if method.startswith("test") and callable(getattr(value, method, None)))
-    return {"kind": "collected", "names": sorted(names), "unsupported": unsupported}
+        if "__init__" in {name for klass in value.__mro__[:-1] for name in vars(klass)}:
+            found[attr] = "unsupported_test_class:init"
+    return found
 
 
-def _run_test(module: types.ModuleType, name: str, required: bool) -> dict[str, object]:
-    owner, _, method = name.rpartition(".")
-    if owner:
-        cls = vars(module).get(owner)
-        if not _trusted_class(cls):
-            return _result("FAIL", "not_a_test")
-        if issubclass(cls, unittest.TestCase):
-            return _run_case_method(cls, method)
-        return _with_xunit(module, "setup_module", "teardown_module", module, lambda: _run_class_method(cls, method))
-    fn = vars(module).get(name)
-    if not _trusted_test(fn) or isinstance(fn, type):
-        # A declared test that is gone or became a candidate object fails; a non-test name is skipped.
-        return _result("FAIL" if required else "SKIP", "not_a_test")
-    return _with_xunit(
-        module,
-        "setup_module",
-        "teardown_module",
-        module,
-        lambda: _with_xunit(module, "setup_function", "teardown_function", fn, lambda: _call_test(fn)),
-    )
+def _kind_detail(item: object) -> str:
+    """FAIL detail for a test pytest would not really run: async functions and generators."""
+    cls = getattr(item, "cls", None)
+    name = getattr(item, "originalname", None) or getattr(item, "name", "")
+    if isinstance(cls, type) and issubclass(cls, unittest.TestCase):
+        fn = getattr(cls, name, None)
+        if issubclass(cls, unittest.IsolatedAsyncioTestCase):
+            return "unsupported_generator" if inspect.isgeneratorfunction(fn) else ""
+    else:
+        fn = getattr(item, "obj", None)
+    if inspect.iscoroutinefunction(fn):
+        return "async"
+    if inspect.isasyncgenfunction(fn):
+        return "unsupported_async_generator"
+    if inspect.isgeneratorfunction(fn):
+        return "unsupported_generator"
+    return ""
 
 
-def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
+def _item_name(item: object) -> str:
+    """`test_x`, `TestClass.test_m` or `Case.test_m[param]`: the pytest node id without its file."""
+    return ".".join(str(getattr(item, "nodeid", "")).split("::")[1:])
+
+
+def _pytest_detail(exc: BaseException) -> str:
+    message = str(exc)
+    kind = type(exc).__name__
+    if kind == "Failed" and message.startswith("Unexpected success"):
+        return "unexpected_success"
+    if kind == "Failed" and "async def functions are not natively supported" in message:
+        return "async"
+    return _failure_detail(exc)
+
+
+def _pytest_arguments(root: Path, target: Path) -> list[str]:
+    """pytest reads nothing from the workspace: no config file (-c /dev/null), no conftest, no cache;
+    plugins only from this list (autoload is off); the module object comes from the snapshot."""
+    return [
+        "-q",
+        "-s",
+        "--no-header",
+        "--tb=native",
+        "--assert=plain",
+        "--noconftest",
+        "-c",
+        os.devnull,
+        "--rootdir",
+        str(root),
+        "-p",
+        "no:cacheprovider",
+        str(target),
+    ]
+
+
+def _run_pytest(root: Path, relative: str, module: types.ModuleType, request: dict[str, Any], emit) -> str:
+    """Run one test module's tests with pytest in this test process; "done" or "restart".
+
+    Replies go through `emit`: the collected test names, then one result per test as it finishes.
+    "restart" means the candidate process died during a test: the grader resumes the remaining tests
+    in a fresh test process (and candidate directory), so one crash fails only the test it happened in.
+    """
+    for key in [key for key in os.environ if key.upper().startswith("PYTEST_")]:
+        del os.environ[key]  # PYTEST_ADDOPTS, PYTEST_PLUGINS, ...
+    os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] = "1"
+    import pytest  # the sandbox interpreter's own: `pytest` is a shadow root, never a workspace module
+
+    target = root / relative
+    skip = set(request.get("skip") or ())
+    exclude = {str(name): "" for name in request.get("exclude") or ()}
+
+    class _SnapshotModule(pytest.Module):
+        """The test module already imported from the snapshot; pytest never imports the file."""
+
+        def _getobj(self):
+            return module
+
+    class _InertModule(pytest.Module):
+        """Any other file pytest sees while walking to the target: never imported, holds nothing."""
+
+        def _getobj(self):
+            return types.ModuleType("aether_inert")
+
+        def collect(self):
+            return []
+
+    class _Bridge:
+        def __init__(self) -> None:
+            self.ending = "done"
+            self.session: Any = None
+            self.items: dict[str, object] = {}
+            self.outcomes: dict[str, tuple[str, str]] = {}
+            self.collect_error = ""
+
+        def pytest_sessionstart(self, session) -> None:
+            self.session = session
+
+        @pytest.hookimpl(tryfirst=True)
+        def pytest_collect_directory(self, path, parent):
+            # A plain directory, never a Package: pytest would import the package's __init__.py
+            # (which may be candidate code) in this process.
+            return pytest.Dir.from_parent(parent, path=path)
+
+        @pytest.hookimpl(tryfirst=True)
+        def pytest_pycollect_makemodule(self, module_path, parent):
+            if Path(module_path) == target:
+                return _SnapshotModule.from_parent(parent, path=module_path)
+            return _InertModule.from_parent(parent, path=module_path)
+
+        @pytest.hookimpl(tryfirst=True)
+        def pytest_pycollect_makeitem(self, collector, name, obj):
+            # A candidate object is never a test, and is not probed (that would run candidate code).
+            if isinstance(obj, (_Remote, _RemoteModule)):
+                return []
+            if (inspect.isgeneratorfunction(obj) or inspect.isasyncgenfunction(obj)) and collector.funcnamefilter(name):
+                # pytest makes a generator test a collection error, which stops the whole module; it is
+                # an item here, failed as unsupported_(async_)generator (calling it runs none of its body).
+                return [pytest.Function.from_parent(collector, name=name)]
+            return None
+
+        def pytest_collectreport(self, report) -> None:
+            if report.failed and not self.collect_error:
+                self.collect_error = str(report.longrepr).strip().splitlines()[-1][:200] if report.longrepr else "collect_error"
+
+        @pytest.hookimpl(trylast=True)
+        def pytest_collection_modifyitems(self, session, config, items) -> None:
+            names = [_item_name(item) for item in items]
+            emit({"kind": "collected", "names": names, "unsupported": _init_classes(module), "error": self.collect_error})
+            keep, dropped = [], []
+            for item, name in zip(items, names, strict=True):
+                if name in skip or _under(name, exclude):
+                    dropped.append(item)
+                else:
+                    keep.append(item)
+                    self.items[item.nodeid] = item
+            if dropped:
+                config.hook.pytest_deselected(items=dropped)
+                items[:] = keep
+
+        def pytest_runtest_logstart(self, nodeid, location) -> None:
+            _Current.unsupported = None
+
+        @pytest.hookimpl(wrapper=True)
+        def pytest_runtest_makereport(self, item, call):
+            report = yield
+            if call.excinfo is not None and report.failed:
+                report._aether_detail = _pytest_detail(call.excinfo.value)
+            return report
+
+        def pytest_runtest_logreport(self, report) -> None:
+            if report.nodeid in self.outcomes and self.outcomes[report.nodeid][0] == "FAIL":
+                return  # the first failure of a test is its verdict
+            if report.failed:
+                detail = getattr(report, "_aether_detail", "")
+                if not detail and "XPASS" in str(report.longrepr):
+                    detail = "unexpected_success"
+                self.outcomes[report.nodeid] = ("FAIL", detail or "failed")
+            elif report.skipped:
+                self.outcomes[report.nodeid] = ("FAIL", "expected_failure" if hasattr(report, "wasxfail") else "skipped")
+            elif report.passed and hasattr(report, "wasxfail"):
+                self.outcomes[report.nodeid] = ("FAIL", "unexpected_success")
+            elif report.passed and report.when == "call":
+                self.outcomes.setdefault(report.nodeid, ("PASS", ""))
+
+        def pytest_runtest_logfinish(self, nodeid, location) -> None:
+            item = self.items.get(nodeid)
+            verdict, detail = self.outcomes.pop(nodeid, ("FAIL", "no_result"))
+            kind = _kind_detail(item) if item is not None else ""
+            if kind:
+                verdict, detail = "FAIL", kind
+            elif _Current.unsupported is not None:
+                # Any unsupported use of a candidate object fails the test, even if the test caught it.
+                verdict, detail = "FAIL", "candidate_object_unsupported:" + _Current.unsupported
+            emit({"kind": "result", "name": _item_name(item) if item is not None else "", "verdict": verdict, "detail": detail})
+            current = _Current.session
+            if current is not None and current._dead is not None and self.session is not None:
+                # Its candidate process is gone: the rest of the module runs against a fresh one.
+                self.ending = "restart"
+                self.session.shouldstop = "aether: candidate process ended"
+
+    bridge = _Bridge()
+    pytest.main(_pytest_arguments(root, target), plugins=[bridge])
+    return bridge.ending
+
+
+def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
     relative, import_name, label = request["relative"], request["import_name"], request["label"]
@@ -1454,15 +1546,9 @@ def _runner_step(root: Path, request: dict[str, Any]) -> dict[str, object]:
                 sys.modules[label] = module
                 module.__spec__.loader.exec_module(module)
         except BaseException as exc:  # noqa: BLE001 - any failure to import is a FAIL verdict
-            return {"kind": "import_failed", "detail": _failure_detail(exc)}
-        name = request["test"]
-        if name is None:
-            return _collect(module)
-        outcome = _run_test(module, name, bool(request.get("required")))
-        if outcome["verdict"] != "SKIP" and _Current.unsupported is not None:
-            # Any unsupported use of a candidate object fails the test, even if the test caught the error.
-            return _result("FAIL", "candidate_object_unsupported:" + _Current.unsupported)
-        return outcome
+            emit({"kind": "import_failed", "detail": _failure_detail(exc)})
+            return "done"
+        return _run_pytest(root, relative, module, request, emit)
     finally:
         _Current.session.close()
         _Current.session = None
@@ -1476,11 +1562,15 @@ def _runner_main(read_fd: int, write_fd: int, parent: int) -> None:
     os.close(read_fd)
     if not isinstance(request, dict):
         os._exit(1)
+
+    def emit(message: dict[str, object]) -> None:
+        _send(write_fd, message)
+
     try:
-        reply = _runner_step(Path.cwd(), request)
+        ending = _runner_step(Path.cwd(), request, emit)
     except BaseException:  # noqa: BLE001 - no reply is a FAIL in the grader
         os._exit(1)
-    _send(write_fd, reply)
+    _send(write_fd, {"kind": ending})
     os.close(write_fd)
 
 

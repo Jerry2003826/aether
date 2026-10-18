@@ -53,9 +53,9 @@ CACHE_DIRS = frozenset(
     }
 )
 TEST_DIRS = frozenset({"tests", "test"})
-# Grading runs the stdlib coding_protocol on test_*.py / *_test.py anywhere in the tree and never
-# pytest (pytest is not installed in the sandbox image), so no pytest config is read at grading time. Every config is still restored
-# from the baseline or deleted, so a pytest-based grader could not be redirected by an added one.
+# Grading (coding_protocol) runs pytest on test_*.py / *_test.py anywhere in the tree with an empty
+# config (-c /dev/null), --noconftest and plugin autoload off, so no workspace pytest config or conftest
+# is read at grading time. Every config is still restored from the baseline or deleted as well.
 SUPPORT_FILES = frozenset(
     {
         "oracle.py",
@@ -71,8 +71,8 @@ SUPPORT_FILES = frozenset(
 )
 STARTUP_HOOKS = frozenset({"sitecustomize.py", "usercustomize.py"})
 IGNORED_DIRS = frozenset({".git"})
-# Mirrors aether_worker.verification._SHADOW_ROOTS (F14), as import names. Kept even where the
-# package is not installed (pytest is not in the sandbox image) so a later grader is covered.
+# Mirrors aether_worker.verification._SHADOW_ROOTS (F14), as import names. pytest is installed in the
+# sandbox image (the grader runs it); kept here even where it is not installed.
 SHADOW_ROOTS = frozenset({"pytest", "_pytest", "pluggy", "sitecustomize", "usercustomize"})
 _EXTENSION_SUFFIXES = (".py", ".pyc", ".so", ".pyd")
 
@@ -165,7 +165,7 @@ def grading_paths(root: Path, editable: Collection[str] | None = None) -> set[st
 
 # ---------------------------------------------------------------------------------------------
 # What the grading protocol collects, and how long it may take. Shared by coding_protocol.py (which
-# runs every collected test in its own process) and the sandbox entry (which bounds the protocol).
+# runs each test module in its own process) and the sandbox entry (which bounds the protocol).
 
 # Never walked: VCS data, caches, virtualenvs and vendored dependency trees.
 WALK_SKIP_DIRS = frozenset(
@@ -187,10 +187,11 @@ WALK_SKIP_DIRS = frozenset(
 # Skipped only when they really are virtualenvs (pyvenv.cfg); otherwise they may be candidate packages.
 VENV_DIRS = frozenset({".venv", "venv", "env"})
 
-# Seconds. One call into candidate code < one test process < the whole protocol, which is
-# PROTOCOL_BASE_SECONDS + PROTOCOL_STEP_SECONDS per step (a step is one test, or one module import),
-# capped at PROTOCOL_CAP_SECONDS. A fresh test process costs about 0.1 s, so the step allowance covers
-# isolation overhead with room for real work; a suite that hangs stops at the cap, never later.
+# Seconds. One call into candidate code < one test (the time a test process has for each test's reply)
+# < the whole protocol, which is PROTOCOL_BASE_SECONDS + PROTOCOL_STEP_SECONDS per step (a step is one
+# declared test, or one test module), capped at PROTOCOL_CAP_SECONDS. The protocol starts one test
+# process per module (a pytest session, about 0.2 s) plus one per resume after a crash or timeout, so the
+# step allowance covers isolation overhead with room for real work; a hung suite stops at the cap.
 PROTOCOL_CALL_TIMEOUT_SECONDS = 15
 PROTOCOL_TEST_TIMEOUT_SECONDS = 20
 PROTOCOL_BASE_SECONDS = 30
@@ -252,7 +253,7 @@ def declared_tests(source: bytes) -> tuple[list[str], dict[str, str]] | None:
     """Tests a test module declares, read from its baseline source (None when it does not parse).
 
     Returns (test ids, {id: FAIL detail} for test classes that cannot be run). An id is a top-level
-    `test_*` function (or one imported by name), or `Class.method` for each `test*` method, own or
+    `test*` function (or one imported by name), or `Class.method` for each `test*` method, own or
     inherited from a class in the same module, of a `Test*` class or a unittest.TestCase subclass.
     A `Test*` class with its own __init__, and a test class nested in a test class, cannot be run and
     are listed as failures, never dropped. Fixed before any code runs, so nothing can hide a test.
@@ -265,10 +266,11 @@ def declared_tests(source: bytes) -> tuple[list[str], dict[str, str]] | None:
     ids: set[str] = set()
     unsupported: dict[str, str] = {}
     for node in tree.body:
-        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+        # pytest's python_functions is `test`: testFailure is a test like test_ok.
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test"):
             ids.add(node.name)
         elif isinstance(node, ast.ImportFrom):
-            ids.update(name for name in (alias.asname or alias.name for alias in node.names) if name.startswith("test_"))
+            ids.update(name for name in (alias.asname or alias.name for alias in node.names) if name.startswith("test"))
         elif isinstance(node, ast.ClassDef):
             case = _is_case_class(node, classes)
             if not (case or node.name.startswith("Test")) or _opted_out(node):
@@ -288,8 +290,8 @@ def declared_tests(source: bytes) -> tuple[list[str], dict[str, str]] | None:
 
 
 def grading_steps(root: Path) -> int:
-    """Processes the protocol will start for the test modules under root: one import per module and one
-    per declared test. Used to size the protocol's time limit before it runs."""
+    """Steps for the test modules under root: one per module and one per declared test. Used to size the
+    protocol's time limit before it runs."""
     steps = 0
     pending = [root]
     while pending:

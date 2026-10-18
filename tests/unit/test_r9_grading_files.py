@@ -102,16 +102,62 @@ def test_hidden_pytest_configs_are_grading_files() -> None:
         assert is_grading_path(name), name
 
 
-def test_grading_protocol_never_reads_pytest_configuration() -> None:
-    """Grading runs the stdlib protocol on test_*.py / *_test.py, so no pytest config (baseline or added) applies."""
-    import ast
+_FORCE_PASS = (
+    "import pytest\n\n"
+    "@pytest.hookimpl(wrapper=True)\n"
+    "def pytest_runtest_makereport(item, call):\n"
+    "    report = yield\n"
+    "    report.outcome = 'passed'\n"
+    "    return report\n\n"
+    "def pytest_collection_modifyitems(items):\n"
+    "    items[:] = [item for item in items if 'fail' not in item.name]\n"
+)
 
-    source = Path("services/worker/aether_worker/coding_protocol.py").read_text(encoding="utf-8")
-    tree = ast.parse(source)
-    imported = {alias.name.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.Import) for alias in node.names}
-    imported |= {node.module.split(".")[0] for node in ast.walk(tree) if isinstance(node, ast.ImportFrom) and node.module}
-    assert not imported & {"pytest", "_pytest", "pluggy", "tomllib", "configparser"}
-    assert "pytest.ini" not in source and "pyproject" not in source
+
+def test_grading_never_reads_candidate_pytest_configuration_or_plugins(tmp_path: Path) -> None:
+    """Grading runs pytest (ADR-F44), but nothing in the workspace or the environment configures it:
+    no config file, conftest, plugin or PYTEST_* variable can hide a failing test or make it pass."""
+    import json
+    import os
+    import subprocess
+    import sys
+
+    files = {
+        "app.py": "def value():\n    return 1\n",
+        "test_mod.py": "import app\n\ndef test_ok():\n    assert app.value() == 1\n\ndef test_fail():\n    assert app.value() == 2\n",
+        "pytest.ini": "[pytest]\npython_functions = nothing\naddopts = --deselect test_mod.py::test_fail -p forcepass\n",
+        "pyproject.toml": '[tool.pytest.ini_options]\npython_files = ["nothing.py"]\naddopts = "-k test_ok"\n',
+        "setup.cfg": "[tool:pytest]\naddopts = -k test_ok\n",
+        "tox.ini": "[pytest]\naddopts = -k test_ok\n",
+        "conftest.py": _FORCE_PASS,
+        "sub/conftest.py": _FORCE_PASS,
+        "forcepass.py": _FORCE_PASS,
+    }
+    for name, text in files.items():
+        (tmp_path / name).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / name).write_text(text, encoding="utf-8")
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("AETHER_", "PYTEST_"))}
+    env.update(
+        {
+            "AETHER_PROTOCOL_SHM_DIR": "/dev/shm",
+            "PYTEST_ADDOPTS": "--deselect test_mod.py::test_fail -p forcepass -k test_ok",
+            "PYTEST_PLUGINS": "forcepass",
+            "PYTHONPATH": str(tmp_path),
+        }
+    )
+    completed = subprocess.run(
+        [sys.executable, "-I", str(Path("services/worker/aether_worker/coding_protocol.py").resolve())],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+        check=False,
+    )
+    body = json.loads(completed.stdout.strip().splitlines()[-1])
+    verdicts = {case["name"]: (case["verdict"], case["detail"]) for case in body["cases"]}
+    assert verdicts == {"test_mod.test_ok": ("PASS", ""), "test_mod.test_fail": ("FAIL", "AssertionError")}, completed.stdout + completed.stderr
+    assert completed.returncode == 1
 
 
 def test_new_top_level_modules_that_shadow_imports_are_detected() -> None:
