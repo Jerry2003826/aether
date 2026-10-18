@@ -45,6 +45,8 @@ import importlib.machinery
 import importlib.util
 import inspect
 import json
+import math
+import operator
 import os
 import select
 import shutil
@@ -318,6 +320,11 @@ class _Session:
         self._from: int | None = None
         self._dead: str | None = None
         self._modules: dict[str, int] = {}
+        # Shared builtin containers (see _MIRRORED): id -> the test's own object. The test allocates
+        # positive ids, the candidate negative ones; both sides keep the last state exchanged.
+        self._mirrors: dict[int, object] = {}
+        self._mirror_ids: dict[int, int] = {}
+        self._synced: dict[int, str] = {}
 
     def _start(self) -> None:
         if self._sandbox is None:
@@ -378,6 +385,8 @@ class _Session:
         if self._process is None:
             self._start()
         assert self._to is not None and self._from is not None
+        if message.get("op") != "init":
+            message = {**message, "sync": self._outgoing()}
         try:
             _send(self._to, message)
             reply = _receive(self._from, time.monotonic() + self._timeout)
@@ -389,9 +398,61 @@ class _Session:
             self._dead = "candidate_protocol"
             self.close()
             raise CandidateError(self._dead)
+        # The candidate's changes to shared containers land before its result or its exception.
+        self._incoming(reply.get("sync", []))
         if "err" in reply:
             raise _exception(reply["err"])
         return _decode(reply.get("ok"), self)
+
+    def mirror(self, value: object) -> int:
+        """The shared id of a builtin container the test hands to candidate code."""
+        key = id(value)
+        if key not in self._mirror_ids:
+            handle = len(self._mirror_ids) + 1
+            self._mirror_ids[key] = handle
+            self._mirrors[handle] = value
+        return self._mirror_ids[key]
+
+    def _outgoing(self) -> list[object]:
+        """Every shared container whose state changed since it last crossed: the test's changes are
+        in the candidate before any candidate code runs. Encoding may share new nested containers."""
+        sync: list[object] = []
+        done: set[int] = set()
+        while len(done) < len(self._mirrors):
+            for handle in [key for key in self._mirrors if key not in done]:
+                done.add(handle)
+                state = _encode_data(self._mirrors[handle], 0, _encode_shared_item)
+                text = json.dumps(state)
+                if self._synced.get(handle) != text:
+                    self._synced[handle] = text
+                    sync.append([handle, state])
+        return sync
+
+    def _incoming(self, sync: object) -> None:
+        """Apply the candidate's container states to the test's own objects, in place."""
+        if not isinstance(sync, list):
+            raise CandidateError("candidate_protocol")
+        states: list[tuple[object, list[object]]] = []
+        for entry in sync:
+            if not (isinstance(entry, list) and len(entry) == 2 and type(entry[0]) is int and isinstance(entry[1], list)):
+                raise CandidateError("candidate_protocol")
+            handle, state = entry
+            kind = _MIRROR_KINDS.get(state[0] if state else None)
+            if kind is None:
+                raise CandidateError("candidate_protocol")
+            existing = self._mirrors.get(handle)
+            if existing is None:
+                if handle >= 0:
+                    raise CandidateError("candidate_protocol")
+                existing = kind()
+                self._mirrors[handle] = existing
+                self._mirror_ids[id(existing)] = handle
+            elif type(existing) is not kind:
+                raise CandidateError("candidate_protocol")
+            self._synced[handle] = json.dumps(state)
+            states.append((existing, state))
+        for target, state in states:
+            _fill(target, _decode(state, self))
 
     def call(self, op: str, **fields: object) -> object:
         return self._request({"op": op, **fields})
@@ -491,6 +552,8 @@ def _decode(node: object, session: _Session, depth: int = 0) -> object:
         return result
     if tag == "h" and len(rest) == 2 and type(rest[0]) is int and type(rest[1]) is str:
         return _Remote(session, rest[0], rest[1][:200])
+    if tag == "m" and type(value) is int and value in session._mirrors:
+        return session._mirrors[value]
     raise CandidateError("candidate_protocol")
 
 
@@ -504,7 +567,38 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
         return ["h", value._aether_id, ""]
     if isinstance(value, _RemoteModule):
         return ["h", _session().module_handle(value.__name__), ""]
+    if type(value) in _MIRRORED:
+        return ["m", _session().mirror(value)]
     return _encode_data(value, depth, lambda item, level: _encode_trusted(item, level))
+
+
+# Builtin containers that cross by reference, as in-process (Codex :512): each side keeps its own
+# object under a shared id and the states are exchanged on every request and reply, so in-place
+# changes, references kept by either side and identity behave as in one process. Candidate code only
+# runs while a request is open, so the test never observes a state in between. Subclasses (defaultdict,
+# OrderedDict, Counter, deque, ...) still cross by value.
+_MIRRORED = (list, dict, set, bytearray)
+_MIRROR_KINDS: dict[object, type] = {"l": list, "d": dict, "S": set, "y": bytearray}
+
+
+def _encode_shared_item(item: object, depth: int) -> list[object]:
+    encoded = _encode_trusted(item, depth)
+    if not encoded:
+        raise _unsupported("callable_passed_to_candidate" if callable(item) else "object_passed_to_candidate")
+    return encoded
+
+
+def _fill(target: object, value: object) -> None:
+    """Make target (a shared container) hold value, keeping target's identity."""
+    if (isinstance(target, list) and isinstance(value, list)) or (
+        isinstance(target, bytearray) and isinstance(value, (bytes, bytearray))
+    ):
+        target[:] = value
+    elif (isinstance(target, dict) and isinstance(value, dict)) or (isinstance(target, set) and isinstance(value, set)):
+        target.clear()
+        target.update(value)
+    else:
+        raise CandidateError("candidate_protocol")
 
 
 def _encode_data(value: object, depth: int, nested) -> list[object]:
@@ -642,6 +736,97 @@ class _Remote:
 
     __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse  # type: ignore[assignment]
     __hash__ = object.__hash__
+
+    def _operate(self, name: str, *operands: object) -> object:
+        return self._aether("operate", name=name, args=[_encode_tree(item) for item in operands])
+
+    def __delitem__(self, key: object) -> None:
+        self._operate("delitem", self, key)
+
+    def __next__(self) -> object:
+        return self._operate("next", self)
+
+    def __reversed__(self):
+        value = self._operate("reversed", self)
+        if type(value) is not list:
+            raise TypeError("candidate reversal did not produce a list")
+        return iter(value)
+
+    def __format__(self, spec: str) -> str:
+        return self._operate("format", self, spec)  # type: ignore[return-value]
+
+    def __round__(self, digits: object = None) -> object:
+        return self._operate("round", self) if digits is None else self._operate("round", self, digits)
+
+    def __enter__(self) -> object:
+        return self._operate("enter", self)
+
+    def __exit__(self, kind: object, error: object, trace: object) -> bool:
+        if kind is not None:
+            # The exception cannot cross into the candidate, whose __exit__ would decide on it.
+            raise _unsupported("exception_into_candidate_context")
+        value = self._operate("exit", self)
+        if value is None or type(value) in (bool, int):
+            return bool(value)
+        raise _unsupported("context_exit_result")
+
+    def _unsupported_protocol(self, *_args: object) -> object:
+        raise _unsupported("protocol_of_candidate_object")
+
+    # No async protocol and no copying or pickling of a candidate object: these fail the test as
+    # unsupported rather than raising a TypeError (or copying the proxy) that a test could accept.
+    __await__ = __aiter__ = __anext__ = __aenter__ = __aexit__ = _unsupported_protocol  # type: ignore[assignment]
+    __copy__ = __deepcopy__ = __reduce__ = __reduce_ex__ = __getstate__ = _unsupported_protocol  # type: ignore[assignment]
+
+
+# Operations a candidate object answers for itself (Codex :627). Anything the proxy does not carry
+# fails the test as unsupported (above), never as Python's own TypeError on the proxy.
+_BINARY = ("add", "sub", "mul", "truediv", "floordiv", "mod", "pow", "matmul", "lshift", "rshift", "and", "or", "xor")
+_OPERATIONS: dict[str, Any] = {
+    **{name: getattr(operator, name + "_" if name in {"and", "or"} else name) for name in _BINARY},
+    **{"i" + name: getattr(operator, "i" + name) for name in _BINARY},
+    "divmod": divmod,
+    "neg": operator.neg,
+    "pos": operator.pos,
+    "abs": operator.abs,
+    "invert": operator.invert,
+    "index": operator.index,
+    "int": int,
+    "float": float,
+    "complex": complex,
+    "bytes": bytes,
+    "round": round,
+    "trunc": math.trunc,
+    "floor": math.floor,
+    "ceil": math.ceil,
+    "fspath": os.fspath,
+    "next": next,
+    "reversed": lambda value: list(reversed(value)),
+    "format": format,
+    "delitem": operator.delitem,
+    "enter": lambda value: type(value).__enter__(value),
+    "exit": lambda value: type(value).__exit__(value, None, None, None),
+}
+
+
+def _forward(name: str, reflected: bool = False):
+    if reflected:
+        return lambda self, other: self._operate(name, other, self)
+    return lambda self, *operands: self._operate(name, self, *operands)
+
+
+# The special methods Python looks up on the type: __add__ / __radd__ / __iadd__ ... for each binary
+# operation, divmod, then the unary operations and conversions under their own names.
+for _name in _BINARY:
+    setattr(_Remote, f"__{_name}__", _forward(_name))
+    setattr(_Remote, f"__r{_name}__", _forward(_name, reflected=True))
+    setattr(_Remote, f"__i{_name}__", _forward("i" + _name))
+for _name in ("divmod",):
+    setattr(_Remote, f"__{_name}__", _forward(_name))
+    setattr(_Remote, f"__r{_name}__", _forward(_name, reflected=True))
+for _name in ("neg", "pos", "abs", "invert", "index", "int", "float", "complex", "bytes", "trunc", "floor", "ceil", "fspath"):
+    setattr(_Remote, f"__{_name}__", _forward(_name))
+del _name
 
 
 class _RemoteModule(types.ModuleType):
@@ -1580,6 +1765,18 @@ def _runner_main(read_fd: int, write_fd: int, parent: int) -> None:
 
 def _candidate_main(read_fd: int, write_fd: int) -> None:
     handles: dict[int, object] = {}
+    # Shared builtin containers (see _MIRRORED): the candidate's own objects under the shared ids.
+    mirrors: dict[int, object] = {}
+    mirror_ids: dict[int, int] = {}
+    synced: dict[int, str] = {}
+
+    def mirror(value: object) -> list[object]:
+        key = id(value)
+        if key not in mirror_ids:
+            shared = -(len(mirror_ids) + 1)
+            mirror_ids[key] = shared
+            mirrors[shared] = value
+        return ["m", mirror_ids[key]]
 
     def keep(value: object) -> list[object]:
         handle = len(handles) + 1
@@ -1591,11 +1788,15 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             raise ValueError("value_too_deep")
         if isinstance(value, types.ModuleType):
             return keep(value)
+        if type(value) in _MIRRORED:
+            return mirror(value)
         return _encode_data(value, depth, encode) or keep(value)
 
     def decode(node: object) -> object:
         if isinstance(node, list) and node and node[0] == "h":
             return handles[node[1]]
+        if isinstance(node, list) and node and node[0] == "m":
+            return mirrors[node[1]]
         if isinstance(node, list) and node and node[0] in {"l", "t", "S", "F"}:
             items = [decode(item) for item in node[1]]
             return {"l": list, "t": tuple, "S": set, "F": frozenset}[node[0]](items)
@@ -1657,7 +1858,43 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             return encode(decode(message["item"]) in target)
         if op == "str":
             return encode(str(target))
+        if op == "operate":
+            # One of a fixed set of operations, run here exactly as Python would run it in-process
+            # (reflected and in-place forms included), so a TypeError is the candidate's own.
+            return encode(_OPERATIONS[message["name"]](*[decode(item) for item in message["args"]]))
         raise ValueError("unknown_op")
+
+    def receive_states(sync: list) -> None:
+        """The test's container states, applied in place before any candidate code runs."""
+        states = []
+        for shared, state in sync:
+            kind = _MIRROR_KINDS[state[0]]
+            existing = mirrors.get(shared)
+            if existing is None:
+                if shared <= 0:
+                    raise ValueError("candidate_protocol")
+                existing = kind()
+                mirrors[shared] = existing
+                mirror_ids[id(existing)] = shared
+            elif type(existing) is not kind:
+                raise ValueError("candidate_protocol")
+            synced[shared] = json.dumps(state)
+            states.append((existing, state))
+        for target, state in states:
+            _fill_candidate(target, decode(state))
+
+    def send_states() -> list[object]:
+        sync: list[object] = []
+        done: set[int] = set()
+        while len(done) < len(mirrors):
+            for shared in [key for key in mirrors if key not in done]:
+                done.add(shared)
+                state = _encode_data(mirrors[shared], 0, encode)
+                text = json.dumps(state)
+                if synced.get(shared) != text:
+                    synced[shared] = text
+                    sync.append([shared, state])
+        return sync
 
     while True:
         try:
@@ -1665,14 +1902,35 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         except _ChannelClosed:
             return
         try:
+            receive_states(message.get("sync", []))
             reply: dict[str, object] = {"ok": handle(message)}  # type: ignore[arg-type]
         except BaseException as exc:  # noqa: BLE001 - every candidate failure is reported, even SystemExit
-            base = next(
-                (kind.__name__ for kind in type(exc).__mro__ if _BUILTIN_ERRORS.get(kind.__name__) is kind),
-                "CandidateError",
-            )
-            reply = {"err": [base, type(exc).__qualname__, str(exc)[:2000]]}
+            reply = {"err": _candidate_error(exc)}
+        try:
+            # Sent with the result and with an exception alike: changes made before a raise are real.
+            reply["sync"] = send_states()
+        except BaseException as exc:  # noqa: BLE001 - a state that cannot be sent fails this request
+            reply = {"err": _candidate_error(exc)}
         _send(write_fd, reply)
+
+
+def _candidate_error(exc: BaseException) -> list[str]:
+    base = next(
+        (kind.__name__ for kind in type(exc).__mro__ if _BUILTIN_ERRORS.get(kind.__name__) is kind),
+        "CandidateError",
+    )
+    return [base, type(exc).__qualname__, str(exc)[:2000]]
+
+
+def _fill_candidate(target: object, value: object) -> None:
+    if isinstance(target, dict):
+        target.clear()
+        target.update(value)  # type: ignore[call-overload]
+    elif isinstance(target, set):
+        target.clear()
+        target.update(value)  # type: ignore[arg-type]
+    else:
+        target[:] = value  # type: ignore[index]
 
 
 class _CandidateFinder(importlib.abc.MetaPathFinder):
