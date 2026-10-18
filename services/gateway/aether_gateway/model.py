@@ -26,7 +26,7 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DataError, IntegrityError
 
 from aether_domain.security import sha256_text
-from aether_storage.budget import apply_reservation_extension, reservation_can_grow
+from aether_storage.budget import add_call_cost, apply_reservation_extension, remove_call_cost, reservation_can_grow
 from aether_storage.db import Database
 
 litellm.suppress_debug_info = True
@@ -983,6 +983,8 @@ class ModelGateway:
                     micro,
                 )
             detail["pending_tokens"] = pending + call_tokens
+            # Each call is priced on its own at the reservation's rate, so it is rounded up once.
+            add_call_cost(detail, "pending", call_tokens)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1097,6 +1099,7 @@ class ModelGateway:
                 detail = dict(detail or {})
                 held = _positive_int(_object_detail(row["usage_detail"]).get("reserved_tokens")) or CODING_CALL_OUTPUT_CAP
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - held)
+                remove_call_cost(detail, "pending", held)
                 conn.execute(
                     text(
                         "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1193,6 +1196,7 @@ class ModelGateway:
                 _logger().info("relay_late_answer_ignored project=%s", _public(project_id, self.provider_key))
                 return
             detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
+            remove_call_cost(detail, "pending", self._coding_call_tokens)
             if counted is None:
                 detail["usage_missing"] = True
                 self._note_unknown_call(detail)
@@ -1200,6 +1204,8 @@ class ModelGateway:
                 incoming, outgoing = counted
                 detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
                 detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
+                # This call's money: its own measured tokens at the reservation's rate, rounded up.
+                add_call_cost(detail, "measured", incoming + outgoing)
                 detail.pop("usage_missing", None)
             conn.execute(
                 text(
@@ -1251,6 +1257,7 @@ class ModelGateway:
                 detail["provider_error"] = exc.provider_error
             if release_pending:
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
+                remove_call_cost(detail, "pending", self._coding_call_tokens)
                 if exc.sent and exc.upstream_status is None:
                     # Sent but no answer (a timeout): the provider may bill it, so its hold is charged at settlement.
                     self._note_unknown_call(detail)
@@ -1301,6 +1308,7 @@ class ModelGateway:
         """
         detail["unknown_usage_calls"] = _count(detail.get("unknown_usage_calls")) + 1
         detail["unknown_reserved_tokens"] = _count(detail.get("unknown_reserved_tokens")) + self._coding_call_tokens
+        add_call_cost(detail, "unknown_reserved", self._coding_call_tokens)
 
     def _write_child_observation(
         self,

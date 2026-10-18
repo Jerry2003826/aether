@@ -60,16 +60,81 @@ def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_i
     )
 
 
-def _unknown_charge(unknown_tokens: int, *, actual: int, reserved_tokens: int, reserved_cost: int) -> tuple[int, int]:
+def _count(value: object) -> int:
+    return value if type(value) is int and value > 0 else 0
+
+
+def coding_call_micro_usd(tokens: int, detail: dict) -> int:
+    """Micro-USD for one coding call of `tokens` tokens, rounded up.
+
+    The rate is the one recorded on the reservation when it was made:
+    call_reserve_micro_usd / call_reserve_tokens. A row without both (written before the rate
+    was recorded) is priced at 1 micro-USD per token, as it always was.
+    """
+    if tokens <= 0:
+        return 0
+    per_tokens = _count(detail.get("call_reserve_tokens"))
+    per_micro = _count(detail.get("call_reserve_micro_usd"))
+    if not per_tokens or not per_micro:
+        return tokens
+    return (tokens * per_micro + per_tokens - 1) // per_tokens
+
+
+# Per-call money is kept next to each token counter on a coding reservation: <kind>_micro_usd is
+# the sum of the calls' rounded-up amounts, <kind>_priced_tokens the tokens those amounts cover.
+COST_KINDS = ("measured", "unknown_reserved", "pending")
+
+
+def add_call_cost(detail: dict, kind: str, tokens: int) -> None:
+    """Price one call of `tokens` on its own and add it to `kind`."""
+    if tokens <= 0:
+        return
+    detail[f"{kind}_micro_usd"] = _count(detail.get(f"{kind}_micro_usd")) + coding_call_micro_usd(tokens, detail)
+    detail[f"{kind}_priced_tokens"] = _count(detail.get(f"{kind}_priced_tokens")) + tokens
+
+
+def remove_call_cost(detail: dict, kind: str, tokens: int) -> None:
+    """Take one call of `tokens` back out of `kind` (a pending call that finished either way)."""
+    if tokens <= 0:
+        return
+    priced = _count(detail.get(f"{kind}_priced_tokens"))
+    if not priced:
+        return
+    detail[f"{kind}_priced_tokens"] = max(0, priced - tokens)
+    detail[f"{kind}_micro_usd"] = max(0, _count(detail.get(f"{kind}_micro_usd")) - coding_call_micro_usd(tokens, detail))
+
+
+def move_call_cost(detail: dict, source: str, target: str) -> None:
+    """Move every call priced under `source` to `target`, keeping each call's own rounding."""
+    detail[f"{target}_micro_usd"] = _count(detail.get(f"{target}_micro_usd")) + _count(detail.get(f"{source}_micro_usd"))
+    detail[f"{target}_priced_tokens"] = _count(detail.get(f"{target}_priced_tokens")) + _count(detail.get(f"{source}_priced_tokens"))
+    detail[f"{source}_micro_usd"] = 0
+    detail[f"{source}_priced_tokens"] = 0
+
+
+def priced_micro_usd(detail: dict, kind: str, tokens: int) -> int:
+    """Micro-USD for `tokens` of `kind`: the per-call amounts recorded for them, and for any tokens
+    no call priced (a row written before calls were priced one by one) one rounded-up amount."""
+    if tokens <= 0:
+        return 0
+    covered = min(_count(detail.get(f"{kind}_priced_tokens")), tokens)
+    priced = _count(detail.get(f"{kind}_micro_usd")) if covered else 0
+    return priced + coding_call_micro_usd(tokens - covered, detail)
+
+
+def _unknown_charge(
+    unknown_tokens: int, unknown_micro: int, *, measured_tokens: int, measured_micro: int, reserved_tokens: int, reserved_cost: int
+) -> tuple[int, int]:
     """Tokens and micro-USD to book for calls whose usage is unknown.
 
-    Each unknown call is charged what was reserved for it, at the reservation's
-    micro-USD per token, but only out of the hold left after the measured tokens.
+    Each unknown call is charged what was reserved for it, priced at the configured rate one call at
+    a time (the caller sums those amounts into unknown_micro). Each unit is capped on its own by what
+    is still held after the measured usage: tokens by tokens, money by money.
     """
-    if unknown_tokens <= 0 or reserved_tokens <= 0:
+    if unknown_tokens <= 0:
         return 0, 0
-    tokens = min(unknown_tokens, max(0, reserved_tokens - actual))
-    micro = min(-(-tokens * reserved_cost // reserved_tokens), max(0, reserved_cost - actual))
+    tokens = min(unknown_tokens, max(0, reserved_tokens - measured_tokens))
+    micro = min(unknown_micro, max(0, reserved_cost - measured_micro))
     return tokens, micro
 
 
@@ -299,6 +364,7 @@ class BudgetLedger:
         input_tokens: int,
         output_tokens: int,
         unknown_tokens: int = 0,
+        unknown_micro_usd: int | None = None,
         guard: SettleGuard | None = None,
     ) -> str:
         """Book known token usage and release the hold, including a measured overrun.
@@ -307,15 +373,22 @@ class BudgetLedger:
         and keeps the hold. settle() still rejects a bill above its reservation. This path
         is for a measured coding attempt whose tokens are already known.
 
+        actual is money (micro-USD) and input_tokens/output_tokens are tokens; they are booked
+        apart and neither is derived from the other here. The caller prices the measured calls at
+        the configured rate, each call rounded up on its own, and passes their sum.
+
         unknown_tokens is what was reserved for calls of this attempt whose usage never
-        arrived (a timeout after sending, an answer without usage). That part is charged
-        at the reservation's rate rather than released, and only out of what is still
-        held after the measured tokens: the estimate never pushes the bill past the hold.
+        arrived (a timeout after sending, an answer without usage), and unknown_micro_usd the sum
+        of those calls' own amounts at the configured rate (None: the row's rate, one amount).
+        That part is charged rather than released, and only out of what is still held after the
+        measured usage, each unit on its own: the estimate never pushes the bill past the hold.
+        An overrun is measured money above the money held or measured tokens above the tokens held.
 
         guard, if given, must hold before anything is booked; otherwise fence_lost and no change.
         """
-        if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or actual != input_tokens + output_tokens:
+        if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or (unknown_micro_usd is not None and unknown_micro_usd < 0):
             raise BudgetError("invalid_amount")
+        measured_tokens = input_tokens + output_tokens
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             _require_guard(conn, guard)
             account = conn.execute(
@@ -340,11 +413,17 @@ class BudgetLedger:
                 raise BudgetError("not_reserved")
             reserved_cost = int(request["reserved_micro_usd"])
             reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            unknown_micro = coding_call_micro_usd(unknown_tokens, detail) if unknown_micro_usd is None else unknown_micro_usd
             unknown_charge_tokens, unknown_charge_micro = _unknown_charge(
-                unknown_tokens, actual=actual, reserved_tokens=reserved_tokens, reserved_cost=reserved_cost
+                unknown_tokens,
+                unknown_micro,
+                measured_tokens=measured_tokens,
+                measured_micro=actual,
+                reserved_tokens=reserved_tokens,
+                reserved_cost=reserved_cost,
             )
             overrun_micro = max(0, actual - reserved_cost)
-            overrun_tokens = max(0, actual - reserved_tokens)
+            overrun_tokens = max(0, measured_tokens - reserved_tokens)
             book_result = "overrun" if overrun_micro or overrun_tokens else "settled"
             detail["book_result"] = book_result
             detail["pending_tokens"] = 0
@@ -380,7 +459,7 @@ class BudgetLedger:
                     "reserved": reserved_cost,
                     "actual": actual + unknown_charge_micro,
                     "reserved_tokens": reserved_tokens,
-                    "tokens": actual + unknown_charge_tokens,
+                    "tokens": measured_tokens + unknown_charge_tokens,
                     "id": account["id"],
                 },
             )

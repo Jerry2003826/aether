@@ -18,7 +18,7 @@ from sqlalchemy.exc import IntegrityError, NoResultFound
 
 from aether_gateway.model import ModelGateway
 from aether_storage.artifacts import ArtifactError, ArtifactStore
-from aether_storage.budget import BudgetError, BudgetLedger
+from aether_storage.budget import BudgetError, BudgetLedger, coding_call_micro_usd, move_call_cost, priced_micro_usd
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
 from aether_worker.coding_sandbox import (
@@ -53,17 +53,44 @@ def coding_call_reserve_micro_usd() -> int:
 
 
 def _positive_env(name: str, default: int) -> int:
-    raw = os.environ.get(name, "").strip()
+    value = _positive_value(os.environ.get(name, ""))
+    return default if value is None else value
+
+
+def _positive_value(raw: str) -> int | None:
+    raw = raw.strip()
     if not raw:
-        return default
+        return None
     try:
         value = int(raw)
     except ValueError:
-        return default
+        return None
     if value < 1:
-        return default
+        return None
     return value
+
+
 _LOG = logging.getLogger("aether.worker.coding")
+
+
+def warn_coding_rate_default() -> None:
+    """Say once, at worker startup, when the coding money rate is not taken from the environment.
+
+    Then the money per call defaults to the token count: 1 micro-USD per token, a bookkeeping unit
+    and not a price. It stays a supported setup, so this only warns. A rejected value is not echoed.
+    """
+    raw = os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", "")
+    if _positive_value(raw) is not None:
+        return
+    reason = "unset" if not raw.strip() else "invalid"
+    tokens = coding_call_reserve_tokens()
+    _LOG.warning(
+        "coding_rate_default AETHER_CODING_CALL_RESERVE_MICRO_USD=%s default=%s micro_usd_per_call "
+        "(=AETHER_CODING_CALL_RESERVE_TOKENS=%s) rate=1 micro_usd_per_token accounting_unit_not_a_price",
+        reason,
+        tokens,
+        tokens,
+    )
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
     "max_tokens": 100_000,
@@ -745,6 +772,7 @@ def _close_prior_attempt(
             detail["takeover_pending_tokens"] = pending
             detail["unknown_reserved_tokens"] = _count_detail(detail.get("unknown_reserved_tokens")) + pending
             detail["pending_tokens"] = 0
+            move_call_cost(detail, "pending", "unknown_reserved")
         conn.execute(
             text(
                 "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1743,6 +1771,7 @@ def _drain_proxy(
             detail["unknown_usage_calls"] = int(detail.get("unknown_usage_calls") or 0) + unfinished
             detail["unknown_reserved_tokens"] = int(detail.get("unknown_reserved_tokens") or 0) + pending
             detail["pending_tokens"] = 0
+            move_call_cost(detail, "pending", "unknown_reserved")
         conn.execute(
             text(
                 "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1780,8 +1809,16 @@ def _settle(
         request_key=request_key,
     )
     usage = _measured_from_detail(detail)
-    if usage is None:
+    if usage is not None:
+        # Money and tokens are booked apart: each measured call was priced at the reservation's
+        # rate, rounded up on its own, when its usage arrived; this is their sum.
+        actual = priced_micro_usd(detail, "measured", usage[0] + usage[1])
+    else:
         usage = _usage(result)
+        # Only the sandbox's total is known here, so it is priced as one call.
+        actual = 0 if usage is None else coding_call_micro_usd(usage[0] + usage[1], detail)
+    unknown = _unknown_reserved_tokens(detail)
+    pending = _count_detail(detail.get("pending_tokens"))
     try:
         if usage is None:
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, guard=guard)
@@ -1792,10 +1829,12 @@ def _settle(
             project_id=project_id,
             task_id=task_id,
             request_key=request_key,
-            actual=incoming + outgoing,
+            actual=actual,
             input_tokens=incoming,
             output_tokens=outgoing,
-            unknown_tokens=_unknown_reserved_tokens(detail) + _count_detail(detail.get("pending_tokens")),
+            unknown_tokens=unknown + pending,
+            # Each unknown call at its own reservation, rounded up per call, then summed.
+            unknown_micro_usd=priced_micro_usd(detail, "unknown_reserved", unknown) + priced_micro_usd(detail, "pending", pending),
             guard=guard,
         )
     except BudgetError as exc:
