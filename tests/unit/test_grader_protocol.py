@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
 from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
 from aether_worker.grader_runner import GRADER_PROGRAM, PROTOCOL_CHILD_SOURCE
 from aether_worker.verification import _recordable, allows_auto_promotion
@@ -84,3 +85,29 @@ def test_cooperative_and_uncertified_results_cannot_promote() -> None:
     assert _recordable(cooperative) is False
     assert _recordable(isolated) is True
     assert _recordable(forged) is False
+
+
+_LITERAL_TEST = "import candidate\n\ndef test_required_result():\n    assert candidate.value() == 42\n"
+
+
+@pytest.mark.parametrize(
+    "extra",
+    [
+        # pytest runs a unittest.TestCase subclass whatever its name.
+        "import unittest\n\nclass StackChecks(unittest.TestCase):\n    def test_more(self):\n        self.assertEqual(candidate.value(), 7)\n",
+        # ... a test function the module imports by name ...
+        "from shared_checks import test_shared_behaviour\n",
+        # ... or binds to a test name ...
+        "test_alias = test_required_result\n",
+        # ... and runs xunit hooks around the tests, which the probes would skip.
+        "def setup_module(module):\n    candidate.configure(strict=True)\n",
+        "def setUpModule():\n    candidate.configure(strict=True)\n",
+    ],
+    ids=["testcase_class_any_name", "imported_test", "assigned_test", "setup_module", "setUpModule"],
+)
+def test_a_suite_pytest_runs_beyond_its_literal_asserts_stays_cooperative(tmp_path: Path, extra: str) -> None:
+    # The isolated protocol only replays the literal asserts it extracted; anything else pytest would run
+    # (or set up) must keep the suite on cooperative pytest instead of certifying a pass without it.
+    source, tests = _tree(tmp_path, "def value():\n    return 42\n", _LITERAL_TEST + "\n" + extra)
+    (tests / "shared_checks.py").write_text("def test_shared_behaviour():\n    assert False\n", encoding="utf-8")
+    assert extract_protocol(source, tests) is None
