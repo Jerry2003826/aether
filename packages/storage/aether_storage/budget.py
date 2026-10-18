@@ -482,10 +482,20 @@ class BudgetLedger:
             if updated != 1:
                 raise BudgetError("not_reserved")
 
-    def cancel_unused(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, guard: SettleGuard | None = None) -> bool:
-        """Release a reservation through which nothing was ever sent, back to the account in full.
+    def cancel_unused(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        guard: SettleGuard | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Release a reservation through which nothing billable was sent, back to the account in full.
 
-        Only for a row the caller has shown carried no call to a provider; True when it was released.
+        Only for a row the caller has shown carried no billable call to a provider; True when it was
+        released. reason, when given, is written to usage_detail as released_unsent.
         """
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             _require_guard(conn, guard)
@@ -502,9 +512,12 @@ class BudgetLedger:
             ).mappings().first()
             if request is None:
                 return False
+            detail = _detail(request["usage_detail"])
+            if reason is not None:
+                detail["released_unsent"] = reason
             _cancel_before_dispatch(
                 conn, account_id=account["id"], project_id=project_id, task_id=task_id, request_key=request_key,
-                amount=int(request["reserved_micro_usd"]), detail=_detail(request["usage_detail"]),
+                amount=int(request["reserved_micro_usd"]), detail=detail,
             )
         return True
 

@@ -1821,6 +1821,13 @@ def _settle(
     pending = _count_detail(detail.get("pending_tokens"))
     try:
         if usage is None:
+            reason = _unsent_reason(detail)
+            if reason is not None:
+                # Nothing here can have been billed: give the whole hold back and say why.
+                ledger.cancel_unused(
+                    owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, guard=guard, reason=reason
+                )
+                return
             ledger.mark_unknown(owner_id=owner_id, project_id=project_id, task_id=task_id, request_key=request_key, guard=guard)
             return
         incoming, outgoing = usage
@@ -1844,6 +1851,30 @@ def _settle(
             raise
     except NoResultFound:
         return
+
+
+def _unsent_reason(detail: dict[str, Any]) -> str | None:
+    """Why no call on this reservation can have been billed, or None when one may have been.
+
+    Read only after the drain, when no call is still being forwarded. The gateway leaves
+    measured, unknown or pending tokens (or usage_missing) for every call that may have reached
+    the provider and been billed; a cut error body and a drain that gave up on a call count too.
+    Without any of them, every call was refused before it was sent (sent=False, e.g.
+    model_unavailable) or got a complete non-2xx reply, which is not billed (ADR-F46 R2).
+    """
+    if _measured_from_detail(detail) is not None or _unknown_reserved_tokens(detail) > 0:
+        return None
+    if _count_detail(detail.get("pending_tokens")) or _count_detail(detail.get("unknown_usage_calls")):
+        return None
+    if detail.get("usage_missing") is True or detail.get("error_body_truncated") is True:
+        return None
+    if detail.get("proxy_drained") is True or _count_detail(detail.get("drain_unfinished")):
+        return None
+    for key in ("admission_error", "upstream_error"):
+        code = detail.get(key)
+        if isinstance(code, str) and code:
+            return code
+    return "no_model_call"
 
 
 def _unknown_reserved_tokens(detail: dict[str, Any]) -> int:
