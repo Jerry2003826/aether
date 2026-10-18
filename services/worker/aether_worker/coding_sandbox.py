@@ -64,12 +64,63 @@ CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
 LEFTOVER_GRACE_SECONDS = 600
 _DEPLOYMENT_ENV = "AETHER_DEPLOYMENT_ID"
 _ZERO_TIME = "0001-01-01T00:00:00Z"
+_INSTANCE_ENV = "AETHER_WORKER_INSTANCE_ID"
+_STATE_DIR_ENV = "AETHER_WORKER_STATE_DIR"
+_INSTANCE_FILE = "coding-instance-id"
+_INSTANCE_LABEL = "aether.worker-instance"
+# Only these states have exited; created (never started), running, paused, restarting are never swept.
+_EXITED = ("exited", "dead")
+_unpersisted_instance: str | None = None
+
+
+def _clean_label_value(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]", "_", value.strip())[:64]
+
+
+def worker_instance_id() -> str:
+    """This worker's instance id, read fresh each time: AETHER_WORKER_INSTANCE_ID, else the id kept in
+    <AETHER_WORKER_STATE_DIR, default data/worker>/coding-instance-id (created once, so a restarted
+    worker with the same state directory finds the containers its previous run left). If the file
+    cannot be written, a random id for this process only: it then never claims an earlier run's
+    containers. Workers that run at the same time must not share a state directory."""
+    global _unpersisted_instance
+    explicit = _clean_label_value(os.environ.get(_INSTANCE_ENV, ""))
+    if explicit:
+        return explicit
+    path = Path(os.environ.get(_STATE_DIR_ENV, "data/worker")) / _INSTANCE_FILE
+    try:
+        stored = _clean_label_value(path.read_text(encoding="ascii"))
+        if stored:
+            return stored
+    except (OSError, UnicodeDecodeError):
+        pass
+    fresh = uuid.uuid4().hex
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("x", encoding="ascii") as handle:
+            handle.write(fresh + "\n")
+        return fresh
+    except FileExistsError:
+        # Another process of the same worker created it first; use what it wrote.
+        stored = _clean_label_value(path.read_text(encoding="ascii"))
+        if stored:
+            return stored
+    except OSError:
+        pass
+    _LOG.warning("coding_instance_id_unpersisted path=%s", path)
+    if _unpersisted_instance is None:
+        _unpersisted_instance = fresh
+    return _unpersisted_instance
+
+
+def instance_label() -> str:
+    return f"{_INSTANCE_LABEL}={worker_instance_id()}"
 
 
 def deployment_label() -> str:
-    """aether.deployment=<AETHER_DEPLOYMENT_ID, else local>: the startup sweep only ever touches
-    coding containers with this deployment's label, never another stack's on the same daemon."""
-    value = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get(_DEPLOYMENT_ENV, "").strip())[:64]
+    """aether.deployment=<AETHER_DEPLOYMENT_ID, else local>: for operators listing a stack's
+    containers. The startup sweep never selects by it (see instance_label)."""
+    value = _clean_label_value(os.environ.get(_DEPLOYMENT_ENV, ""))
     return f"aether.deployment={value or 'local'}"
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
 # The proxy (directory, job token) each container this process started is wired to, and the id
@@ -118,7 +169,7 @@ def container_arguments(
     text = checked_objective(objective)
     labels: list[str] = []
     if job_id is not None:
-        labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding", "--label", deployment_label()]
+        labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding", "--label", deployment_label(), "--label", instance_label()]
     proxy: list[str] = []
     if proxy_dir is not None and job_token:
         proxy = [
@@ -627,25 +678,24 @@ def _parse_time(value: object) -> datetime | None:
 
 
 def _leftover(details: dict[str, Any], now: datetime) -> bool:
-    """Running (or paused, restarting) past the longest run a coding sandbox may take plus the grace,
-    or stopped (exited, dead, created and never started) for longer than the grace."""
+    """Exited (or dead) longer than the grace ago. Running, paused, restarting or never started: no."""
     state = details.get("State") if isinstance(details.get("State"), dict) else {}
-    status = str(state.get("Status") or "")
-    if status in {"running", "paused", "restarting"}:
-        started = _parse_time(state.get("StartedAt"))
-        return started is not None and (now - started).total_seconds() > CODING_SANDBOX_TIMEOUT_SECONDS + LEFTOVER_GRACE_SECONDS
+    if str(state.get("Status") or "") not in _EXITED:
+        return False
     stopped = _parse_time(state.get("FinishedAt")) or _parse_time(state.get("StartedAt")) or _parse_time(details.get("Created"))
     return stopped is not None and (now - stopped).total_seconds() > LEFTOVER_GRACE_SECONDS
 
 
 def sweep_leftover_coding_containers(*, now: datetime | None = None) -> list[str]:
-    """Remove this deployment's leftover coding containers (see _leftover); the ids removed.
+    """Remove coding containers this worker instance started that have exited; the ids removed.
 
     Run when the worker starts: a container that outlived its job (an unconfirmed stop, a failed rm -f,
     a worker that died before removing it) keeps the job's output in Docker's own log until removed.
-    Only containers labelled aether.role=coding and this deployment_label(); never a young one, which a
-    live worker may still be collecting. Best effort: nothing here stops the worker from starting. With
-    a delegated sandbox (the runner owns Docker) the worker does not sweep.
+    Several stacks share a Docker daemon, so only containers labelled aether.role=coding and this
+    worker's instance_label() (persisted, so a restart still matches), never by name or deployment
+    label; and only exited or dead ones past LEFTOVER_GRACE_SECONDS, state checked here as well as by
+    docker's filter. A running container is never removed. Best effort: nothing here stops the worker
+    from starting. With a delegated sandbox (the runner owns Docker) the worker does not sweep.
     """
     if worker_delegates():
         _LOG.info("coding_container_sweep skipped=delegated")
@@ -655,7 +705,10 @@ def sweep_leftover_coding_containers(*, now: datetime | None = None) -> list[str
     try:
         if not docker_available():
             return []
-        listing = _sandbox_docker(["ps", "-aq", "--filter", "label=aether.role=coding", "--filter", f"label={deployment_label()}"])
+        filters = ["--filter", "label=aether.role=coding", "--filter", f"label={instance_label()}"]
+        for status in _EXITED:
+            filters += ["--filter", f"status={status}"]
+        listing = _sandbox_docker(["ps", "-aq", *filters])
         if listing.returncode != 0:
             return []
         for container in listing.stdout.split():
