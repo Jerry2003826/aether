@@ -40,6 +40,9 @@ finally:
 
 WORK = Path(os.environ.get("AETHER_SANDBOX_WORK", "/work"))
 PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_protocol.py"))
+# The sandbox's shared memory (the launcher sets /dev/shm). Required: the entry empties it after the
+# agent stopped, so it never guesses one (and never empties a directory nobody named).
+_SHM_ENV = "AETHER_SANDBOX_SHM"
 # Seconds past the protocol's own budget before the entry kills it (the protocol stops 3 s before it).
 _PROTOCOL_KILL_MARGIN_SECONDS = 5
 EXECUTOR = "openhands.sdk.Agent"
@@ -301,6 +304,46 @@ def _nonce_file(nonce: str) -> Path:
     with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
         handle.write(nonce)
     return path
+
+
+class SharedMemoryUnavailable(RuntimeError):
+    """The shared memory is not named, or could not be emptied: nothing is graded."""
+
+
+def shared_memory_root() -> Path:
+    """The sandbox's shared-memory directory, as the launcher named it (AETHER_SANDBOX_SHM)."""
+    value = os.environ.get(_SHM_ENV, "")
+    path = Path(value)
+    if not value or not path.is_absolute() or path.is_symlink() or not path.is_dir():
+        raise SharedMemoryUnavailable("shared_memory_unconfigured")
+    return path
+
+
+def _purge(path: Path) -> None:
+    """Delete path and everything under it, whatever modes the agent set; links are removed, never followed."""
+    if path.is_symlink() or not path.is_dir():
+        path.unlink()
+        return
+    os.chmod(path, 0o700)
+    for child in path.iterdir():
+        _purge(child)
+    path.rmdir()
+
+
+def clear_shared_memory(root: Path) -> None:
+    """Empty the shared memory the agent and the candidate share, once no agent process is left.
+
+    The agent may have left anything there (a copy of the tests or the oracle); the candidate uses the
+    same directory for its semaphores and shared memory, so it starts from an empty one. Anything that
+    cannot be removed fails the job before any candidate code runs.
+    """
+    for child in list(root.iterdir()):
+        try:
+            _purge(child)
+        except OSError:
+            pass
+    if any(root.iterdir()):
+        raise SharedMemoryUnavailable("shared_memory_not_cleared")
 
 
 def job_directory() -> Path:
@@ -714,11 +757,14 @@ def main() -> None:
     try:
         become_subreaper()
         objective = job_objective()
+        shared_memory = shared_memory_root()
         job = job_directory()
         copy_tree(WORK, job)
         before = _snapshot(job)
         agent_report = _run_agent(job, objective)
         stop_agent_processes()
+        # No agent process is left to write it again: from here the candidate's shared memory is empty.
+        clear_shared_memory(shared_memory)
         # Taken only once nothing the agent started can still write, and before grading files
         # are restored, so the published patch is the agent's source change that gets graded.
         # Grading files and caches are left out of it; tampering with them is caught separately.
@@ -736,7 +782,7 @@ def main() -> None:
         try:
             workspace = LocalWorkspace(working_dir=str(job))
             result = workspace.execute_command(
-                f"AETHER_PROTOCOL_BUDGET_SECONDS={budget} AETHER_PROTOCOL_BASELINE_DIR={shlex.quote(str(WORK))} AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
+                f"AETHER_PROTOCOL_BUDGET_SECONDS={budget} AETHER_PROTOCOL_BASELINE_DIR={shlex.quote(str(WORK))} AETHER_PROTOCOL_SHM_DIR={shlex.quote(str(shared_memory))} AETHER_PROTOCOL_NONCE_FILE={shlex.quote(str(secret))} {sys.executable} -I {PROTOCOL}",
                 cwd=str(job),
                 timeout=budget + _PROTOCOL_KILL_MARGIN_SECONDS,
             )
@@ -750,6 +796,8 @@ def main() -> None:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
+    except SharedMemoryUnavailable as exc:
+        emit(_failure(str(exc)), 2)
     except ModelChannelOpen as exc:
         # Exit 1 like a graded failure, so the worker records FAILED/model_channel_open with the patch.
         failure = _failure(str(exc))

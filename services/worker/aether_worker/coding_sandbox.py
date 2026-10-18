@@ -145,6 +145,8 @@ def container_arguments(
         "-e",
         "XDG_CACHE_HOME=/tmp",
         "-e",
+        "AETHER_SANDBOX_SHM=/dev/shm",
+        "-e",
         "PYTHONDONTWRITEBYTECODE=1",
         "-e",
         "LANG=C.UTF-8",

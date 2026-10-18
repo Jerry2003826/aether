@@ -6,9 +6,11 @@ import ast
 import difflib
 import json
 import os
+import shutil
 import socketserver
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from pathlib import Path
@@ -30,6 +32,17 @@ _COMPLETION_TOKENS = 9
 
 
 # Stub protocols sign their one result line with the nonce the entry hands them, like coding_protocol.
+@pytest.fixture(autouse=True)
+def _sandbox_shared_memory(monkeypatch: pytest.MonkeyPatch):
+    """The entry empties the sandbox's shared memory before grading; here a private directory under
+    /dev/shm stands in for the sandbox's own (every entry run below copies os.environ), so this
+    machine's /dev/shm is never emptied."""
+    path = Path(tempfile.mkdtemp(prefix="aether-unit-shm-", dir="/dev/shm"))
+    monkeypatch.setenv("AETHER_SANDBOX_SHM", str(path))
+    yield path
+    shutil.rmtree(path, ignore_errors=True)
+
+
 _SIGN = "import os as _os\n_NONCE = open(_os.environ['AETHER_PROTOCOL_NONCE_FILE']).read().strip()\n"
 
 

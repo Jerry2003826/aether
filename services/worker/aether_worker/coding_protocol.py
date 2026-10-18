@@ -177,6 +177,11 @@ def _baseline_modules() -> frozenset[str] | None:
     return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
 
 
+def _shared_memory() -> str:
+    """The shared-memory directory the candidate may use (AETHER_PROTOCOL_SHM_DIR, else /dev/shm)."""
+    return os.path.realpath(os.environ.pop(_SHM_ENV, "") or _DEFAULT_SHM)
+
+
 def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False):
     origin = str(origin_path)
     spec = importlib.machinery.ModuleSpec(fullname, _SnapshotLoader(data, origin), origin=origin, is_package=package)
@@ -224,6 +229,10 @@ _MAX_DEPTH = 100
 _CALL_TIMEOUT_ENV = "AETHER_PROTOCOL_CALL_TIMEOUT_SECONDS"
 _NONCE_ENV = "AETHER_PROTOCOL_NONCE_FILE"
 _BASELINE_ENV = "AETHER_PROTOCOL_BASELINE_DIR"
+# The sandbox's shared memory, which the entry has emptied after the agent stopped (it names it here);
+# the candidate's semaphores, queues and shared memory live in it. Run directly: /dev/shm.
+_SHM_ENV = "AETHER_PROTOCOL_SHM_DIR"
+_DEFAULT_SHM = "/dev/shm"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
 # The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
 _BUDGET_ENV = "AETHER_PROTOCOL_BUDGET_SECONDS"
@@ -344,6 +353,7 @@ class _Session:
                     "sandbox": {
                         "write": [str(self._sandbox["src"]), str(self._sandbox["tmp"])],
                         "deny": [str(item) for item in self._sandbox["deny"]],
+                        "shm": str(self._sandbox["shm"]),
                     },
                 }
             )
@@ -813,7 +823,7 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
     return found
 
 
-def _candidate_sandbox(files: dict[str, bytes], deny: list[str]) -> dict[str, Any]:
+def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str = _DEFAULT_SHM) -> dict[str, Any]:
     """A fresh directory for one test's candidate process: src/ (its cwd, the candidate files) and tmp/."""
     top = Path(tempfile.mkdtemp(prefix="aether-candidate-"))
     src, tmp = top / "src", top / "tmp"
@@ -823,7 +833,7 @@ def _candidate_sandbox(files: dict[str, bytes], deny: list[str]) -> dict[str, An
         target = src / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    return {"top": str(top), "src": str(src), "tmp": str(tmp), "deny": deny}
+    return {"top": str(top), "src": str(src), "tmp": str(tmp), "deny": deny, "shm": shm}
 
 
 def _remove_tree(top: str) -> None:
@@ -884,8 +894,14 @@ def _within(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
-def _sandbox_rules(write: list[str], deny: list[str]) -> list[tuple[str, int]]:
-    """(path, rights) for the candidate process. A read path that holds a denied one is refused."""
+def _sandbox_rules(write: list[str], deny: list[str], shm: str = _DEFAULT_SHM) -> list[tuple[str, int]]:
+    """(path, rights) for the candidate process. A read path that holds a denied one is refused.
+
+    `shm` is the sandbox's shared memory: full access (POSIX semaphores and shared memory need it), and
+    safe only because the entry empties it after the agent stopped, before any candidate code runs, so
+    nothing the agent left there (a copy of a test or the oracle) is still in it. One that overlaps a
+    denied path (the grading workspace, the baseline) is refused like a read path.
+    """
     read = _FS_EXECUTE | _FS_READ_FILE | _FS_READ_DIR
     interpreter = {sys.prefix, sys.exec_prefix, sys.base_prefix, sys.base_exec_prefix}
     interpreter |= {entry for entry in sys.path if entry and os.path.isabs(entry)}
@@ -899,18 +915,22 @@ def _sandbox_rules(write: list[str], deny: list[str]) -> list[tuple[str, int]]:
                 raise PermissionError(f"read path {path} overlaps the grading workspace")
         rules.append((path, read))
     rules.append(("/dev", read | _FS_WRITE_FILE | _FS_TRUNCATE | _FS_IOCTL_DEV))
-    rules.append(("/dev/shm", -1))
+    shared = os.path.realpath(shm)
+    for blocked in denied:
+        if _within(blocked, shared) or _within(shared, blocked):
+            raise PermissionError(f"shared memory {shared} overlaps the grading workspace")
+    rules.append((shared, -1))
     rules.extend((os.path.realpath(path), -1) for path in write)
     return rules
 
 
-def _landlock(write: list[str], deny: list[str]) -> None:
+def _landlock(write: list[str], deny: list[str], shm: str = _DEFAULT_SHM) -> None:
     """Lock this process (and everything it starts) to the system, the interpreter and `write`; with
     Landlock ABI 6 it also cannot signal, or reach abstract unix sockets of, any process outside its domain.
 
     Raises OSError when Landlock is unavailable; the caller then runs no candidate code at all.
     """
-    rules = _sandbox_rules(write, deny)
+    rules = _sandbox_rules(write, deny, shm)
     libc = ctypes.CDLL(None, use_errno=True)
     syscall = libc.syscall
     syscall.restype = ctypes.c_long
@@ -1095,7 +1115,7 @@ def run_suite(root: Path) -> dict[str, Any]:
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
     # What candidate code may see, read before any of it runs; and what it must never read.
-    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")])
+    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")], _shared_memory())
     declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
     deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
     test_timeout = _test_timeout()
@@ -1508,7 +1528,7 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             sandbox = message["sandbox"]
             # Last, and before any candidate code: from here on only the system, the interpreter and
             # this candidate directory exist for this process and anything it starts.
-            _landlock(list(sandbox["write"]), list(sandbox["deny"]))
+            _landlock(list(sandbox["write"]), list(sandbox["deny"]), str(sandbox["shm"]))
             return ["n"]
         if op == "import":
             return keep(importlib.import_module(message["name"]))
