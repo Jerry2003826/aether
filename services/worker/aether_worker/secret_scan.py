@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -29,9 +30,15 @@ def plugin_config() -> dict[str, object]:
     }
 
 
+# detect-secrets keeps its settings and plugin caches process-wide, and transient_settings swaps them
+# in and back out. Worker activities redact on several threads, so the whole context, scan included,
+# runs under one lock: no scan ever sees another scan's exit restore the earlier settings.
+_SETTINGS_LOCK = threading.RLock()
+
+
 @contextmanager
 def scanning_settings() -> Iterator[None]:
-    with transient_settings(plugin_config()):
+    with _SETTINGS_LOCK, transient_settings(plugin_config()):
         get_mapping_from_secret_type_to_class.cache_clear()
         get_plugins.cache_clear()
         yield
