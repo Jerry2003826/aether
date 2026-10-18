@@ -715,8 +715,9 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     verified against the baseline SHA-256 hashes. After the cleanup an added startup hook
     raises StartupHookAdded and an added shadow module raises ShadowModuleAdded.
     """
-    # Root helpers marked in the baseline (first line `# aether: grading`) are grading files; the job
-    # copy's first line does not count, so removing the marker changes nothing and adding one gains nothing.
+    # Root helpers marked in the baseline (`# aether: grading` on line one, or line two after a shebang
+    # or coding line) are grading files; the job copy's marker does not count, so removing the marker
+    # changes nothing and adding one gains nothing.
     marked = grading_files.marked_grading_files(work)
     baseline = _baseline_files(work, editable, marked)
     expected = {name: _digest(data) for name, data in baseline.items()}

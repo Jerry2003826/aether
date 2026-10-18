@@ -24,8 +24,9 @@ that grades. Worker-side code must not call them, because the worker environment
 package set; the worker only consumes the grading_shadow_module case detail.
     grading_paths(root, editable=None, marked=frozenset())
                                          relative POSIX paths of grading files under root (.git skipped).
-    marked_grading_files(baseline)       root-level .py files of the BASELINE whose first line starts with
-                                         GRADING_MARKER: grading helpers (threat model I-1, option 2).
+    marked_grading_files(baseline)       root-level .py files of the BASELINE marked with GRADING_MARKER
+                                         (line one, or line two after a shebang or coding line): grading
+                                         helpers (threat model I-1, option 2).
                                          Always computed from the baseline, never from the agent's copy;
                                          pass the result as `marked` to is_grading_path/grading_paths.
     declared_tests(source)               test ids a test module declares (ast, baseline source).
@@ -36,6 +37,7 @@ package set; the worker only consumes the grading_shadow_module case detail.
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from collections.abc import Collection
 from functools import cache
@@ -80,7 +82,8 @@ IGNORED_DIRS = frozenset({".git"})
 # sandbox image (the grader runs it); kept here even where it is not installed.
 SHADOW_ROOTS = frozenset({"pytest", "_pytest", "pluggy", "sitecustomize", "usercustomize"})
 _EXTENSION_SUFFIXES = (".py", ".pyc", ".so", ".pyd")
-# First line of a root-level helper the task owner marks as grading (followed by end of line or spaces).
+# Marks a root-level helper as grading: on line one, or on line two after a shebang or coding line
+# (followed by end of line or spaces).
 GRADING_MARKER = b"# aether: grading"
 
 
@@ -124,13 +127,26 @@ def is_grading_path(
     return _is_test_file(parts) or parts[-1] in SUPPORT_FILES or _normal(relative) in marked
 
 
-def _marked_first_line(head: bytes) -> bool:
-    line = head.split(b"\n", 1)[0].rstrip(b"\r")
+# PEP 263: the encoding declaration a .py file may carry on line one or two.
+_CODING_LINE = re.compile(rb"^[ \t\f]*#.*?coding[:=][ \t]*[-\w.]+")
+
+
+def _is_marker(line: bytes) -> bool:
     return line.startswith(GRADING_MARKER) and not line[len(GRADING_MARKER) :].strip(b" \t")
 
 
+def _marked_head(head: bytes) -> bool:
+    """GRADING_MARKER on line one, or on line two after a shebang or a PEP 263 coding line."""
+    lines = [line.rstrip(b"\r") for line in head.split(b"\n", 2)[:2]]
+    if _is_marker(lines[0]):
+        return True
+    first_is_header = lines[0].startswith(b"#!") or _CODING_LINE.match(lines[0]) is not None
+    return first_is_header and len(lines) > 1 and _is_marker(lines[1])
+
+
 def marked_grading_files(baseline: Path) -> frozenset[str]:
-    """Root-level .py files of the baseline whose first line is GRADING_MARKER (regular files only)."""
+    """Root-level .py files of the baseline marked with GRADING_MARKER (regular files only): on line one,
+    or on line two after a shebang or a coding line."""
     found: set[str] = set()
     try:
         entries = sorted(baseline.iterdir())
@@ -141,10 +157,10 @@ def marked_grading_files(baseline: Path) -> frozenset[str]:
             continue
         try:
             with path.open("rb") as handle:
-                head = handle.read(len(GRADING_MARKER) + 256)
+                head = handle.read(4096)
         except OSError:
             continue
-        if _marked_first_line(head):
+        if _marked_head(head):
             found.add(path.name)
     return frozenset(found)
 
