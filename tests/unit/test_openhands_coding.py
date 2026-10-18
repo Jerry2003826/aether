@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import ast
-import difflib
 import json
 import os
+import re
 import shutil
 import socketserver
 import subprocess
@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from aether_worker import grading_files
 from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.openhands_image import OPENHANDS_VERSION, launch_image
 from aether_worker.runner import JOB_IMAGE
@@ -560,25 +561,27 @@ _LATE_WRITER = (
 )
 
 
-def _expected_patch(work: Path, job: Path) -> str:
-    """The diff the grader actually sees: baseline workspace against the graded job copy."""
-    chunks: list[str] = []
-    names = sorted(
-        {path.relative_to(root).as_posix() for root in (work, job) for path in root.rglob("*") if path.is_file()}
+def _assert_patch_gives_the_graded_job(work: Path, job: Path, patch: str, scratch: Path) -> None:
+    """The diff the grader actually sees: git apply of the published patch onto a copy of the baseline
+    workspace gives the graded job copy byte for byte (state and caches aside)."""
+    applied = scratch / "applied"
+    shutil.copytree(work, applied)
+    (scratch / "published.diff").write_text(patch, encoding="utf-8")
+    done = subprocess.run(
+        ["git", "apply", "-v", str(scratch / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
     )
-    for name in names:
-        if name.startswith(".aether-state/") or "__pycache__" in name:
-            continue
-        old = (work / name).read_text(encoding="utf-8") if (work / name).is_file() else ""
-        new = (job / name).read_text(encoding="utf-8") if (job / name).is_file() else ""
-        # Headers by existence, as diff -N / git: a created file from /dev/null, a deleted one to it.
-        source = f"a/{name}" if (work / name).is_file() else "/dev/null"
-        target = f"b/{name}" if (job / name).is_file() else "/dev/null"
-        if old != new:
-            chunks.extend(
-                difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=source, tofile=target)
-            )
-    return "".join(chunks)
+    assert done.returncode == 0, done.stderr + patch
+
+    def tree(root: Path) -> dict[str, bytes]:
+        return {
+            path.relative_to(root).as_posix(): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+            and not path.relative_to(root).as_posix().startswith(".aether-state/")
+            and not grading_files.is_cache_path(path.relative_to(root).as_posix())
+        }
+
+    assert tree(applied) == tree(job), patch
 
 
 def test_published_patch_matches_the_workspace_that_is_graded(tmp_path: Path) -> None:
@@ -634,7 +637,7 @@ def test_published_patch_matches_the_workspace_that_is_graded(tmp_path: Path) ->
     assert body["agent_completed"] is True
     assert body["graded"] == graded
     assert "return 99" in graded
-    assert body["patch"] == _expected_patch(work, job)
+    _assert_patch_gives_the_graded_job(work, job, body["patch"], tmp_path / "check")
     assert "+    return 99" in body["patch"]
 
 
@@ -972,17 +975,10 @@ def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_pat
     graded_helper = (job / "helper.py").read_text(encoding="utf-8")
     assert graded_util == "FACTOR = 6\n"
     assert graded_helper == "def helper():\n    return 7\n"
-    expected = "".join(
-        [
-            # A new file comes from /dev/null (the published patch picks headers by existence alone).
-            *difflib.unified_diff([], graded_helper.splitlines(keepends=True), fromfile="/dev/null", tofile="b/helper.py"),
-            *difflib.unified_diff(
-                ["FACTOR = 1\n"], graded_util.splitlines(keepends=True), fromfile="a/util.py", tofile="b/util.py"
-            ),
-        ]
-    )
-    # Exactly the graded source changes: no conftest.py, no cache.
-    assert body["patch"] == expected
+    # Exactly the graded source changes, in git's own format: no conftest.py, no cache.
+    assert re.findall(r"^diff --git \S+ b/(\S+)$", body["patch"], re.M) == ["helper.py", "util.py"], body["patch"]
+    assert "new file mode 100644" in body["patch"] and "+FACTOR = 6" in body["patch"]
+    _assert_patch_gives_the_graded_job(work, job, body["patch"], tmp_path / "check")
 
 
 _GRADING_REWRITER = (
@@ -1066,7 +1062,7 @@ def test_published_patch_excludes_grading_rewrites_even_from_late_background_wri
     assert "conftest.py" not in patch
     assert "assert True" not in patch and "SystemExit" not in patch
     # It is exactly the baseline-to-graded diff (restored grading files contribute nothing).
-    assert patch == _expected_patch(work, job)
+    _assert_patch_gives_the_graded_job(work, job, patch, tmp_path / "check")
     assert completed.returncode == 0, completed.stdout + completed.stderr
 
 

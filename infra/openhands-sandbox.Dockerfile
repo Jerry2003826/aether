@@ -6,6 +6,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy \
     UV_PROJECT_ENVIRONMENT=/opt/openhands/.venv
 
+# git writes the agent's published patch (openhands_sandbox_entry._patch: git diff --no-index --binary).
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends git \
+ && rm -rf /var/lib/apt/lists/*
+
 RUN pip install --no-cache-dir --only-binary :all: uv==0.13.1
 
 WORKDIR /opt/openhands

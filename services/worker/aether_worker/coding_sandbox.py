@@ -736,6 +736,10 @@ def _collect_exit(name: str, *, heartbeat: Callable[[], None] | None = None) -> 
     code = _exit_code(name)
     _remove_after_exit(name)
     result = _result_line(captured["stdout"])
+    if code == 2 and _runner_detail(result) == PATCH_UNAVAILABLE:
+        # The entry's git could not write the agent's patch: its own code, not sandbox_failed and
+        # never agent_no_change (there is no patch, which says nothing about the agent's change).
+        raise CodingSandboxError(PATCH_UNAVAILABLE, logs)
     if code not in {0, 1} or result is None:
         raise CodingSandboxError("sandbox_failed", logs)
     return {
@@ -771,6 +775,18 @@ def _sandbox_docker(args: list[str], *, timeout: float | None = None) -> subproc
         return remote_completed(args, timeout=60 if timeout is None else timeout)
     except SandboxDelegateError as exc:
         raise CodingSandboxError("sandbox_unavailable") from exc
+
+
+PATCH_UNAVAILABLE = "patch_unavailable"
+
+
+def _runner_detail(result: dict[str, Any] | None) -> str | None:
+    """The detail of the entry's single runner case (its own failures), if that is all it reported."""
+    cases = result.get("cases") if isinstance(result, dict) else None
+    if isinstance(cases, list) and len(cases) == 1 and isinstance(cases[0], dict) and cases[0].get("name") == "runner":
+        detail = cases[0].get("detail")
+        return detail if isinstance(detail, str) else None
+    return None
 
 
 def _result_line(stdout: str) -> dict[str, Any] | None:

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import ctypes
-import difflib
 import hashlib
 import json
 import os
@@ -13,6 +12,7 @@ import shutil
 import signal
 import socket
 import socketserver
+import subprocess
 import sys
 import tempfile
 import threading
@@ -356,56 +356,110 @@ def job_directory() -> Path:
     return Path(tempfile.mkdtemp(prefix="aether-job-"))
 
 
-def _snapshot(root: Path) -> dict[str, str]:
-    """Text of every regular file. Present-but-empty is "", absent is a missing key."""
-    found: dict[str, str] = {}
+def _snapshot(root: Path) -> dict[str, bytes]:
+    """Bytes of every regular file. Present-but-empty is b"", absent is a missing key."""
+    found: dict[str, bytes] = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
         if any(part in _SKIP for part in relative.parts):
             continue
         if path.is_symlink() or not path.is_file():
             continue
-        found[relative.as_posix()] = path.read_text(encoding="utf-8", errors="replace")
+        found[relative.as_posix()] = path.read_bytes()
     return found
 
 
-def _lines(value: str) -> list[str]:
-    if not value:
-        return []
-    lines = value.splitlines(keepends=True)
-    if lines and not lines[-1].endswith("\n"):
-        lines[-1] += "\n"
-    return lines
+class PatchUnavailable(RuntimeError):
+    """git could not write the agent's patch (missing from the image, or failing). There is then no
+    patch to publish, which says nothing about whether the agent changed anything: the run ends with
+    runner detail patch_unavailable (exit 2, never graded), never as agent_no_change."""
 
 
-def _patch(before: dict[str, str], root: Path) -> str:
-    """The agent's source change. Grading files and caches are grading input, never part of it."""
+def _patch(before: dict[str, bytes], root: Path) -> str:
+    """The agent's source change, written by git itself (`git diff --no-index --binary`), as the
+    worker's unified_patch does. Grading files and caches are grading input, never part of it.
+
+    Each changed file is written byte for byte into a before and an after tree, so created, deleted
+    and empty files, a missing final newline and a change only to it all take git's own form, and
+    `git apply` reproduces the graded files exactly. A file that is not UTF-8 on either side goes out
+    as a GIT binary patch, so the patch text stays valid UTF-8. Text changes come first. No change is "".
+    """
     after = _snapshot(root)
-    chunks: list[str] = []
     # Marked root helpers are judged from the read-only baseline (WORK), never from the agent's copy.
     marked = grading_files.marked_grading_files(WORK)
-    for name in sorted(set(before) | set(after)):
-        if grading_files.is_grading_path(name, marked=marked) or grading_files.is_cache_path(name):
-            continue
-        old = before.get(name)
-        new = after.get(name)
-        if old == new:
-            continue
-        # Existence alone picks the headers, as in diff -N / git: a created file comes from /dev/null and
-        # a deleted one goes to it, so applying the patch removes it (not leaves an empty file); a file
-        # present on both sides (emptied included) is a modification of a/ into b/.
-        source = f"a/{name}" if old is not None else "/dev/null"
-        target = f"b/{name}" if new is not None else "/dev/null"
-        if not old and not new:
-            # An empty file created or deleted: no lines to diff, but it is a change.
-            chunks.append(f"--- {source}\n")
-            chunks.append(f"+++ {target}\n")
-            continue
-        chunks.extend(difflib.unified_diff(_lines(old or ""), _lines(new or ""), fromfile=source, tofile=target))
-    text = "".join(chunks)
-    if not text.startswith("--- "):
+    changed = [
+        name
+        for name in sorted(set(before) | set(after))
+        if not (grading_files.is_grading_path(name, marked=marked) or grading_files.is_cache_path(name))
+        and before.get(name) != after.get(name)
+    ]
+    if not changed:
         return ""
-    return text
+    binary = {name for name in changed if not (_utf8(before.get(name)) and _utf8(after.get(name)))}
+    parts = []
+    text = [name for name in changed if name not in binary]
+    if text:
+        parts.append(_git_diff(before, after, text, force_binary=False))
+    if binary:
+        parts.append(_git_diff(before, after, sorted(binary), force_binary=True))
+    return "".join(parts)
+
+
+def _utf8(value: bytes | None) -> bool:
+    if value is None:
+        return True
+    try:
+        value.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def _git_diff(old: dict[str, bytes], new: dict[str, bytes], names: list[str], *, force_binary: bool) -> str:
+    """git diff --no-index --binary of two scratch trees named a and b holding `names` (so the paths
+    read a/<name> and b/<name>). No configuration or attributes from the system, the user or the job
+    apply: HOME and XDG_CONFIG_HOME are the scratch directory, there is no system or global config,
+    the attributes file is git's own (empty, or `* binary` for the binary pass)."""
+    with tempfile.TemporaryDirectory(prefix="aether-patch-") as scratch:
+        top = Path(scratch)
+        for side, tree in (("a", old), ("b", new)):
+            (top / side).mkdir()
+            for name in names:
+                if name in tree:
+                    path = top / side / name
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(tree[name])
+                    path.chmod(0o644)
+        attributes = top / "attributes"
+        attributes.write_text("* binary\n" if force_binary else "", encoding="utf-8")
+        environment = {
+            "PATH": os.environ.get("PATH", os.defpath),
+            "HOME": scratch,
+            "XDG_CONFIG_HOME": scratch,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CEILING_DIRECTORIES": str(top.parent),
+            "LC_ALL": "C",
+        }
+        try:
+            completed = subprocess.run(
+                [
+                    "git", "-c", f"core.attributesFile={attributes}", "diff", "--no-index", "--binary",
+                    "--no-prefix", "--no-renames", "--no-color", "--no-ext-diff", "--no-textconv", "a", "b",
+                ],
+                cwd=top,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise PatchUnavailable("patch_unavailable") from exc
+    # --no-index exits 1 when the trees differ and 0 when they do not; anything else is git failing.
+    if completed.returncode not in {0, 1}:
+        raise PatchUnavailable("patch_unavailable")
+    return completed.stdout.decode("utf-8")
 
 
 def _blank_report() -> dict[str, object]:
@@ -810,6 +864,9 @@ def main() -> None:
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
     except SharedMemoryUnavailable as exc:
+        emit(_failure(str(exc)), 2)
+    except PatchUnavailable as exc:
+        # No patch to publish and nothing graded: the worker records FAILED/patch_unavailable.
         emit(_failure(str(exc)), 2)
     except ModelChannelOpen as exc:
         # Exit 1 like a graded failure, so the worker records FAILED/model_channel_open with the patch.
