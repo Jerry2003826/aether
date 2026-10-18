@@ -571,11 +571,12 @@ def _expected_patch(work: Path, job: Path) -> str:
             continue
         old = (work / name).read_text(encoding="utf-8") if (work / name).is_file() else ""
         new = (job / name).read_text(encoding="utf-8") if (job / name).is_file() else ""
+        # Headers by existence, as diff -N / git: a created file from /dev/null, a deleted one to it.
+        source = f"a/{name}" if (work / name).is_file() else "/dev/null"
+        target = f"b/{name}" if (job / name).is_file() else "/dev/null"
         if old != new:
             chunks.extend(
-                difflib.unified_diff(
-                    old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=f"a/{name}", tofile=f"b/{name}"
-                )
+                difflib.unified_diff(old.splitlines(keepends=True), new.splitlines(keepends=True), fromfile=source, tofile=target)
             )
     return "".join(chunks)
 
@@ -973,7 +974,8 @@ def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_pat
     assert graded_helper == "def helper():\n    return 7\n"
     expected = "".join(
         [
-            *difflib.unified_diff([], graded_helper.splitlines(keepends=True), fromfile="a/helper.py", tofile="b/helper.py"),
+            # A new file comes from /dev/null (the published patch picks headers by existence alone).
+            *difflib.unified_diff([], graded_helper.splitlines(keepends=True), fromfile="/dev/null", tofile="b/helper.py"),
             *difflib.unified_diff(
                 ["FACTOR = 1\n"], graded_util.splitlines(keepends=True), fromfile="a/util.py", tofile="b/util.py"
             ),
