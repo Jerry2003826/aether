@@ -114,6 +114,10 @@ def test_a_flag_member_in_a_set():
     assert app.Perm.R in {app.Perm.R}
 
 
+def test_an_enum_member_hashes_as_its_name():
+    assert hash(app.Color.RED) == hash("RED")
+
+
 def test_an_int_enum_member_hashes_as_its_int():
     assert {app.Level.HIGH: 1}[2] == 1
 
@@ -158,6 +162,7 @@ _IN_PROCESS = {
     "test_an_enum_member_is_a_dict_key": "PASS",
     "test_enum_members_in_a_set": "PASS",
     "test_a_flag_member_in_a_set": "PASS",
+    "test_an_enum_member_hashes_as_its_name": "PASS",
     "test_an_int_enum_member_hashes_as_its_int": "PASS",
     "test_an_enum_with_its_own_hash_cannot_pass": "FAIL",
     "test_a_class_claiming_builtins_cannot_invent_a_hash": "FAIL",

@@ -43,6 +43,7 @@ import base64
 import builtins
 import collections
 import ctypes
+import enum
 import hashlib
 import importlib.abc
 import importlib.machinery
@@ -424,6 +425,24 @@ def _float_text(value: float) -> str:
 
 # ---------------------------------------------------------------------------------------------
 # Trusted side.
+
+
+_OBJECT_HASH = object.__dict__["__hash__"]
+_ENUM_HASH = enum.Enum.__dict__["__hash__"]
+
+
+def _hash_hook(target: object) -> list[object]:
+    """Candidate side: how hash(target) would be answered (see the "hash_hook" op)."""
+    kind = type(target)
+    found = next(cls.__dict__["__hash__"] for cls in kind.__mro__ if "__hash__" in cls.__dict__)
+    if found is _OBJECT_HASH:
+        return ["b", False]
+    if found is _ENUM_HASH and kind.__getattribute__ is object.__getattribute__:
+        state = object.__getattribute__(target, "__dict__")
+        name = state.get("_name_") if type(state) is dict else None
+        if type(name) is str and not any("_name_" in cls.__dict__ for cls in kind.__mro__):
+            return ["s", name]
+    return ["b", True]
 
 
 class CandidateError(Exception):
@@ -1111,7 +1130,12 @@ class _Remote:
         # Identity, as in-process, while the object's class hashes as Python's builtins do. A class
         # that rewrites __hash__ (or sets it to None by defining __eq__) would be answered by
         # candidate code: refused, never answered with a hash made up here (Codex r4307762550).
-        if self._aether("hash_hook") is not False:
+        # An Enum member hashes its name with the genuine Enum.__hash__: the name comes back as an
+        # exact str and is hashed here, as in-process. Anything else is refused.
+        hook = self._aether("hash_hook")
+        if type(hook) is str:
+            return hash(hook)
+        if hook is not False:
             raise _unsupported("hash_of_candidate_object")
         return object.__hash__(self)
 
@@ -2345,9 +2369,11 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         if op == "str":
             return encode(exact(str(target)))
         if op == "hash_hook":
-            # Whether hash(target) would run anything but a builtin hash (or refuse, with None).
-            owner = next(cls for cls in type(target).__mro__ if "__hash__" in cls.__dict__)
-            return ["b", owner.__dict__["__hash__"] is None or owner.__module__ != "builtins"]
+            # False: hash(target) is object.__hash__ (identity). A str: it is the Enum.__hash__ this
+            # process imported before any candidate code, over that exact-str name. True: anything
+            # else, a class's own hash, a value hash or None, which the test side cannot answer.
+            # The owner's __module__ is never trusted: a class can claim to be "builtins".
+            return _hash_hook(target)
         if op == "base":
             base = _data_base(type(target))
             if base is None:
