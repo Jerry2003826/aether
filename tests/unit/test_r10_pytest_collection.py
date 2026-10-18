@@ -201,3 +201,48 @@ def test_a_hung_test_fails_alone_and_the_rest_of_its_class_still_runs(tmp_path: 
         "test_hang.TestSeq.test_d_fails": ("FAIL", "AssertionError"),
     }, output
     assert code == 1, output
+
+
+_CONFIGURED_APP = "CALLS = []\n\ndef configure(tag):\n    CALLS.append(tag)\n\ndef calls():\n    return list(CALLS)\n"
+
+
+@pytest.mark.parametrize(
+    ("setup", "teardown"),
+    [("setup_module(module)", "teardown_module(module)"), ("setUpModule()", "tearDownModule()")],
+    ids=["pytest_xunit", "unittest"],
+)
+def test_module_setup_and_teardown_run_once_around_all_of_the_modules_tests_and_keep_state(
+    tmp_path: Path, setup: str, teardown: str
+) -> None:
+    """Codex 16:41 (coding_protocol.py:1160): module-level setup and teardown run once for the whole module,
+    as under pytest, and the module state they build (trusted globals and the candidate's own state) is
+    still there for every test of the module, not rebuilt or lost per test."""
+    work = tmp_path / "work"
+    marks = tmp_path / "marks.txt"
+    _write(
+        work,
+        {
+            "app.py": _CONFIGURED_APP,
+            "test_mod.py": (
+                "import app\n\n"
+                "STATE = []\n\n"
+                f"def {setup}:\n"
+                "    STATE.append('setup')\n"
+                "    app.configure('module')\n"
+                f"    open({str(marks)!r}, 'a').write('s')\n\n"
+                f"def {teardown}:\n"
+                f"    open({str(marks)!r}, 'a').write('t')\n\n"
+                "def test_first():\n"
+                "    assert STATE == ['setup']\n"
+                "    assert app.calls() == ['module']\n"
+                "    app.configure('first')\n\n"
+                "def test_second():\n"
+                "    assert STATE == ['setup']\n"
+                "    assert app.calls() == ['module', 'first']\n"
+            ),
+        },
+    )
+    code, verdicts, output = _grade(work)
+    assert verdicts == {"test_mod.test_first": ("PASS", ""), "test_mod.test_second": ("PASS", "")}, output
+    assert code == 0, output
+    assert marks.read_text(encoding="utf-8") == "st", output
