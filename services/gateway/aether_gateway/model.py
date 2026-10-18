@@ -147,15 +147,18 @@ def coding_reservation_gap(
     pending_tokens: int,
     call_reserve_tokens: int | None,
     call_tokens: int = CODING_CALL_OUTPUT_CAP,
+    unknown_tokens: int = 0,
 ) -> int | None:
     """Tokens to append so the next call fits. None means this reservation does not grow.
 
-    call_tokens is this call's estimated input plus the output cap.
+    call_tokens is this call's estimated input plus the output cap. unknown_tokens is
+    the hold of calls that were sent without usable usage; it stays occupied because
+    those calls are charged at their reservation, so the next call is admitted on top.
     """
     if call_reserve_tokens is None or call_reserve_tokens < 1:
         return None
     allowance = max(call_reserve_tokens, call_tokens)
-    need = measured_tokens + pending_tokens + allowance
+    need = measured_tokens + unknown_tokens + pending_tokens + allowance
     if reserved_tokens >= need:
         return 0
     return need - reserved_tokens
@@ -986,16 +989,18 @@ class ModelGateway:
             reserved_tokens = _count(detail.get("reserved_tokens"))
             measured = _count(detail.get("measured_input_tokens")) + _count(detail.get("measured_output_tokens"))
             pending = _count(detail.get("pending_tokens"))
+            unknown = _count(detail.get("unknown_reserved_tokens"))
             call_reserve = _positive_int(detail.get("call_reserve_tokens"))
             gap = coding_reservation_gap(
                 reserved_tokens=reserved_tokens,
                 measured_tokens=measured,
+                unknown_tokens=unknown,
                 pending_tokens=pending,
                 call_reserve_tokens=call_reserve,
                 call_tokens=call_tokens,
             )
             if gap is None:
-                if reserved_tokens < 1 or measured + pending + call_tokens > reserved_tokens:
+                if reserved_tokens < 1 or measured + unknown + pending + call_tokens > reserved_tokens:
                     raise GatewayDenied("budget_exceeded")
             elif gap > 0:
                 call_micro = _positive_int(detail.get("call_reserve_micro_usd")) or call_reserve or gap
