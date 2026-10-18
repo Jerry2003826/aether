@@ -1,13 +1,14 @@
-"""A trusted conftest.py the bound suite relies on is refused, never silently dropped (Codex r4308195947).
+"""A trusted conftest.py runs for the tests it applies to, as under plain pytest (Codex r4308195947).
 
 Grading runs pytest with `--noconftest` (ADR-F44: the snapshot bridge does not load conftest files).
-A baseline conftest's autouse fixture, teardown or hook therefore never ran: a test that fails under
-normal pytest because of it passed here, and a patch that did not pass the complete bound suite could
-be published. Running the conftest in the trusted process is not possible through the snapshot bridge,
-so a suite with a baseline conftest.py that pytest would load for one of its test modules (in the
-module's directory or a parent up to the root) fails as a whole with `unsupported_conftest` and no
-test runs. A conftest pytest would not load for any test module is irrelevant; a conftest that is not
-in the baseline (the agent's) is removed by the restore and never configures grading.
+A baseline conftest's autouse fixture, teardown, fixtures or hooks therefore never ran: a test that
+fails under normal pytest because of it passed here, and one that needs its fixture failed. Now the
+grader hands each test process the BASELINE's conftest.py files on that module's directory chain (root
+first, read from the baseline, never from the graded workspace), and the test process loads them from
+those bytes as trusted plugins before the test module; `--noconftest` stays, so pytest itself still
+reads no conftest from the workspace. One that is not in the baseline (the agent's) is never loaded.
+A conftest that names `pytest_plugins` would make pytest import plugins by name, which the bridge does
+not do: the suite fails as unsupported_conftest:pytest_plugins, by name, and no test runs.
 """
 
 from __future__ import annotations
@@ -50,7 +51,15 @@ def _grade(tmp_path: Path, baseline: dict[str, str], job: dict[str, str] | None 
     return {case["name"]: (case["verdict"], case["detail"]) for case in signed[0]["cases"]}
 
 
-_REFUSED = {"suite": ("FAIL", "unsupported_conftest")}
+_PLUGINS_REFUSED = {"suite": ("FAIL", "unsupported_conftest:pytest_plugins")}
+_FIXTURE = "import pytest\n\nimport app\n\n@pytest.fixture\ndef answer():\n    return app.value()\n"
+_USES_FIXTURE = "import app\n\ndef test_value(answer):\n    assert app.value() == answer\n"
+_HOOK = "def pytest_runtest_setup(item):\n    raise AssertionError('setup hook refused')\n"
+_PASS = {"test_app.test_value": ("PASS", "")}
+
+
+def _verdicts(found: dict) -> dict:
+    return {name: verdict for name, (verdict, _detail) in found.items()}
 
 
 def test_the_conftest_fails_the_test_under_plain_pytest(tmp_path: Path) -> None:
@@ -62,37 +71,60 @@ def test_the_conftest_fails_the_test_under_plain_pytest(tmp_path: Path) -> None:
     assert "1 passed, 1 error" in completed.stdout, completed.stdout[-2000:]
 
 
-def test_a_root_conftest_refuses_the_suite(tmp_path: Path) -> None:
-    assert _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": _STRICT}) == _REFUSED
+def test_a_root_conftest_teardown_fails_the_test(tmp_path: Path) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": _STRICT})
+    assert _verdicts(found) == {"test_app.test_value": "FAIL"}
+    assert "teardown check failed" in found["test_app.test_value"][1] or "AssertionError" in found["test_app.test_value"][1]
 
 
-def test_a_conftest_in_the_test_directory_refuses_the_suite(tmp_path: Path) -> None:
-    assert _grade(tmp_path, {"app.py": _APP, "tests/test_app.py": _TEST, "tests/conftest.py": _STRICT}) == _REFUSED
+def test_a_conftest_in_the_test_directory_applies(tmp_path: Path) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "tests/test_app.py": _TEST, "tests/conftest.py": _STRICT})
+    assert _verdicts(found) == {"tests.test_app.test_value": "FAIL"}
+
+
+@pytest.mark.parametrize("name", ["conftest.py", "pkg/conftest.py"])
+def test_a_conftest_above_a_nested_test_module_applies(tmp_path: Path, name: str) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "pkg/sub/test_app.py": _TEST, name: _STRICT})
+    assert _verdicts(found) == {"pkg.sub.test_app.test_value": "FAIL"}
+
+
+def test_a_conftest_fixture_that_calls_candidate_code_is_provided(tmp_path: Path) -> None:
+    assert _grade(tmp_path, {"app.py": _APP, "test_app.py": _USES_FIXTURE, "conftest.py": _FIXTURE}) == _PASS
+
+
+def test_a_conftest_hook_runs(tmp_path: Path) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": _HOOK})
+    assert _verdicts(found) == {"test_app.test_value": "FAIL"}
 
 
 def test_a_conftest_no_test_module_loads_is_irrelevant(tmp_path: Path) -> None:
     found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "other/conftest.py": _STRICT})
-    assert found == {"test_app.test_value": ("PASS", "")}
+    assert found == _PASS
 
 
-def test_a_conftest_that_is_not_in_the_baseline_does_not_refuse(tmp_path: Path) -> None:
+def test_a_conftest_that_is_not_in_the_baseline_is_never_loaded(tmp_path: Path) -> None:
     baseline = {"app.py": _APP, "test_app.py": _TEST}
     found = _grade(tmp_path, baseline, {**baseline, "conftest.py": _STRICT})
-    assert found == {"test_app.test_value": ("PASS", "")}
+    assert found == _PASS
 
 
-@pytest.mark.parametrize("text", ["", "# only a comment\n", '"""Docstring."""\npass\n'])
-def test_an_inert_conftest_does_not_refuse(tmp_path: Path, text: str) -> None:
+def test_the_baseline_conftest_is_loaded_even_if_the_workspace_copy_differs(tmp_path: Path) -> None:
+    baseline = {"app.py": _APP, "test_app.py": _TEST, "conftest.py": _STRICT}
+    found = _grade(tmp_path, baseline, {**baseline, "conftest.py": ""})
+    assert _verdicts(found) == {"test_app.test_value": "FAIL"}
+
+
+@pytest.mark.parametrize("text", ["", "# only a comment\n", '"""Docstring."""\npass\n', "import pytest\n", "def pytest_configure(config):\n    pass\n"])
+def test_a_harmless_conftest_changes_nothing(tmp_path: Path, text: str) -> None:
     found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": text})
-    assert found == {"test_app.test_value": ("PASS", "")}
+    assert found == _PASS
 
 
-@pytest.mark.parametrize("text", ["import pytest\n", "def pytest_configure(config):\n    pass\n", "this is not python\n"])
-def test_a_conftest_that_does_anything_refuses_the_suite(tmp_path: Path, text: str) -> None:
-    assert _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": text}) == _REFUSED
+def test_a_broken_conftest_fails_the_tests(tmp_path: Path) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": "this is not python\n"})
+    assert _verdicts(found) == {"test_app.test_value": "FAIL"}
 
 
-@pytest.mark.parametrize("name", ["conftest.py", "pkg/conftest.py"])
-def test_a_conftest_above_a_nested_test_module_refuses_the_suite(tmp_path: Path, name: str) -> None:
-    files = {"app.py": _APP, "pkg/sub/test_app.py": _TEST, name: _STRICT}
-    assert _grade(tmp_path, files) == _REFUSED
+@pytest.mark.parametrize("text", ["pytest_plugins = ['helper']\n", "pytest_plugins: list = []\n"])
+def test_a_conftest_naming_plugins_is_refused_by_name(tmp_path: Path, text: str) -> None:
+    assert _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": text}) == _PLUGINS_REFUSED
