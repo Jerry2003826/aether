@@ -952,9 +952,9 @@ def _publish(
         fencing_token=int(row["fencing_token"]),
         operation_id=str(row["operation_id"]),
     )
-    patch = _published_patch(workspace, sandbox)
+    patch, patch_error = _published_patch_or_error(workspace, sandbox, job_id=str(row["id"]))
     result = json.dumps({"kind": "aether.coding_test_result", **sandbox["result"]}, ensure_ascii=False, separators=(",", ":")).encode()
-    events = _events(sandbox, error_code, manifest=manifest, patch=patch)
+    events = _events(sandbox, error_code, manifest=manifest, patch=patch, patch_error=patch_error)
     return _store_terminal(
         database,
         store,
@@ -993,14 +993,16 @@ def _publish_stop(
         fencing_token=int(row["fencing_token"]),
         operation_id=str(row["operation_id"]),
     )
-    patch = unified_patch(workspace["base_files"], workspace["files"]).encode()
+    patch, patch_error = _candidate_patch(workspace, job_id=str(row["id"]))
     stdout, stderr = _tails(logs)
     result = json.dumps(
         {"kind": "aether.coding_test_result", "passed": 0, "failed": 0, "errors": 1, "cases": [], "error_code": error_code},
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode()
-    events = _stop_events(error_code=error_code, manifest=manifest, patch=patch, stdout=stdout, stderr=stderr, cancel=cancel)
+    events = _stop_events(
+        error_code=error_code, manifest=manifest, patch=patch, stdout=stdout, stderr=stderr, cancel=cancel, patch_error=patch_error
+    )
     return _store_terminal(
         database,
         store,
@@ -1071,7 +1073,9 @@ def _fail(
         )
 
 
-def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[str], patch: bytes) -> bytes:
+def _events(
+    sandbox: dict[str, Any], error_code: str | None, *, manifest: list[str], patch: bytes, patch_error: str | None = None
+) -> bytes:
     stdout, stderr = _tails(sandbox)
     body = {
         "kind": "aether.coding_events",
@@ -1094,10 +1098,14 @@ def _events(sandbox: dict[str, Any], error_code: str | None, *, manifest: list[s
         "stdout_tail": stdout,
         "stderr_tail": stderr,
     }
+    if patch_error:
+        body["patch_error"] = patch_error
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
 
 
-def _stop_events(*, error_code: str, manifest: list[str], patch: bytes, stdout: str, stderr: str, cancel: bool) -> bytes:
+def _stop_events(
+    *, error_code: str, manifest: list[str], patch: bytes, stdout: str, stderr: str, cancel: bool, patch_error: str | None = None
+) -> bytes:
     body: dict[str, Any] = {
         "kind": "aether.coding_events",
         "image": JOB_IMAGE,
@@ -1113,6 +1121,8 @@ def _stop_events(*, error_code: str, manifest: list[str], patch: bytes, stdout: 
     }
     if cancel:
         body["cancel_state"] = "confirmed"
+    if patch_error:
+        body["patch_error"] = patch_error
     return json.dumps(body, ensure_ascii=False, separators=(",", ":")).encode()
 
 
@@ -1470,6 +1480,29 @@ def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, An
     if patch is not None:
         return patch.encode()
     return unified_patch(workspace["base_files"], workspace["files"]).encode()
+
+
+def _published_patch_or_error(
+    workspace: dict[str, dict[str, str]], sandbox: dict[str, Any], *, job_id: str
+) -> tuple[bytes, str | None]:
+    """The agent's patch, else the candidate patch; see _candidate_patch for when git cannot write it."""
+    patch = _agent_patch(sandbox)
+    if patch is not None:
+        return patch.encode(), None
+    return _candidate_patch(workspace, job_id=job_id)
+
+
+def _candidate_patch(workspace: dict[str, dict[str, str]], *, job_id: str) -> tuple[bytes, str | None]:
+    """The candidate files' patch, or the unchanged marker and the reason when git cannot write it.
+
+    A patch that cannot be produced is no reason to change how the job ended: the caller keeps its
+    own state and error code, and the events record patch_error next to them.
+    """
+    try:
+        return unified_patch(workspace["base_files"], workspace["files"]).encode(), None
+    except WorkspaceError as exc:
+        _LOG.warning("coding_patch_unavailable job=%s error=%s", job_id, exc.code)
+        return UNCHANGED_PATCH.encode(), exc.code
 
 
 def _agent_completed(body: dict[str, Any]) -> bool:
