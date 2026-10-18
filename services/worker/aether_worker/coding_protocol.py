@@ -262,7 +262,11 @@ _CANDIDATE_WROTE_FILES = "candidate_wrote_files"
 
 
 def _files_state(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
-    """Every entry under the candidate's src/ and tmp/ (bytecode caches aside), by lstat, never followed.
+    """Every entry under the candidate's src/ (bytecode caches aside), by lstat, never followed.
+
+    Not counted: tmp/, which the test process uses as its own TMPDIR (see _run_test_process), so both
+    sides see the same temporary files as in-process; and `__pycache__` directories anywhere under src/,
+    which Python itself writes on import.
 
     A file the candidate created, removed, rewrote or renamed changes it; one it reads does not. A
     directory this side cannot read counts as a change.
@@ -270,7 +274,7 @@ def _files_state(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
     found: dict[str, tuple[int, ...]] = {}
     if sandbox is None:
         return found
-    pending = [(label, Path(sandbox[label])) for label in ("src", "tmp")]
+    pending = [("src", Path(sandbox["src"]))]
     while pending:
         label, folder = pending.pop()
         try:
@@ -1837,10 +1841,17 @@ def _run_test_process(
     request_read, request_write = os.pipe()
     reply_read, reply_write = os.pipe()
     try:
+        env = _child_env()
+        sandbox = request.get("sandbox")
+        if isinstance(sandbox, dict):
+            # The candidate's TMPDIR as well: tempfile.gettempdir(), tmp_path and a scratch file are the
+            # same for the test and for candidate code, as in-process (ADR-F44).
+            for name in ("TMPDIR", "TEMP", "TMP"):
+                env[name] = str(sandbox["tmp"])
         process = subprocess.Popen(  # this interpreter running this file
             [sys.executable, "-I", str(Path(__file__).resolve()), "--runner", str(request_read), str(reply_write), str(os.getpid())],
             cwd=root,
-            env=_child_env(),
+            env=env,
             stdin=subprocess.DEVNULL,
             # Nothing a test process prints reaches the stdout the signed result goes to.
             stdout=sys.stderr.fileno(),
