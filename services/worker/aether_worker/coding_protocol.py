@@ -596,6 +596,9 @@ class _Session:
         self._synced: dict[int, str] = {}
         # One proxy per candidate handle, so the same candidate object is the same object to the test.
         self._remotes: dict[int, _Remote] = {}
+        # The candidate's tuples and frozensets by its reference id (see _decode, "R"), so the same
+        # candidate tuple is the same tuple to the test wherever it is sent (Codex r4309057203).
+        self._values: dict[int, object] = {}
         # The candidate's src/ and tmp/ as they were before it started (see _files_state), and whether
         # it has changed them since: its files are never synced to this side (ADR-F44).
         self._files: dict[str, tuple[int, ...]] | None = None
@@ -912,6 +915,15 @@ def _decode(node: object, session: _Session, depth: int = 0) -> object:
     tag, rest = node[0], node[1:]
     if tag == "n" and not rest:
         return None
+    if tag == "R" and len(rest) == 2 and type(rest[0]) is int:
+        # A candidate tuple or frozenset under its reference id: every occurrence of the same candidate
+        # object is this one object, as in-process. Each occurrence carries the value, so one the test
+        # never received (a reply that failed before it was sent) changes nothing.
+        if not (isinstance(rest[1], list) and rest[1] and rest[1][0] in {"t", "F"}):
+            raise CandidateError("candidate_protocol")
+        if rest[0] not in session._values:
+            session._values[rest[0]] = _decode(rest[1], session, depth + 1)
+        return session._values[rest[0]]
     if len(rest) != 1 and tag not in {"h", "v"}:
         raise CandidateError("candidate_protocol")
     value = rest[0] if rest else None
@@ -2515,6 +2527,10 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             kept[id(value)] = handle
         return ["h", handle, type(value).__qualname__]
 
+    # Tuples and frozensets sent to the test, by id: one reference id per object, kept alive here so its
+    # id() is never another object's while the process lasts (Codex r4309057203).
+    sent: dict[int, tuple[int, object]] = {}
+
     def encode(value: object, depth: int = 0) -> list[object]:
         if depth > _MAX_DEPTH:
             raise ValueError("value_too_deep")
@@ -2522,6 +2538,11 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             return keep(value)
         if type(value) in _MIRRORED:
             return mirror(value)
+        if type(value) in (tuple, frozenset):
+            found = sent.get(id(value))
+            if found is None:
+                found = sent[id(value)] = (len(sent) + 1, value)
+            return ["R", found[0], _encode_data(value, depth, encode)]
         if value is None or type(value) in _EXACT_DATA:
             return _encode_data(value, depth, encode)
         base = _data_base(type(value))
