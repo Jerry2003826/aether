@@ -52,6 +52,8 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 
 每请求先按输入token上界+max_output与已批准价格版本reserve；结果按actual usage结算，cache tokens/reasoning tokens按该provider计费规则记录。estimate与actual分列。超时且可能已计费时保留reservation为unknown，人工/provider对账后结算；强行释放会导致重复花费。
 
+编码作业的金额费率是 `AETHER_CODING_CALL_RESERVE_MICRO_USD / AETHER_CODING_CALL_RESERVE_TOKENS`（默认都是 4096），在预留时写到行上，结算按每次调用 token×费率向上取整后求和，放行下一次调用也按同样取整核对并追加冻结金额，每次调用收取的金额记在它自己的请求行上，token 另行记账（ADR-F46）。未设置或无效时费率是 1 micro-USD/token，这只是记账单位而非供应商价格，`spent_micro_usd` 不代表实际美元；worker 启动时会记一条 `coding_rate_default ... accounting_unit_not_a_price` 警告。需要按真实价格限额时，按供应商每 token 单价设置 micro 变量。
+
 预算是尽力约束，若provider返回超过估算的实际费用必须真实记账、阻断后续请求、告警。不能承诺分布式外部账单永远绝对不超出估计，但本地并发reservation决策必须原子且无竞争漏洞。
 
 ## 6. 观察与日志
