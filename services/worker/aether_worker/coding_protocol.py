@@ -194,40 +194,41 @@ def _baseline_modules() -> frozenset[str] | None:
     path = os.environ.pop(_BASELINE_ENV, "")
     if not path:
         return None
+    global _BASELINE_DIR
+    _BASELINE_DIR = Path(path)
     _MARKED = grading_files.marked_grading_files(Path(path))
     return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
 
 
 _UNSUPPORTED_CONFTEST = "unsupported_conftest"
+_BASELINE_DIR: Path | None = None
 
 
-def _inert(source: bytes | None) -> bool:
-    """A conftest with nothing but a docstring or `pass` (comments, blank): loading it does nothing."""
-    if source is None:
-        return False
+def _names_plugins(source: bytes) -> bool:
+    """A conftest that sets `pytest_plugins` at module level (pytest would import those by name)."""
     try:
         body = ast.parse(source).body
     except (SyntaxError, ValueError):
         return False
-    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
-        body = body[1:]
-    return all(isinstance(statement, ast.Pass) for statement in body)
+    for statement in body:
+        targets = statement.targets if isinstance(statement, ast.Assign) else [getattr(statement, "target", None)]
+        if any(isinstance(target, ast.Name) and target.id == "pytest_plugins" for target in targets):
+            return True
+    return False
 
 
-def _loaded_conftests(baseline: frozenset[str] | None, modules: list[str], sources: dict[str, bytes]) -> list[str]:
-    """The baseline conftest.py files pytest would load for one of the test modules (in its directory or
-    a parent up to the root) and that would do something there. Without a baseline (a direct run) every
-    file is the workspace's own and no conftest is trusted (they stay ignored, `--noconftest`)."""
-    if baseline is None:
+def _trusted_conftests(baseline: frozenset[str] | None, relative: str) -> list[tuple[str, bytes]]:
+    """The BASELINE's conftest.py files pytest would load for one test module (its directory and each
+    parent up to the root), root first, with the baseline's bytes: never the graded workspace's copy.
+    Without a baseline (a direct run) every file is the workspace's own and none is loaded."""
+    if baseline is None or _BASELINE_DIR is None:
         return []
+    parts = relative.split("/")[:-1]
     found = []
-    for name in sorted(baseline):
-        parts = name.split("/")
-        if parts[-1] != "conftest.py" or _inert(sources.get(name)):
-            continue
-        folder = "/".join(parts[:-1])
-        if any(not folder or module.startswith(folder + "/") for module in modules):
-            found.append(name)
+    for depth in range(len(parts) + 1):
+        name = "/".join([*parts[:depth], "conftest.py"])
+        if name in baseline:
+            found.append((name, (_BASELINE_DIR / name).read_bytes()))
     return found
 
 
@@ -1958,10 +1959,12 @@ def run_suite(root: Path) -> dict[str, Any]:
     sources = {name: path.read_bytes() for name, path in files.items()}
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
-    if _loaded_conftests(baseline_modules, [relative for relative, _, _ in tests], sources):
-        # Before any test or candidate process exists: pytest would run this trusted conftest's fixtures
-        # and hooks, which grading cannot (Codex r4308195947), so the suite is not graded without them.
-        return {"passed": 0, "failed": 1, "errors": 0, "cases": [_case("suite", "FAIL", _UNSUPPORTED_CONFTEST)], "elapsed_seconds": 0.0}
+    conftests = {relative: _trusted_conftests(baseline_modules, relative) for relative, _, _ in tests}
+    if any(_names_plugins(data) for found in conftests.values() for _, data in found):
+        # Before any test or candidate process exists: pytest would import the named plugins, which
+        # the snapshot bridge does not do (Codex r4308195947), so the suite is refused by name.
+        reason = _UNSUPPORTED_CONFTEST + ":pytest_plugins"
+        return {"passed": 0, "failed": 1, "errors": 0, "cases": [_case("suite", "FAIL", reason)], "elapsed_seconds": 0.0}
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
     # What candidate code may see, read before any of it runs; and what it must never read.
     candidate_files, over_cap = _candidate_files(root)
@@ -2000,6 +2003,8 @@ def run_suite(root: Path) -> dict[str, Any]:
             "call_timeout": call_timeout,
             "declared": None if baseline_modules is None else sorted(baseline_modules),
             "marked": sorted(_MARKED),
+            # The baseline conftests this module's tests run with (see _trusted_conftests).
+            "conftests": [[name, base64.b64encode(data).decode("ascii")] for name, data in conftests[relative]],
         }
         outcome = _grade_module(root, request, declared, unsupported, test_timeout, deadline, candidate, lambda: _tampered(root, baseline))
         if outcome is None:
@@ -2119,7 +2124,9 @@ def _pytest_arguments(root: Path, target: Path) -> list[str]:
     ]
 
 
-def _run_pytest(root: Path, relative: str, module: types.ModuleType, request: dict[str, Any], emit) -> str:
+def _run_pytest(
+    root: Path, relative: str, module: types.ModuleType, request: dict[str, Any], emit, plugins: list[types.ModuleType] = ()
+) -> str:
     """Run one test module's tests with pytest in this test process; "done" or "restart".
 
     Replies go through `emit`: the collected test names, then one result per test as it finishes.
@@ -2249,8 +2256,19 @@ def _run_pytest(root: Path, relative: str, module: types.ModuleType, request: di
                 self.session.shouldstop = "aether: candidate process ended"
 
     bridge = _Bridge()
-    pytest.main(_pytest_arguments(root, target), plugins=[bridge])
+    # The bridge first; then the trusted conftests, root first, so a nearer one's fixture wins.
+    pytest.main(_pytest_arguments(root, target), plugins=[bridge, *plugins])
     return bridge.ending
+
+
+def _load_conftest(name: str, data: bytes, root: Path) -> types.ModuleType:
+    """One baseline conftest, executed from its bytes in this (trusted) process under a name no test
+    module can take, the way pytest would before the test module."""
+    label = "aether_conftest." + name[:-3].replace("/", ".")
+    module = importlib.util.module_from_spec(_spec(label, root / name, data))
+    sys.modules[label] = module
+    module.__spec__.loader.exec_module(module)
+    return module
 
 
 def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
@@ -2270,6 +2288,9 @@ def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
     _refuse_processes()
     try:
         try:
+            # Trusted, from the baseline's bytes, before the test module as pytest would; a conftest
+            # that fails to import fails the module's tests, as pytest stops before running any.
+            plugins = [_load_conftest(name, base64.b64decode(data), root) for name, data in request.get("conftests") or ()]
             if import_name:
                 module = importlib.import_module(import_name)
             else:
@@ -2281,7 +2302,7 @@ def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
         except BaseException as exc:  # noqa: BLE001 - any failure to import is a FAIL verdict
             emit({"kind": "import_failed", "detail": _failure_detail(exc)})
             return "done"
-        return _run_pytest(root, relative, module, request, emit)
+        return _run_pytest(root, relative, module, request, emit, plugins)
     finally:
         _Current.session.close()
         _Current.session = None

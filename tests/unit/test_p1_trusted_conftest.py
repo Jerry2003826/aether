@@ -121,8 +121,9 @@ def test_a_harmless_conftest_changes_nothing(tmp_path: Path, text: str) -> None:
 
 
 def test_a_broken_conftest_fails_the_tests(tmp_path: Path) -> None:
+    # Like a test module that fails to import: the module fails by name and none of its tests runs.
     found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": "this is not python\n"})
-    assert _verdicts(found) == {"test_app.test_value": "FAIL"}
+    assert found == {"test_app": ("FAIL", "import:NameError")}
 
 
 @pytest.mark.parametrize("text", ["pytest_plugins = ['helper']\n", "pytest_plugins: list = []\n"])
