@@ -81,6 +81,17 @@ def test_a_conftest_that_is_not_in_the_baseline_does_not_refuse(tmp_path: Path) 
     assert found == {"test_app.test_value": ("PASS", "")}
 
 
+@pytest.mark.parametrize("text", ["", "# only a comment\n", '"""Docstring."""\npass\n'])
+def test_an_inert_conftest_does_not_refuse(tmp_path: Path, text: str) -> None:
+    found = _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": text})
+    assert found == {"test_app.test_value": ("PASS", "")}
+
+
+@pytest.mark.parametrize("text", ["import pytest\n", "def pytest_configure(config):\n    pass\n", "this is not python\n"])
+def test_a_conftest_that_does_anything_refuses_the_suite(tmp_path: Path, text: str) -> None:
+    assert _grade(tmp_path, {"app.py": _APP, "test_app.py": _TEST, "conftest.py": text}) == _REFUSED
+
+
 @pytest.mark.parametrize("name", ["conftest.py", "pkg/conftest.py"])
 def test_a_conftest_above_a_nested_test_module_refuses_the_suite(tmp_path: Path, name: str) -> None:
     files = {"app.py": _APP, "pkg/sub/test_app.py": _TEST, name: _STRICT}

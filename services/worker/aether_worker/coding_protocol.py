@@ -38,6 +38,7 @@ processes out of their /proc fd/mem/environ and ptrace.
 
 from __future__ import annotations
 
+import ast
 import base64
 import builtins
 import collections
@@ -193,6 +194,39 @@ def _baseline_modules() -> frozenset[str] | None:
         return None
     _MARKED = grading_files.marked_grading_files(Path(path))
     return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
+
+
+_UNSUPPORTED_CONFTEST = "unsupported_conftest"
+
+
+def _inert(source: bytes | None) -> bool:
+    """A conftest with nothing but a docstring or `pass` (comments, blank): loading it does nothing."""
+    if source is None:
+        return False
+    try:
+        body = ast.parse(source).body
+    except (SyntaxError, ValueError):
+        return False
+    if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant) and isinstance(body[0].value.value, str):
+        body = body[1:]
+    return all(isinstance(statement, ast.Pass) for statement in body)
+
+
+def _loaded_conftests(baseline: frozenset[str] | None, modules: list[str], sources: dict[str, bytes]) -> list[str]:
+    """The baseline conftest.py files pytest would load for one of the test modules (in its directory or
+    a parent up to the root) and that would do something there. Without a baseline (a direct run) every
+    file is the workspace's own and no conftest is trusted (they stay ignored, `--noconftest`)."""
+    if baseline is None:
+        return []
+    found = []
+    for name in sorted(baseline):
+        parts = name.split("/")
+        if parts[-1] != "conftest.py" or _inert(sources.get(name)):
+            continue
+        folder = "/".join(parts[:-1])
+        if any(not folder or module.startswith(folder + "/") for module in modules):
+            found.append(name)
+    return found
 
 
 def _shared_memory() -> str | None:
@@ -1747,6 +1781,10 @@ def run_suite(root: Path) -> dict[str, Any]:
     sources = {name: path.read_bytes() for name, path in files.items()}
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
+    if _loaded_conftests(baseline_modules, [relative for relative, _, _ in tests], sources):
+        # Before any test or candidate process exists: pytest would run this trusted conftest's fixtures
+        # and hooks, which grading cannot (Codex r4308195947), so the suite is not graded without them.
+        return {"passed": 0, "failed": 1, "errors": 0, "cases": [_case("suite", "FAIL", _UNSUPPORTED_CONFTEST)], "elapsed_seconds": 0.0}
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
     # What candidate code may see, read before any of it runs; and what it must never read.
     candidate_files, over_cap = _candidate_files(root)
