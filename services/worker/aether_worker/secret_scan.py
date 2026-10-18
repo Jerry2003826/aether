@@ -54,10 +54,13 @@ def redact_trace(text: str) -> str:
     return redacted
 
 
-# Armor lines (RSA, EC, OPENSSH, ENCRYPTED, ... PRIVATE KEY). The label never holds a dash, so a match
-# attempt stops at the next dash instead of backtracking over the rest of the text (linear time).
-_KEY_BEGIN = re.compile(r"-----BEGIN[ A-Z0-9_]*PRIVATE KEY-----")
-_KEY_END = re.compile(r"-----END[ A-Z0-9_]*PRIVATE KEY-----")
+# Armor lines (RSA, EC, OPENSSH, ENCRYPTED, FOO-BAR, ... PRIVATE KEY). A label word may hold single
+# hyphens between its characters (RFC 7468), never two in a row. Words, hyphens and spaces each have
+# one place in the pattern, so a match attempt reads its run once and stops at the first character
+# that fits nowhere (no backtracking over the rest of the text: linear time).
+_LABEL = r" +(?:[A-Z0-9_]+(?:-[A-Z0-9_]+)* +)*"
+_KEY_BEGIN = re.compile(r"-----BEGIN" + _LABEL + r"PRIVATE KEY-----")
+_KEY_END = re.compile(r"-----END" + _LABEL + r"PRIVATE KEY-----")
 _LINE_BREAK = re.compile(r"\r?\n")
 _REDACTED_KEY = "[REDACTED PRIVATE KEY]"
 
