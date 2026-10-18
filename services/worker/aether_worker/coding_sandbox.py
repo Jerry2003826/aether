@@ -40,7 +40,7 @@ from aether_worker.sandbox_delegate import (
     remote_run,
     worker_delegates,
 )
-from aether_worker.secret_scan import redact_trace
+from aether_worker.secret_scan import redact_text
 
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
@@ -338,17 +338,20 @@ def _listed(container_id: str, listing: list[str]) -> bool:
     return any(item and (container_id.startswith(item) or item.startswith(container_id)) for item in listing)
 
 
-def _redacted(text: str) -> str:
-    return "".join(redact_trace(line) for line in text.splitlines(keepends=True))
+def _tail(text: str) -> str:
+    """The stored tail, redacted over the whole text (secret_scan.redact_text). When the tail cuts
+    the log, its partial first line goes: a secret cut in half there no longer matches any detector."""
+    tail = text[-LOG_TAIL_LIMIT:]
+    if len(text) > LOG_TAIL_LIMIT:
+        newline = tail.find("\n")
+        tail = "[cut]" + (tail[newline:] if newline >= 0 else "")
+    return redact_text(tail)
 
 
 def _log_tails(captured: dict[str, str]) -> dict[str, str]:
-    """The stored log tails, each line redacted with secret_scan.redact_trace: the sandbox entry logs
-    unexpected error messages unredacted (it has no scanner). The result is parsed from the raw capture."""
-    return {
-        "stdout": _redacted(captured["stdout"][-LOG_TAIL_LIMIT:]),
-        "stderr": _redacted(captured["stderr"][-LOG_TAIL_LIMIT:]),
-    }
+    """The stored log tails, each redacted with secret_scan.redact_text before it is kept anywhere.
+    The result is parsed from the raw capture, never from these."""
+    return {"stdout": _tail(captured["stdout"]), "stderr": _tail(captured["stderr"])}
 
 
 def container_log_tails(job_id: str, container_id: str | None = None) -> dict[str, str]:

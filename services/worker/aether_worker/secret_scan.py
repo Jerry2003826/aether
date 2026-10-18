@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -50,4 +51,33 @@ def redact_trace(text: str) -> str:
     redacted = text
     for value in values:
         redacted = redacted.replace(value, "[REDACTED]")
+    return redacted
+
+
+_KEY_BLOCK = re.compile(r"-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----.*?(?:-----END[ A-Z0-9_-]*PRIVATE KEY-----|\Z)", re.DOTALL)
+_KEY_END = re.compile(r"-----END[ A-Z0-9_-]*PRIVATE KEY-----")
+_LINE_BREAK = re.compile(r"\r?\n")
+_REDACTED_KEY = "[REDACTED PRIVATE KEY]"
+
+
+def redact_text(text: str) -> str:
+    """redact_trace over a whole multi-line text, such as a log tail.
+
+    Private-key blocks are masked whole, also when the text ends inside one or starts inside one
+    (an END line with no BEGIN before it: everything up to it goes). A secret wrapped across lines
+    is found in a copy with the line breaks removed and masked across them in the original.
+    """
+    redacted = _KEY_BLOCK.sub(_REDACTED_KEY, text)
+    orphan = _KEY_END.search(redacted)
+    if orphan is not None:
+        redacted = _REDACTED_KEY + redacted[orphan.end() :]
+    redacted = redact_trace(redacted)
+    joined = _LINE_BREAK.sub("", redacted)
+    wrapped = sorted(
+        {secret.secret_value for secret in scan_text(joined) if secret.secret_value and secret.secret_value not in redacted},
+        key=len,
+        reverse=True,
+    )
+    for value in wrapped:
+        redacted = re.sub(r"(?:\r?\n)?".join(re.escape(character) for character in value), "[REDACTED]", redacted)
     return redacted
