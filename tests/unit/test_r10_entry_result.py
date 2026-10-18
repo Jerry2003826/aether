@@ -126,3 +126,52 @@ def test_an_untouched_empty_file_is_not_a_change(tmp_path: Path) -> None:
     assert (
         _patch_after(tmp_path, {"app.py": "x = 1\n", "pkg/__init__.py": ""}, "") == ""
     )
+
+
+def _applied(tmp_path: Path, baseline: dict[str, str], patch: str) -> Path:
+    """A fresh copy of the baseline with the published patch applied by git apply."""
+    target = tmp_path / "applied"
+    for name, text in baseline.items():
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    target.mkdir(exist_ok=True)
+    (tmp_path / "published.diff").write_text(patch, encoding="utf-8")
+    done = subprocess.run(["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=target, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr + patch
+    return target
+
+
+def test_deleting_a_file_publishes_a_deletion_that_removes_it(tmp_path: Path) -> None:
+    """Codex P1 (openhands_sandbox_entry.py:355): applied, the patch removes the file, not empties it."""
+    baseline = {"app.py": "def value():\n    return 1\n", "legacy.py": "OLD = 1\nMORE = 2\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'legacy.py').unlink()\n")
+    assert "--- a/legacy.py\n+++ /dev/null\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert not (applied / "legacy.py").exists(), patch
+    assert (applied / "app.py").read_text(encoding="utf-8") == baseline["app.py"]
+
+
+def test_creating_a_file_publishes_a_creation_from_dev_null(tmp_path: Path) -> None:
+    baseline = {"app.py": "def value():\n    return 1\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'pkg').mkdir()\n(job / 'pkg' / 'fresh.py').write_text('NEW = 1\\n')\n")
+    assert "--- /dev/null\n+++ b/pkg/fresh.py\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert (applied / "pkg" / "fresh.py").read_text(encoding="utf-8") == "NEW = 1\n"
+
+
+def test_emptying_a_file_keeps_it_as_an_empty_file(tmp_path: Path) -> None:
+    """Present-but-empty is not missing: emptying a file is a modification, and the file stays."""
+    baseline = {"app.py": "def value():\n    return 1\n", "notes.py": "X = 1\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'notes.py').write_text('')\n")
+    assert "--- a/notes.py\n+++ b/notes.py\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert (applied / "notes.py").read_text(encoding="utf-8") == ""
+
+
+def test_a_deleted_and_an_edited_file_apply_together(tmp_path: Path) -> None:
+    baseline = {"app.py": "def value():\n    return 1\n", "old.py": "A = 1\n"}
+    change = "(job / 'old.py').unlink()\n(job / 'app.py').write_text('def value():\\n    return 42\\n')\n"
+    applied = _applied(tmp_path, baseline, _patch_after(tmp_path, baseline, change))
+    assert not (applied / "old.py").exists()
+    assert (applied / "app.py").read_text(encoding="utf-8") == "def value():\n    return 42\n"
