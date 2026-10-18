@@ -18,6 +18,7 @@ def test_runner_main_starts_serving_without_building_or_pulling(monkeypatch: pyt
     for name in ("build_openhands_sandbox", "coding_runtime_image", "ensure_openhands_sandbox"):
         if hasattr(runner_process, name):
             monkeypatch.setattr(runner_process, name, lambda *_a, _n=name, **_k: calls.append(_n))
+    monkeypatch.setattr(runner_process, "sweep_leftover_coding_containers", list)
     monkeypatch.setattr(runner_process, "serve_role", lambda _token, _health, _post: calls.append("serve_role"))
     runner_process.main()
     assert calls == ["serve_role"]

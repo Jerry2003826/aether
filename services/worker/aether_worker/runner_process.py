@@ -14,6 +14,7 @@ from aether_worker.coding_sandbox import (
     _bounded_logs,
     container_arguments,
     container_name,
+    sweep_leftover_coding_containers,
 )
 from aether_worker.net_guard import fixtures_enabled
 from aether_worker.openhands_image import (
@@ -47,6 +48,9 @@ def main() -> None:
     # The image is ensured by prepare_image before this role starts (role_launch), so the
     # worker's readiness wait never includes a first build on a clean host.
     started = probe_docker_daemon()
+    # Coding containers a previous run left behind (crash, unconfirmed stop, failed removal). Here,
+    # in the role that owns Docker and holds no verifier or provider secret, before any request.
+    sweep_leftover_coding_containers()
 
     def health() -> dict[str, str]:
         return {"role": "runner", **started}

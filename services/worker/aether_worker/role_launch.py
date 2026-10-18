@@ -166,8 +166,14 @@ def _gateway_env(token: str) -> dict[str, str]:
     return env
 
 
+# What the runner labels coding containers with and what its startup sweep selects by
+# (coding_sandbox.worker_instance_id / deployment_label): the worker's own values, so both match it.
+_RUNNER_IDENTITY_ENV = ("AETHER_WORKER_INSTANCE_ID", "AETHER_WORKER_STATE_DIR", "AETHER_DEPLOYMENT_ID")
+
+
 def _runner_env(token: str) -> dict[str, str]:
     env = _base_env()
+    env.update({name: os.environ[name] for name in _RUNNER_IDENTITY_ENV if os.environ.get(name)})
     env[_PROCESS_ROLE] = "runner"
     env[_LOOPBACK_TOKEN] = token
     return env

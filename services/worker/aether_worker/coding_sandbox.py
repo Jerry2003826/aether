@@ -689,13 +689,14 @@ def _leftover(details: dict[str, Any], now: datetime) -> bool:
 def sweep_leftover_coding_containers(*, now: datetime | None = None) -> list[str]:
     """Remove coding containers this worker instance started that have exited; the ids removed.
 
-    Run when the worker starts: a container that outlived its job (an unconfirmed stop, a failed rm -f,
-    a worker that died before removing it) keeps the job's output in Docker's own log until removed.
-    Several stacks share a Docker daemon, so only containers labelled aether.role=coding and this
-    worker's instance_label() (persisted, so a restart still matches), never by name or deployment
-    label; and only exited or dead ones past LEFTOVER_GRACE_SECONDS, state checked here as well as by
-    docker's filter. A running container is never removed. Best effort: nothing here stops the worker
-    from starting. With a delegated sandbox (the runner owns Docker) the worker does not sweep.
+    Run by the runner role when it starts, before it serves; never in the worker process. A container
+    that outlived its job (an unconfirmed stop, a failed rm -f, a worker that died before removing it)
+    keeps the job's output in Docker's own log until removed. Several stacks share a Docker daemon, so
+    only containers labelled aether.role=coding and this worker's instance_label() (persisted, so a
+    restart still matches), never by name or deployment label; and only exited or dead ones past
+    LEFTOVER_GRACE_SECONDS, state checked here as well as by docker's filter. A running container is
+    never removed. Best effort: nothing here stops the runner from starting. A process in the worker
+    role (it delegates Docker to the runner) never sweeps.
     """
     if worker_delegates():
         _LOG.info("coding_container_sweep skipped=delegated")
