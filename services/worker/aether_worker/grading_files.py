@@ -37,6 +37,7 @@ package set; the worker only consumes the grading_shadow_module case detail.
 from __future__ import annotations
 
 import ast
+import json
 import re
 import sys
 from collections.abc import Collection
@@ -85,6 +86,11 @@ _EXTENSION_SUFFIXES = (".py", ".pyc", ".so", ".pyd")
 # Marks a root-level helper as grading: on line one, or on line two after a shebang or coding line
 # (followed by end of line or spaces).
 GRADING_MARKER = b"# aether: grading"
+# The complete trusted path set of a coding workspace (its `tests` map), written by the worker into the
+# baseline root (Codex r4308195942): every listed file is grading whatever its name. Workspace paths all
+# end in .py, so this name is never one of them; the manifest itself is grading.
+GRADING_MANIFEST = ".aether-grading.json"
+_MANIFEST_LIMIT = 4096
 
 
 def _parts(relative: str | PurePosixPath) -> tuple[str, ...]:
@@ -120,7 +126,7 @@ def is_grading_path(
     parts = _parts(relative)
     if not parts:
         return False
-    if is_cache_path(relative) or is_startup_hook(relative):
+    if is_cache_path(relative) or is_startup_hook(relative) or _normal(relative) == GRADING_MANIFEST:
         return True
     if editable is not None and _normal(relative) in {_normal(item) for item in editable}:
         return False
@@ -144,14 +150,41 @@ def _marked_head(head: bytes) -> bool:
     return first_is_header and len(lines) > 1 and _is_marker(lines[1])
 
 
+def _manifest_paths(baseline: Path) -> set[str]:
+    """The paths listed in the baseline's GRADING_MANIFEST (none without one); ValueError when it is not a
+    list of relative .py paths, so a broken manifest never makes a trusted file candidate code."""
+    path = baseline / GRADING_MANIFEST
+    if not path.is_file() and not path.is_symlink():
+        return set()
+    try:
+        if path.is_symlink():
+            raise ValueError
+        listed = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(listed, list) or len(listed) > _MANIFEST_LIMIT:
+            raise ValueError
+        names: set[str] = set()
+        for item in listed:
+            if not isinstance(item, str) or item.startswith("/") or "\\" in item or "\x00" in item or not item.endswith(".py"):
+                raise ValueError
+            if any(part in {"", ".", ".."} for part in item.split("/")):
+                raise ValueError
+            names.add(item)
+    except (OSError, ValueError, UnicodeDecodeError) as exc:
+        raise ValueError("grading_manifest_invalid") from exc
+    return {*names, GRADING_MANIFEST}
+
+
 def marked_grading_files(baseline: Path) -> frozenset[str]:
-    """Root-level .py files of the baseline marked with GRADING_MARKER (regular files only): on line one,
-    or on line two after a shebang or a coding line."""
+    """The baseline's grading files beyond names: the paths in its GRADING_MANIFEST (the trusted `tests`
+    map, any depth, and the manifest itself; ValueError grading_manifest_invalid when it is broken), and
+    root-level .py files marked with GRADING_MARKER (regular files only): on line one, or on line two
+    after a shebang or a coding line."""
     found: set[str] = set()
     try:
         entries = sorted(baseline.iterdir())
     except OSError:
         return frozenset()
+    found.update(_manifest_paths(baseline))
     for path in entries:
         if not path.name.endswith(".py") or path.is_symlink() or not path.is_file():
             continue

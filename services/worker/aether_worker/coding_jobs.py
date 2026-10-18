@@ -29,6 +29,7 @@ from aether_worker.coding_sandbox import (
     run_coding_sandbox,
 )
 from aether_worker.coding_workspace import UNCHANGED_PATCH, WorkspaceError, parse_workspace, unified_patch
+from aether_worker.grading_files import GRADING_MANIFEST
 from aether_worker.runner import JOB_IMAGE
 
 _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
@@ -901,7 +902,9 @@ def _deadline_passed(database: Database, *, owner_id: str, project_id: str, job_
 def _manifest(root: Path | None, workspace: dict[str, dict[str, str]]) -> list[str]:
     names: list[str] = []
     if root is not None and root.exists():
-        names = sorted(path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file())
+        names = sorted(
+            path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file() and path.relative_to(root).as_posix() != GRADING_MANIFEST
+        )
     if names:
         return names
     return sorted({*workspace["files"], *workspace["tests"]})
@@ -956,6 +959,10 @@ def _materialize(workspace: dict[str, dict[str, str]], root: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         path.chmod(0o644)
+    # Every trusted file is grading, whatever its name (Codex r4308195942): the sandbox reads this from /work.
+    manifest = root / GRADING_MANIFEST
+    manifest.write_text(json.dumps(sorted(workspace["tests"])), encoding="utf-8")
+    manifest.chmod(0o644)
 
 
 def _publish(
