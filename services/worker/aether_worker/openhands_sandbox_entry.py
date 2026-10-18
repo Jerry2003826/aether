@@ -389,13 +389,17 @@ def _patch(before: dict[str, str], root: Path) -> str:
         new = after.get(name)
         if old == new:
             continue
+        # Existence alone picks the headers, as in diff -N / git: a created file comes from /dev/null and
+        # a deleted one goes to it, so applying the patch removes it (not leaves an empty file); a file
+        # present on both sides (emptied included) is a modification of a/ into b/.
+        source = f"a/{name}" if old is not None else "/dev/null"
+        target = f"b/{name}" if new is not None else "/dev/null"
         if not old and not new:
-            # An empty file created or deleted: no lines to diff, but it is a change. /dev/null marks
-            # the absent side, as in diff -N / git.
-            chunks.append(f"--- {'a/' + name if old is not None else '/dev/null'}\n")
-            chunks.append(f"+++ {'b/' + name if new is not None else '/dev/null'}\n")
+            # An empty file created or deleted: no lines to diff, but it is a change.
+            chunks.append(f"--- {source}\n")
+            chunks.append(f"+++ {target}\n")
             continue
-        chunks.extend(difflib.unified_diff(_lines(old or ""), _lines(new or ""), fromfile=f"a/{name}", tofile=f"b/{name}"))
+        chunks.extend(difflib.unified_diff(_lines(old or ""), _lines(new or ""), fromfile=source, tofile=target))
     text = "".join(chunks)
     if not text.startswith("--- "):
         return ""
