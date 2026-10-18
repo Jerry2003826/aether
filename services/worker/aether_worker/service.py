@@ -6,7 +6,9 @@ import asyncio
 import concurrent.futures
 import functools
 import json
+import logging
 import os
+import shutil
 import signal
 import subprocess
 import sys
@@ -242,8 +244,18 @@ def _endpoints_for_process() -> tuple[WorkerEndpoints, list[subprocess.Popen[str
     raise SystemExit("worker 没有完成凭证交接")
 
 
+_LOG = logging.getLogger("aether.worker")
+
+
+def warn_if_git_missing() -> None:
+    """Candidate patches are written by the git on PATH; say once when there is none."""
+    if shutil.which("git") is None:
+        _LOG.warning("worker_git_missing git is not on PATH; coding job patches will be patch_unavailable")
+
+
 async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     children: list[subprocess.Popen[str]] = []
+    warn_if_git_missing()
     try:
         if endpoints is None:
             endpoints, children = _endpoints_for_process()
