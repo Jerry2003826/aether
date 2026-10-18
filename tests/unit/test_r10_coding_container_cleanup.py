@@ -1,7 +1,9 @@
-"""Coding containers do not outlive their jobs: a failed removal is retried and logged, every coding
-container carries this deployment's label, and the worker sweeps leftover coding containers of its
-own deployment when it starts (stopped ones past a grace period, running ones past the longest run
-a coding sandbox may take). Other deployments' containers and young ones are never touched."""
+"""Coding containers do not outlive their jobs: a failed removal is retried and logged, and every coding
+container carries this worker instance's label (an id persisted on disk, so a restarted worker knows
+its previous run's containers). When it starts, the worker removes only containers of its own instance
+that have exited (exited or dead) longer than a grace period ago. Several stacks share this Docker
+daemon: another instance's containers, running or exited, a running container of its own, and anything
+matched only by name or deployment label are never touched."""
 
 from __future__ import annotations
 
@@ -26,16 +28,23 @@ def _stamp(seconds_ago: float) -> str:
 class _Docker:
     """A fake docker CLI: containers by id with status and times; records every command."""
 
-    def __init__(self, containers: dict[str, dict[str, str]] | None = None, rm_failures: int = 0) -> None:
+    def __init__(self, containers: dict[str, dict] | None = None, rm_failures: int = 0, *, ignore_status_filter: bool = False) -> None:
         self.containers = containers or {}
         self.rm_failures = rm_failures
+        self.ignore_status_filter = ignore_status_filter
         self.calls: list[list[str]] = []
 
     def __call__(self, args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
         self.calls.append(list(args))
         if args[:2] == ["ps", "-aq"]:
             wanted = [part.removeprefix("label=") for part in args[2:] if part.startswith("label=")]
-            found = [cid for cid, item in self.containers.items() if all(label in item["labels"] for label in wanted)]
+            statuses = [part.removeprefix("status=") for part in args[2:] if part.startswith("status=")]
+            found = [
+                cid
+                for cid, item in self.containers.items()
+                if all(label in item["labels"] for label in wanted)
+                and (self.ignore_status_filter or not statuses or item["state"]["Status"] in statuses)
+            ]
             return subprocess.CompletedProcess(args, 0, "".join(f"{cid}\n" for cid in found), "")
         if args[:2] == ["inspect", "-f"]:
             if args[2] == "{{.State.ExitCode}}":
@@ -92,9 +101,35 @@ def test_coding_containers_carry_the_deployment_label(monkeypatch: pytest.Monkey
     assert "aether.deployment=staging-2" in args
 
 
-def _container(status: str, *, started: float, finished: float | None, deployment: str = "local") -> dict:
+def _instance(monkeypatch: pytest.MonkeyPatch, state: Path) -> str:
+    monkeypatch.delenv("AETHER_WORKER_INSTANCE_ID", raising=False)
+    monkeypatch.setenv("AETHER_WORKER_STATE_DIR", str(state))
+    return coding_sandbox.worker_instance_id()
+
+
+def test_coding_containers_carry_this_worker_instances_label(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    mine = _instance(monkeypatch, tmp_path / "state")
+    args = coding_sandbox.container_arguments(tmp_path, "python:3.12-alpine", objective="make value() return 42", job_id="job-1")
+    assert f"aether.worker-instance={mine}" in args
+
+
+def test_the_instance_id_is_persisted_so_a_restarted_worker_keeps_it(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    first = _instance(monkeypatch, tmp_path / "state")
+    assert len(first) >= 16
+    assert (tmp_path / "state").is_dir() and first in "".join(path.read_text() for path in (tmp_path / "state").iterdir())
+    # A new worker process reads the same file: nothing is cached in memory between the two calls.
+    assert _instance(monkeypatch, tmp_path / "state") == first
+    assert _instance(monkeypatch, tmp_path / "other-state") != first
+    monkeypatch.setenv("AETHER_WORKER_INSTANCE_ID", "worker-7")
+    assert coding_sandbox.worker_instance_id() == "worker-7"
+
+
+def _container(status: str, *, started: float, finished: float | None, instance: str | None) -> dict:
+    labels = ["aether.role=coding", "aether.deployment=local", "aether.coding=job"]
+    if instance is not None:
+        labels.append(f"aether.worker-instance={instance}")
     return {
-        "labels": ["aether.role=coding", f"aether.deployment={deployment}", "aether.coding=job"],
+        "labels": labels,
         "state": {
             "Status": status,
             "Created": _stamp(started + 1),
@@ -104,32 +139,60 @@ def _container(status: str, *, started: float, finished: float | None, deploymen
     }
 
 
-def test_the_startup_sweep_removes_only_this_deployments_leftovers(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AETHER_DEPLOYMENT_ID", raising=False)
+def _fleet(mine: str) -> dict[str, dict]:
     grace = coding_sandbox.LEFTOVER_GRACE_SECONDS
     longest = coding_sandbox.CODING_SANDBOX_TIMEOUT_SECONDS
-    docker = _Docker(
-        {
-            "old-exited": _container("exited", started=grace * 3, finished=grace * 2),
-            "young-exited": _container("exited", started=grace / 2, finished=grace / 4),
-            "old-dead": _container("dead", started=grace * 3, finished=grace * 2),
-            "never-started": _container("created", started=grace * 3, finished=None),
-            "running-past-the-longest-run": _container("running", started=longest + grace * 2, finished=None),
-            "running-young": _container("running", started=longest / 2, finished=None),
-            "other-deployment": _container("exited", started=grace * 3, finished=grace * 2, deployment="other"),
-        }
-    )
+    return {
+        "aether-code-mine-old-exited": _container("exited", started=grace * 3, finished=grace * 2, instance=mine),
+        "aether-code-mine-old-dead": _container("dead", started=grace * 3, finished=grace * 2, instance=mine),
+        "aether-code-mine-young-exited": _container("exited", started=grace / 2, finished=grace / 4, instance=mine),
+        "aether-code-mine-running-long": _container("running", started=longest + grace * 5, finished=None, instance=mine),
+        "aether-code-mine-never-started": _container("created", started=grace * 3, finished=None, instance=mine),
+        "aether-code-other-running": _container("running", started=longest + grace * 5, finished=None, instance="another-instance"),
+        "aether-code-other-exited": _container("exited", started=grace * 3, finished=grace * 2, instance="another-instance"),
+        "aether-code-unlabelled-exited": _container("exited", started=grace * 3, finished=grace * 2, instance=None),
+    }
+
+
+def test_the_startup_sweep_removes_only_this_instances_exited_containers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    mine = _instance(monkeypatch, tmp_path / "state")
+    docker = _Docker(_fleet(mine))
     _local(monkeypatch, docker)
     removed = coding_sandbox.sweep_leftover_coding_containers(now=_NOW)
-    assert sorted(removed) == ["never-started", "old-dead", "old-exited", "running-past-the-longest-run"]
+    assert sorted(removed) == ["aether-code-mine-old-dead", "aether-code-mine-old-exited"]
     assert sorted(docker.removed()) == sorted(removed)
-    assert "other-deployment" in docker.containers and "young-exited" in docker.containers and "running-young" in docker.containers
+    for kept in ("aether-code-other-running", "aether-code-other-exited", "aether-code-unlabelled-exited", "aether-code-mine-running-long", "aether-code-mine-young-exited", "aether-code-mine-never-started"):
+        assert kept in docker.containers, kept
     listing = [call for call in docker.calls if call[:2] == ["ps", "-aq"]]
-    assert listing and all("label=aether.role=coding" in call and "label=aether.deployment=local" in call for call in listing)
+    assert listing and all(f"label=aether.worker-instance={mine}" in call and "label=aether.role=coding" in call for call in listing)
+    assert not any(part.startswith("name=") for call in listing for part in call)
+
+
+def test_the_sweep_checks_the_state_itself_not_only_dockers_filter(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    mine = _instance(monkeypatch, tmp_path / "state")
+    docker = _Docker(_fleet(mine), ignore_status_filter=True)
+    _local(monkeypatch, docker)
+    removed = coding_sandbox.sweep_leftover_coding_containers(now=_NOW)
+    assert sorted(removed) == ["aether-code-mine-old-dead", "aether-code-mine-old-exited"]
+    assert "aether-code-mine-running-long" in docker.containers and "aether-code-other-running" in docker.containers
+
+
+def test_a_restarted_worker_removes_its_previous_runs_exited_containers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    previous = _instance(monkeypatch, tmp_path / "state")
+    args = coding_sandbox.container_arguments(tmp_path, "python:3.12-alpine", objective="make value() return 42", job_id="job-1")
+    label = next(arg for arg in args if arg.startswith("aether.worker-instance="))
+    grace = coding_sandbox.LEFTOVER_GRACE_SECONDS
+    left = _container("exited", started=grace * 3, finished=grace * 2, instance=label.removeprefix("aether.worker-instance="))
+    docker = _Docker({"aether-code-left-by-the-crash": left, "aether-code-other-exited": _container("exited", started=grace * 3, finished=grace * 2, instance="another-instance")})
+    _local(monkeypatch, docker)
+    # The restart: same state directory, a fresh lookup of the id.
+    assert _instance(monkeypatch, tmp_path / "state") == previous
+    assert coding_sandbox.sweep_leftover_coding_containers(now=_NOW) == ["aether-code-left-by-the-crash"]
+    assert "aether-code-other-exited" in docker.containers
 
 
 def test_the_sweep_does_nothing_when_the_worker_delegates_docker(monkeypatch: pytest.MonkeyPatch) -> None:
-    docker = _Docker({"old-exited": _container("exited", started=10_000, finished=9_000)})
+    docker = _Docker({"old-exited": _container("exited", started=10_000, finished=9_000, instance=None)})
     _local(monkeypatch, docker)
     monkeypatch.setattr(coding_sandbox, "worker_delegates", lambda: True)
     assert coding_sandbox.sweep_leftover_coding_containers(now=_NOW) == []
