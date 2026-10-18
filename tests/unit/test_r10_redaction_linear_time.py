@@ -14,6 +14,8 @@ _SIZE = 512 * 1024
 _BEGIN_FRAGMENT = "-----BEGIN NOT A KEY"
 _END_FRAGMENT = "-----END NOT A KEY"
 _OPEN_BLOCK = "-----BEGIN " + "PRIVATE KEY-----\n"
+_HYPHEN_BEGIN = "-----BEGIN NOT-A KEY "
+_HYPHEN_END = "-----END NOT-A KEY "
 # Old patterns: over 10 s for each of these on the development box; fixed, under half a second.
 _BOUND_SECONDS = 2.0
 
@@ -24,6 +26,10 @@ _BOUND_SECONDS = 2.0
         pytest.param(_BEGIN_FRAGMENT * (_SIZE // len(_BEGIN_FRAGMENT)), id="begin-fragments"),
         pytest.param(_END_FRAGMENT * (_SIZE // len(_END_FRAGMENT)), id="end-fragments"),
         pytest.param(_OPEN_BLOCK + _END_FRAGMENT * (_SIZE // len(_END_FRAGMENT)), id="open-block-then-end-fragments"),
+        pytest.param("-----BEGIN " + "A-" * (_SIZE // 2), id="begin-then-one-long-hyphen-label"),
+        pytest.param("-----BEGIN " + "A " * (_SIZE // 2), id="begin-then-many-label-words"),
+        pytest.param(_HYPHEN_BEGIN * (_SIZE // len(_HYPHEN_BEGIN)), id="hyphen-label-begin-fragments"),
+        pytest.param(_OPEN_BLOCK + _HYPHEN_END * (_SIZE // len(_HYPHEN_END)), id="open-block-then-hyphen-label-end-fragments"),
     ],
 )
 def test_redaction_of_armor_fragments_stays_linear(text: str) -> None:
