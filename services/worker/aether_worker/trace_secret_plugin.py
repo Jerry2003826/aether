@@ -18,4 +18,6 @@ class TraceSecretDetector(RegexBasedDetector):
         # Unquoted password=... (libpq DSN, PGPASSWORD=...), which KeywordDetector only finds quoted.
         re.compile(r"(?i)password=\S+"),
         re.compile(r"密钥\S*"),
+        # Bearer tokens (Authorization headers); only the token is masked, the scheme word stays.
+        re.compile(r"(?i)\bbearer\s+([A-Za-z0-9._~+/=-]{8,})"),
     )
