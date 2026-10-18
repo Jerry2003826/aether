@@ -77,6 +77,17 @@ def _clean_label_value(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]", "_", value.strip())[:64]
 
 
+def pin_worker_state_dir() -> Path:
+    """Resolve the worker state directory once, against this process's working directory, and write
+    the absolute path back to AETHER_WORKER_STATE_DIR. Called when the worker starts, before the
+    runner is launched: the runner inherits the absolute path (role_launch._runner_env), so it finds
+    the same coding-instance-id whatever its own working directory."""
+    path = Path(os.environ.get(_STATE_DIR_ENV, "") or "data/worker")
+    resolved = path if path.is_absolute() else (Path.cwd() / path).resolve()
+    os.environ[_STATE_DIR_ENV] = str(resolved)
+    return resolved
+
+
 def worker_instance_id() -> str:
     """This worker's instance id, read fresh each time: AETHER_WORKER_INSTANCE_ID, else the id kept in
     <AETHER_WORKER_STATE_DIR, default data/worker>/coding-instance-id (created once, so a restarted

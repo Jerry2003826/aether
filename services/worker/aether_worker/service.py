@@ -23,6 +23,7 @@ import aether_worker.goal_effect as goal_effect
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.coding_jobs import execute_queued_coding_jobs, warn_coding_rate_default
+from aether_worker.coding_sandbox import pin_worker_state_dir
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
@@ -255,6 +256,8 @@ def warn_if_git_missing() -> None:
 
 async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     children: list[subprocess.Popen[str]] = []
+    # Absolute from here on, for this process and the runner it launches (same instance id for both).
+    print(f"aether-worker-state-dir path={pin_worker_state_dir()}", flush=True)
     warn_if_git_missing()
     # No Docker here: the runner role sweeps leftover coding containers when it starts (runner_process).
     warn_coding_rate_default()
