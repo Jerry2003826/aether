@@ -109,6 +109,10 @@ def _read_bounded(response: Any, *, deadline: float, limit: int, per_read: float
                 raise _read_cut("deadline") from None
             raise
         if not chunk:
+            left = getattr(response, "length", None)
+            if type(left) is int and left > 0:
+                # The connection ended before the declared Content-Length: what arrived is not the reply.
+                raise _read_cut("short")
             return b"".join(chunks)
         total += len(chunk)
         if total > limit:
@@ -538,7 +542,11 @@ def _choice_content(response: Any) -> str:
 
 
 class GatewayDenied(Exception):
-    """sent is true once the request may have reached the provider."""
+    """sent is true once the request may have reached the provider.
+
+    error_body_truncated marks a non-2xx reply whose body was cut while it was read: it keeps
+    upstream_status but, unlike a complete error reply, is charged at the call's reservation.
+    """
 
     def __init__(
         self,
@@ -547,12 +555,14 @@ class GatewayDenied(Exception):
         sent: bool = False,
         upstream_status: int | None = None,
         provider_error: str | None = None,
+        error_body_truncated: bool = False,
     ) -> None:
         super().__init__(code)
         self.code = code
         self.sent = sent
         self.upstream_status = upstream_status
         self.provider_error = provider_error
+        self.error_body_truncated = error_body_truncated
 
 
 class ModelGateway:
@@ -768,6 +778,7 @@ class ModelGateway:
                 incoming=None,
                 outgoing=None,
                 error=exc.code,
+                error_body_truncated=exc.error_body_truncated,
             )
             raise
         self._add_measured_usage(grant, result)
@@ -1255,11 +1266,14 @@ class ModelGateway:
                 detail["upstream_status"] = exc.upstream_status
             if exc.provider_error:
                 detail["provider_error"] = exc.provider_error
+            if exc.error_body_truncated:
+                detail["error_body_truncated"] = True
             if release_pending:
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
                 remove_call_cost(detail, "pending", self._coding_call_tokens)
-                if exc.sent and exc.upstream_status is None:
-                    # Sent but no answer (a timeout): the provider may bill it, so its hold is charged at settlement.
+                if exc.sent and (exc.upstream_status is None or exc.error_body_truncated):
+                    # Sent but no whole answer (a timeout, a cut body, an error reply cut short): the
+                    # provider may bill it, so its hold is charged at settlement.
                     self._note_unknown_call(detail)
             conn.execute(
                 text(
@@ -1288,6 +1302,8 @@ class ModelGateway:
                         child_detail["upstream_status"] = exc.upstream_status
                     if exc.provider_error:
                         child_detail["provider_error"] = exc.provider_error
+                    if exc.error_body_truncated:
+                        child_detail["error_body_truncated"] = True
                     conn.execute(
                         text(
                             "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1369,23 +1385,29 @@ class ModelGateway:
         window = upstream_deadline_seconds()
         deadline = time.monotonic() + window
         try:
-            with opener.open(request, timeout=min(self.timeout, window)) as response:
-                raw = _read_bounded(response, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
-                content_type = response.headers.get("content-type", "")
-                status = getattr(response, "status", 200)
+            response = opener.open(request, timeout=min(self.timeout, window))
         except urllib.error.HTTPError as exc:
             status_code = exc.code if isinstance(exc.code, int) else 0
+            truncated = False
             try:
                 # The error body gets the same overall deadline and byte cap as a 2xx body.
                 detail = _read_error_body(exc, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
-            except GatewayDenied as cut:
-                # An over-cap non-2xx call keeps upstream_status, so it settles as a known HTTP
-                # error rather than at its reservation (providers generally do not bill 5xx).
-                raise GatewayDenied(cut.code, sent=True, upstream_status=status_code or None) from exc
-            except TimeoutError as timed_out:
-                raise GatewayDenied("upstream_error", sent=True, upstream_status=status_code or None) from timed_out
+            except GatewayDenied:
+                # Over the byte cap, past the deadline or shorter than its Content-Length.
+                truncated = True
+            except (OSError, http.client.HTTPException):
+                # A reset, read timeout or IncompleteRead while reading the error body.
+                truncated = True
             finally:
                 exc.close()
+            if truncated:
+                # A status line came back, so the call was sent; its body was cut, so whether the
+                # provider bills it is unknown: it is charged at its reservation, and the status and
+                # the truncation are both recorded.
+                _logger().warning("upstream_error_body_truncated status=%s", status_code or "")
+                raise GatewayDenied(
+                    "upstream_error", sent=True, upstream_status=status_code or None, error_body_truncated=True
+                ) from exc
             if self.provider_key and self.provider_key in detail:
                 raise GatewayDenied("secret_leak", sent=True) from exc
             provider = _provider_error_code(detail)
@@ -1399,6 +1421,15 @@ class ModelGateway:
             # counts as sent once the first hop was up. That can only overcharge, never undercharge;
             # it is on purpose.
             raise GatewayDenied("upstream_error", sent=seen.up) from exc
+        # A status line and headers came back: the call was sent, whatever happens to the body.
+        # This does not depend on the connect hook (seen.up).
+        with response:
+            try:
+                raw = _read_bounded(response, deadline=deadline, limit=upstream_max_bytes(), per_read=self.timeout)
+            except (OSError, http.client.HTTPException) as exc:
+                raise _read_cut("reset") from exc
+            content_type = response.headers.get("content-type", "")
+            status = getattr(response, "status", 200)
         self._response_kind = "sse" if _is_event_stream(raw, content_type) else "json"
         decoded = raw.decode(errors="replace")
         if self.provider_key and self.provider_key in decoded:
@@ -1424,9 +1455,11 @@ class ModelGateway:
         incoming: int | None,
         outgoing: int | None,
         error: str,
+        error_body_truncated: bool = False,
     ) -> None:
         _logger().info(
-            "relay project=%s status=%s requested_model=%s upstream_model=%s stream=%s kind=%s input_tokens=%s output_tokens=%s error=%s",
+            "relay project=%s status=%s requested_model=%s upstream_model=%s stream=%s kind=%s input_tokens=%s output_tokens=%s error=%s"
+            " error_body_truncated=%s",
             _public(project_id, self.provider_key),
             "" if status is None else status,
             _public(requested_model, self.provider_key),
@@ -1436,6 +1469,7 @@ class ModelGateway:
             "" if incoming is None else incoming,
             "" if outgoing is None else outgoing,
             _public(error, self.provider_key),
+            "true" if error_body_truncated else "false",
         )
 
     def _scope(self, token: str) -> dict[str, Any]:
