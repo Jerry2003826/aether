@@ -40,6 +40,7 @@ from aether_worker.sandbox_delegate import (
     remote_run,
     worker_delegates,
 )
+from aether_worker.secret_scan import redact_trace
 
 CANCEL_GRACE_SECONDS = 10
 LOG_TAIL_LIMIT = 4096
@@ -337,14 +338,26 @@ def _listed(container_id: str, listing: list[str]) -> bool:
     return any(item and (container_id.startswith(item) or item.startswith(container_id)) for item in listing)
 
 
+def _redacted(text: str) -> str:
+    return "".join(redact_trace(line) for line in text.splitlines(keepends=True))
+
+
+def _log_tails(captured: dict[str, str]) -> dict[str, str]:
+    """The stored log tails, each line redacted with secret_scan.redact_trace: the sandbox entry logs
+    unexpected error messages unredacted (it has no scanner). The result is parsed from the raw capture."""
+    return {
+        "stdout": _redacted(captured["stdout"][-LOG_TAIL_LIMIT:]),
+        "stderr": _redacted(captured["stderr"][-LOG_TAIL_LIMIT:]),
+    }
+
+
 def container_log_tails(job_id: str, container_id: str | None = None) -> dict[str, str]:
     if container_id:
         target = container_id
     else:
         found = coding_container_ids(job_id)
         target = found[0] if found else container_name(job_id)
-    logs = _bounded_logs(target, limit=LOG_CAPTURE_LIMIT)
-    return {"stdout": logs["stdout"][-LOG_TAIL_LIMIT:], "stderr": logs["stderr"][-LOG_TAIL_LIMIT:]}
+    return _log_tails(_bounded_logs(target, limit=LOG_CAPTURE_LIMIT))
 
 
 def confirm_coding_stop(
@@ -577,7 +590,7 @@ def _raise_after_stop(
 
 def _collect_exit(name: str, *, heartbeat: Callable[[], None] | None = None) -> dict[str, Any]:
     captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT, heartbeat=heartbeat)
-    logs = {"stdout": captured["stdout"][-LOG_TAIL_LIMIT:], "stderr": captured["stderr"][-LOG_TAIL_LIMIT:]}
+    logs = _log_tails(captured)
     code = _exit_code(name)
     _sandbox_docker(["rm", "-f", name])
     result = _result_line(captured["stdout"])
