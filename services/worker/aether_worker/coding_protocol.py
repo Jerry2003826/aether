@@ -48,6 +48,7 @@ import importlib.abc
 import importlib.machinery
 import importlib.util
 import inspect
+import io
 import json
 import math
 import operator
@@ -227,6 +228,92 @@ def _loaded_conftests(baseline: frozenset[str] | None, modules: list[str], sourc
         if any(not folder or module.startswith(folder + "/") for module in modules):
             found.append(name)
     return found
+
+
+# What candidate code writes to sys.stdout/sys.stderr reaches the test (Codex r4308195956): at most this
+# much per request, never cut: past it the request is unsupported (candidate_output_too_large).
+_MAX_OUTPUT = 1024 * 1024
+_OUTPUT_TOO_LARGE = "candidate_output_too_large"
+
+
+def _output(reply: dict) -> list[tuple[int, str]] | None:
+    """The writes a reply carries, in order; None when the candidate wrote more than _MAX_OUTPUT."""
+    if reply.get("out_overflow") is True:
+        return None
+    raw = reply.get("out", [])
+    if not isinstance(raw, list):
+        raise CandidateError("candidate_protocol")
+    found: list[tuple[int, str]] = []
+    for item in raw:
+        if not (isinstance(item, list) and len(item) == 2 and item[0] in (1, 2) and type(item[0]) is int and type(item[1]) is str):
+            raise CandidateError("candidate_protocol")
+        found.append((item[0], item[1]))
+    return found
+
+
+class _OutputSink:
+    """Candidate side: the writes of the current request, bounded."""
+
+    def __init__(self) -> None:
+        self.writes: list[list[object]] = []
+        self.size = 0
+        self.overflow = False
+
+    def add(self, stream: int, text: str) -> None:
+        if self.overflow or not text:
+            return
+        self.size += len(text)
+        if self.size > _MAX_OUTPUT:
+            self.overflow, self.writes = True, []
+            return
+        if self.writes and self.writes[-1][0] == stream:
+            self.writes[-1][1] += text  # type: ignore[operator]
+        else:
+            self.writes.append([stream, text])
+
+    def take(self, reply: dict[str, object]) -> None:
+        if self.overflow:
+            reply["out_overflow"] = True
+        elif self.writes:
+            reply["out"] = self.writes
+        self.writes, self.size, self.overflow = [], 0, False
+
+
+class _RelayBytes(io.RawIOBase):
+    def __init__(self, text: _Relay) -> None:
+        self._text = text
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, data) -> int:  # type: ignore[override]
+        view = bytes(data)
+        self._text.write(view.decode("utf-8", errors="replace"))
+        return len(view)
+
+
+class _Relay(io.TextIOBase):
+    """Candidate side: sys.stdout or sys.stderr, handing every write to the sink for the reply."""
+
+    encoding = "utf-8"
+    errors = "strict"
+
+    def __init__(self, stream: int, sink: _OutputSink) -> None:
+        self._stream = stream
+        self._sink = sink
+        self.buffer = _RelayBytes(self)
+
+    def writable(self) -> bool:
+        return True
+
+    def write(self, text) -> int:  # type: ignore[override]
+        if not isinstance(text, str):
+            raise TypeError(f"write() argument must be str, not {type(text).__name__}")
+        self._sink.add(self._stream, text)
+        return len(text)
+
+    def isatty(self) -> bool:
+        return False
 
 
 def _shared_memory() -> str | None:
@@ -459,17 +546,28 @@ class _Session:
         # The candidate's changes to shared containers land before its result or its exception.
         try:
             self._incoming(reply.get("sync", []))
+            output = _output(reply)
             if "err" in reply:
                 error = _exception(reply["err"], self)
             else:
-                return _decode(reply.get("ok"), self)
+                value = _decode(reply.get("ok"), self)
+                self._deliver(output)
+                return value
         except Exception:  # noqa: BLE001 - whatever the candidate sent that does not decode
             # A malformed reply is the candidate breaking the protocol: the session is over, and the
             # test sees candidate_protocol, never a TypeError or ValueError it could take as expected.
             self._dead = "candidate_protocol"
             self.close()
             raise CandidateError(self._dead) from None
+        self._deliver(output)
         raise error
+
+    def _deliver(self, output: list[tuple[int, str]] | None) -> None:
+        """The candidate's writes, to whatever sys.stdout/sys.stderr the test has now (capsys, redirect_stdout)."""
+        if output is None:
+            raise _unsupported(_OUTPUT_TOO_LARGE)
+        for stream, text in output:
+            (sys.stdout if stream == 1 else sys.stderr).write(text)
 
     def mirror(self, value: object) -> int:
         """The shared id of a builtin container the test hands to candidate code."""
@@ -2295,6 +2393,9 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
                     sync.append([shared, state])
         return sync
 
+    # The candidate's sys.stdout/sys.stderr: what it writes goes back with each reply (Codex r4308195956).
+    sink = _OutputSink()
+    sys.stdout, sys.stderr = _Relay(1, sink), _Relay(2, sink)
     while True:
         try:
             message = _receive(read_fd)
@@ -2311,6 +2412,7 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         except BaseException as exc:  # noqa: BLE001 - a state that cannot be sent fails this request
             # Described with data only: a shared container or handle in it could not be synced now.
             reply = {"err": _candidate_error(exc, _plain_data)}
+        sink.take(reply)
         _send(write_fd, reply)
 
 
