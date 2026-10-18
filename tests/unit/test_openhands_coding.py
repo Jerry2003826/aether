@@ -976,7 +976,7 @@ def test_other_source_edits_and_new_source_files_are_published_as_graded(tmp_pat
     assert graded_util == "FACTOR = 6\n"
     assert graded_helper == "def helper():\n    return 7\n"
     # Exactly the graded source changes, in git's own format: no conftest.py, no cache.
-    assert re.findall(r"^diff --git \S+ b/(\S+)$", body["patch"], re.M) == ["helper.py", "util.py"], body["patch"]
+    assert re.findall(r"^diff --git \S+ b/(\S+)$", body["patch"], re.MULTILINE) == ["helper.py", "util.py"], body["patch"]
     assert "new file mode 100644" in body["patch"] and "+FACTOR = 6" in body["patch"]
     _assert_patch_gives_the_graded_job(work, job, body["patch"], tmp_path / "check")
 
