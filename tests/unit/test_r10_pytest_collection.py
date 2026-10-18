@@ -100,3 +100,53 @@ def test_a_test_file_whose_name_is_not_an_identifier_is_collected_and_can_fail_t
         f"{label}.test_bad": ("FAIL", "AssertionError"),
     }, output
     assert code == 1, output
+
+
+# A stack whose pop() does not remove: each test alone passes; run as one class, as pytest and
+# unittest do, the second test sees what the first one left and fails.
+_STACK = (
+    "class Stack:\n"
+    "    def __init__(self):\n        self.items = []\n"
+    "    def push(self, item):\n        self.items.append(item)\n"
+    "    def pop(self):\n        return self.items[-1]\n"
+    "    def size(self):\n        return len(self.items)\n"
+    "_TAGS = iter(['x'] * 100)\n"
+    "def tag():\n    return next(_TAGS)\n"
+)
+_CLASS_SUITES = {
+    "unittest_setupclass": (
+        ("import unittest\nimport app\n\n"
+        "class StackTests(unittest.TestCase):\n"
+        "    @classmethod\n    def setUpClass(cls):\n        cls.stack = app.Stack()\n\n"
+        "    def test_a_push_pop(self):\n        self.stack.push(1)\n        self.assertEqual(self.stack.pop(), 1)\n\n"
+        "    def test_b_empty_afterwards(self):\n        self.assertEqual(self.stack.size(), 0)\n"),
+        {"StackTests.test_a_push_pop": ("PASS", ""), "StackTests.test_b_empty_afterwards": ("FAIL", "AssertionError")},
+    ),
+    "unittest_teardownclass": (
+        # tearDownClass checks what the whole class saw: two tags, each different.
+        ("import unittest\nimport app\n\n"
+        "class TagTests(unittest.TestCase):\n"
+        "    seen = []\n\n"
+        "    def test_one(self):\n        self.seen.append(app.tag())\n\n"
+        "    def test_two(self):\n        self.seen.append(app.tag())\n\n"
+        "    @classmethod\n    def tearDownClass(cls):\n        assert len(set(cls.seen)) == 2, cls.seen\n"),
+        {"TagTests.test_one": ("PASS", ""), "TagTests.test_two": ("FAIL", "AssertionError")},
+    ),
+    "pytest_setup_class": (
+        ("import app\n\n"
+        "class TestStack:\n"
+        "    @classmethod\n    def setup_class(cls):\n        cls.stack = app.Stack()\n\n"
+        "    def test_a_push_pop(self):\n        self.stack.push(1)\n        assert self.stack.pop() == 1\n\n"
+        "    def test_b_empty_afterwards(self):\n        assert self.stack.size() == 0\n"),
+        {"TestStack.test_a_push_pop": ("PASS", ""), "TestStack.test_b_empty_afterwards": ("FAIL", "AssertionError")},
+    ),
+}
+
+
+@pytest.mark.parametrize("suite", sorted(_CLASS_SUITES))
+def test_class_fixtures_run_once_around_the_whole_class(tmp_path: Path, suite: str) -> None:
+    source, expected = _CLASS_SUITES[suite]
+    _write(tmp_path, {"app.py": _STACK, "test_cls.py": source})
+    code, verdicts, output = _grade(tmp_path)
+    assert verdicts == {f"test_cls.{name}": verdict for name, verdict in expected.items()}, output
+    assert code == 1, output
