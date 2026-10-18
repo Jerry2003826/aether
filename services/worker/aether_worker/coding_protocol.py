@@ -425,10 +425,7 @@ class _Session:
         try:
             self._incoming(reply.get("sync", []))
             if "err" in reply:
-                raw = reply["err"]
-                if not (isinstance(raw, list) and len(raw) == 3 and all(type(item) is str for item in raw)):
-                    raise CandidateError("candidate_protocol")
-                error = _exception(raw)
+                error = _exception(reply["err"], self)
             else:
                 return _decode(reply.get("ok"), self)
         except Exception:  # noqa: BLE001 - whatever the candidate sent that does not decode
@@ -548,17 +545,67 @@ _BUILTIN_ERRORS = {
 }
 
 
-def _exception(raw: object) -> Exception:
-    """A trusted exception for a candidate one. Only builtin exception types are recreated."""
-    if not (isinstance(raw, list) and len(raw) == 3 and all(type(item) is str for item in raw)):
-        return CandidateError("candidate_protocol")
-    base, qualname, message = raw
-    kind = _BUILTIN_ERRORS.get(base, CandidateError)
-    text = message[:2000]
+# A candidate exception crosses whole or not at all (Codex r4307762554): its args, the fields and
+# notes on it, the builtin attributes its args do not give (ImportError.name, AttributeError.name, ...),
+# its cause and context and, when its class changes it, its own str(). Nothing is cut: one that is too
+# large, too deeply chained or cannot be rebuilt from that data is refused as unsupported.
+_EXCEPTION_LIMIT = 1024 * 1024
+_EXCEPTION_DEPTH = 8
+_EXCEPTION_REFUSALS = frozenset({"exception_too_large", "exception_too_deep", "exception_not_rebuildable"})
+# Kept by BaseException itself and crossed on their own (args, chain) or not at all (traceback).
+_EXCEPTION_OWN = frozenset({"args", "__traceback__", "__context__", "__cause__", "__suppress_context__", "__dict__"})
+
+
+def _text_kind(kind: type, text: str) -> type:
+    """kind, answering str() with the candidate's own text (its class overrides __str__)."""
+    return type(kind.__name__, (kind,), {"__str__": lambda _self: text, "__module__": kind.__module__, "__qualname__": kind.__qualname__})
+
+
+def _exception(raw: object, session: _Session, depth: int = 0) -> BaseException:
+    """A trusted exception for a candidate one, built from data. Only builtin exception types are made."""
+    if depth > _EXCEPTION_DEPTH or not isinstance(raw, dict):
+        raise CandidateError("candidate_protocol")
+    base, qualname, message = raw.get("base"), raw.get("type"), raw.get("message")
+    if not (type(base) is str and type(qualname) is str and type(message) is str):
+        raise CandidateError("candidate_protocol")
+    refused = raw.get("unsupported")
+    if refused is not None:
+        if refused not in _EXCEPTION_REFUSALS:
+            raise CandidateError("candidate_protocol")
+        return _unsupported(refused)
+    kind = _BUILTIN_ERRORS.get(base)
+    if kind is None:
+        # A candidate BaseException that is not an Exception (SystemExit, its own BaseException class).
+        made: BaseException = CandidateError(message[:2000])
+        made.candidate_type = qualname[:200]  # type: ignore[attr-defined]
+        return made
+    args, state, text = raw.get("args"), raw.get("state"), raw.get("text")
+    if not (isinstance(args, list) and isinstance(state, list) and (text is None or type(text) is str)):
+        raise CandidateError("candidate_protocol")
+    values = [_decode(node, session) for node in args]
+    fields: list[tuple[str, object]] = []
+    for pair in state:
+        if not (isinstance(pair, list) and len(pair) == 2 and type(pair[0]) is str):
+            raise CandidateError("candidate_protocol")
+        name = pair[0]
+        if not name.isidentifier() or name in _EXCEPTION_OWN or (name.startswith("__") and name != "__notes__"):
+            raise CandidateError("candidate_protocol")
+        fields.append((name, _decode(pair[1], session)))
     try:
-        made = kind(text)
-    except Exception:  # noqa: BLE001 - an exception type with a special constructor
-        made = CandidateError(f"{qualname}: {text}")
+        made = (kind if text is None else _text_kind(kind, text))(*values)
+        for name, value in fields:
+            setattr(made, name, value)
+    except Exception:  # noqa: BLE001 - data that does not rebuild the exception: never approximated
+        return _unsupported("exception_not_rebuildable")
+    for link in ("__cause__", "__context__"):
+        if link in raw:
+            linked = _exception(raw[link], session, depth + 1)
+            if isinstance(linked, CandidateObjectUnsupported):
+                return linked
+            setattr(made, link, linked)
+    if raw.get("context_is_cause") is True:
+        made.__context__ = made.__cause__
+    made.__suppress_context__ = raw.get("suppress") is True
     made.candidate_type = qualname[:200]  # type: ignore[attr-defined]
     return made
 
@@ -2192,21 +2239,100 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             receive_states(message.get("sync", []))
             reply: dict[str, object] = {"ok": handle(message)}  # type: ignore[arg-type]
         except BaseException as exc:  # noqa: BLE001 - every candidate failure is reported, even SystemExit
-            reply = {"err": _candidate_error(exc)}
+            reply = {"err": _candidate_error(exc, encode)}
         try:
             # Sent with the result and with an exception alike: changes made before a raise are real.
             reply["sync"] = send_states()
         except BaseException as exc:  # noqa: BLE001 - a state that cannot be sent fails this request
-            reply = {"err": _candidate_error(exc)}
+            # Described with data only: a shared container or handle in it could not be synced now.
+            reply = {"err": _candidate_error(exc, _plain_data)}
         _send(write_fd, reply)
 
 
-def _candidate_error(exc: BaseException) -> list[str]:
-    base = next(
+class _NotCrossing(Exception):
+    def __init__(self, reason: str) -> None:
+        super().__init__(reason)
+        self.reason = reason
+
+
+def _plain_data(value: object, depth: int = 0) -> list[object]:
+    node = _encode_data(value, depth, _plain_data)
+    if not node:
+        raise _NotCrossing("exception_not_rebuildable")
+    return node
+
+
+def _exception_text(exc: BaseException) -> str:
+    try:
+        return str(exc)
+    except Exception:  # noqa: BLE001 - a candidate __str__ that raises
+        return type(exc).__qualname__
+
+
+def _error_base(exc: BaseException) -> str:
+    return next(
         (kind.__name__ for kind in type(exc).__mro__ if _BUILTIN_ERRORS.get(kind.__name__) is kind),
         "CandidateError",
     )
-    return [base, type(exc).__qualname__, str(exc)[:2000]]
+
+
+def _describe_error(exc: BaseException, encode, depth: int) -> dict[str, object]:
+    """Candidate side: exc as data the test process rebuilds it from (see _exception)."""
+    if depth > _EXCEPTION_DEPTH:
+        raise _NotCrossing("exception_too_deep")
+    base = _error_base(exc)
+    text = _exception_text(exc)
+    record: dict[str, object] = {"base": base, "type": type(exc).__qualname__, "message": text[:2000]}
+    if base == "CandidateError":
+        return record
+    if len(text) > _EXCEPTION_LIMIT:
+        raise _NotCrossing("exception_too_large")
+    kind = _BUILTIN_ERRORS[base]
+    rebuilt = kind(*exc.args)
+    state: list[list[object]] = [[name, encode(value)] for name, value in vars(exc).items()]
+    named = {name for name, _value in state}
+    for cls in kind.__mro__:
+        if not issubclass(cls, BaseException):
+            continue  # object's own (__class__): the rebuilt exception is of the builtin base by design
+        for name, slot in vars(cls).items():
+            if name in _EXCEPTION_OWN or name in named or not isinstance(slot, (types.MemberDescriptorType, types.GetSetDescriptorType)):
+                continue
+            named.add(name)
+            try:
+                value = getattr(exc, name)
+            except AttributeError:
+                continue
+            missing = object()
+            plain = getattr(rebuilt, name, missing)
+            if value is plain or (type(value) is type(plain) and value == plain):
+                continue
+            state.append([name, encode(value)])
+    record["args"] = [encode(value) for value in exc.args]
+    record["state"] = state
+    record["text"] = None if text == _exception_text(rebuilt) else text
+    record["suppress"] = bool(exc.__suppress_context__)
+    if exc.__cause__ is not None:
+        record["__cause__"] = _describe_error(exc.__cause__, encode, depth + 1)
+    if exc.__context__ is not None:
+        if exc.__context__ is exc.__cause__:
+            record["context_is_cause"] = True
+        else:
+            record["__context__"] = _describe_error(exc.__context__, encode, depth + 1)
+    return record
+
+
+def _candidate_error(exc: BaseException, encode) -> dict[str, object]:
+    """The record of a candidate exception: whole, or refused with the reason (never cut)."""
+    head = {"base": _error_base(exc), "type": type(exc).__qualname__, "message": _exception_text(exc)[:2000]}
+    try:
+        record = _describe_error(exc, encode, 0)
+        if len(json.dumps(record)) > _EXCEPTION_LIMIT:
+            raise _NotCrossing("exception_too_large")
+    except _NotCrossing as refused:
+        return {**head, "unsupported": refused.reason}
+    except BaseException:  # noqa: BLE001 - candidate code failed while its exception was described
+        return {**head, "unsupported": "exception_not_rebuildable"}
+    return record
 
 
 def _fill_candidate(target: object, value: object) -> None:
