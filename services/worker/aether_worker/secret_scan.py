@@ -54,10 +54,26 @@ def redact_trace(text: str) -> str:
     return redacted
 
 
-_KEY_BLOCK = re.compile(r"-----BEGIN[ A-Z0-9_-]*PRIVATE KEY-----.*?(?:-----END[ A-Z0-9_-]*PRIVATE KEY-----|\Z)", re.DOTALL)
-_KEY_END = re.compile(r"-----END[ A-Z0-9_-]*PRIVATE KEY-----")
+# Armor lines (RSA, EC, OPENSSH, ENCRYPTED, ... PRIVATE KEY). The label never holds a dash, so a match
+# attempt stops at the next dash instead of backtracking over the rest of the text (linear time).
+_KEY_BEGIN = re.compile(r"-----BEGIN[ A-Z0-9_]*PRIVATE KEY-----")
+_KEY_END = re.compile(r"-----END[ A-Z0-9_]*PRIVATE KEY-----")
 _LINE_BREAK = re.compile(r"\r?\n")
 _REDACTED_KEY = "[REDACTED PRIVATE KEY]"
+
+
+def _mask_key_blocks(text: str) -> str:
+    """Each BEGIN line through the first END line after it (or the end of the text) becomes one mask."""
+    parts: list[str] = []
+    position = 0
+    while (begin := _KEY_BEGIN.search(text, position)) is not None:
+        parts += [text[position : begin.start()], _REDACTED_KEY]
+        end = _KEY_END.search(text, begin.end())
+        if end is None:
+            return "".join(parts)
+        position = end.end()
+    parts.append(text[position:])
+    return "".join(parts)
 
 
 def redact_text(text: str) -> str:
@@ -67,7 +83,7 @@ def redact_text(text: str) -> str:
     (an END line with no BEGIN before it: everything up to it goes). A secret wrapped across lines
     is found in a copy with the line breaks removed and masked across them in the original.
     """
-    redacted = _KEY_BLOCK.sub(_REDACTED_KEY, text)
+    redacted = _mask_key_blocks(text)
     orphan = _KEY_END.search(redacted)
     if orphan is not None:
         redacted = _REDACTED_KEY + redacted[orphan.end() :]
