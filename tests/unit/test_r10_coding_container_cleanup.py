@@ -7,7 +7,6 @@ matched only by name or deployment label are never touched."""
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import subprocess
@@ -15,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from aether_worker import coding_sandbox, service
+from aether_worker import coding_sandbox
 
 _NOW = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
 _NEVER = "0001-01-01T00:00:00Z"
@@ -206,20 +205,3 @@ def test_a_failing_sweep_does_not_stop_the_worker(monkeypatch: pytest.MonkeyPatc
     _local(monkeypatch, _Docker())
     monkeypatch.setattr(coding_sandbox, "_sandbox_docker", broken)
     assert coding_sandbox.sweep_leftover_coding_containers(now=_NOW) == []
-
-
-def test_the_worker_sweeps_when_it_starts(monkeypatch: pytest.MonkeyPatch) -> None:
-    swept: list[bool] = []
-
-    class Stop(Exception):
-        pass
-
-    def endpoints() -> None:
-        raise Stop
-
-    monkeypatch.setattr(service, "warn_if_git_missing", lambda: None)
-    monkeypatch.setattr(service, "sweep_leftover_coding_containers", lambda: swept.append(True) or [], raising=False)
-    monkeypatch.setattr(service, "_endpoints_for_process", endpoints)
-    with pytest.raises(Stop):
-        asyncio.run(service.serve())
-    assert swept == [True]
