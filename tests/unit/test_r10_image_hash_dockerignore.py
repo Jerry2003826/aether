@@ -29,6 +29,22 @@ def test_changing_dockerignore_changes_the_sandbox_image_tag(tmp_path: Path) -> 
     assert openhands_image.sandbox_tag(tmp_path) != before
 
 
-def test_the_tag_is_stable_when_nothing_changes(tmp_path: Path) -> None:
-    _copy_context(tmp_path)
-    assert openhands_image.sandbox_tag(tmp_path) == openhands_image.sandbox_tag(tmp_path)
+def test_the_tag_follows_the_dockerignore_bytes_and_nothing_else(tmp_path: Path) -> None:
+    first_copy, second_copy = tmp_path / "first", tmp_path / "second"
+    _copy_context(first_copy)
+    _copy_context(second_copy)
+    ignore = first_copy / ".dockerignore"
+    original = ignore.read_bytes()
+    before = openhands_image.sandbox_tag(first_copy)
+    # Rewritten with the same bytes, and a file outside the context added: the same tag.
+    ignore.write_bytes(original)
+    (first_copy / "scratch-notes.txt").write_text("not part of the build context\n", encoding="utf-8")
+    assert openhands_image.sandbox_tag(first_copy) == before
+    # The same context in another directory: the same tag.
+    assert openhands_image.sandbox_tag(second_copy) == before
+    # Other .dockerignore bytes: another tag; the original bytes again: the first tag back.
+    ignore.write_bytes(original + b"environments/openhands/wheels\n")
+    changed = openhands_image.sandbox_tag(first_copy)
+    assert changed != before
+    ignore.write_bytes(original)
+    assert openhands_image.sandbox_tag(first_copy) == before
