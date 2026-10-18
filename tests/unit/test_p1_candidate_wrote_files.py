@@ -8,6 +8,11 @@ process and the grading workspace, so it is not done (ADR-F44): the test side fi
 candidate's src/ and tmp/ around every request, and any change fails the test with
 candidate_object_unsupported:candidate_wrote_files, for the rest of that test module as well.
 Reading files, and writing nothing, works as before.
+
+Not candidate-written files (ADR-F44): the temporary directory, which is no longer private to the
+candidate: the test process runs with the same TMPDIR (the step's tmp/), so tempfile.gettempdir(),
+pytest's tmp_path and a scratch file mean the same thing to both sides, as in-process; and bytecode
+caches (`__pycache__` anywhere under src/), which Python writes on import.
 """
 
 from __future__ import annotations
@@ -61,15 +66,54 @@ def scratch():
 
 def mkdir(name):
     Path(name).mkdir()
+
+
+def write_in(folder):
+    Path(folder, "out.txt").write_text("y")
+
+
+def read(path):
+    return Path(path).read_text()
+
+
+def cache_note():
+    Path("__pycache__").mkdir(exist_ok=True)
+    Path("__pycache__", "note.txt").write_text("c")
 '''
 
 _TESTS = '''
+import tempfile
 from pathlib import Path
 
 import app
 
 
 def test_reading_its_own_files_still_works():
+    assert app.own_source() == "\\nimport "
+
+
+def test_a_temporary_file_is_shared():
+    path = Path(tempfile.gettempdir(), "scratch.txt")
+    assert app.scratch() == "s"
+    assert path.read_text() == "s"
+
+
+def test_the_temporary_directory_is_the_same():
+    assert app.temp_dir() == tempfile.gettempdir()
+
+
+def test_tmp_path_is_shared(tmp_path):
+    app.write_in(str(tmp_path))
+    assert (tmp_path / "out.txt").read_text() == "y"
+
+
+def test_a_temporary_file_the_test_writes_is_read_by_the_candidate(tmp_path):
+    (tmp_path / "in.txt").write_text("hi")
+    assert app.read(str(tmp_path / "in.txt")) == "hi"
+
+
+def test_a_bytecode_cache_write_is_not_a_written_file():
+    app.cache_note()
     assert app.own_source() == "\\nimport "
 
 
@@ -81,10 +125,6 @@ def test_a_file_the_candidate_creates_is_refused():
 def test_a_forbidden_file_cannot_pass_unseen():
     app.create("forbidden")
     assert not Path("forbidden").exists()
-
-
-def test_a_temporary_file_is_refused():
-    assert app.scratch() == "s"
 
 
 def test_zz_a_later_test_cannot_miss_an_earlier_write():
@@ -113,13 +153,16 @@ _IN_PROCESS = {
     "test_a_file_the_candidate_creates_is_refused": "PASS",
     "test_a_forbidden_file_cannot_pass_unseen": "FAIL",
     "test_reading_its_own_files_still_works": "PASS",
-    "test_a_temporary_file_is_refused": "PASS",
+    "test_a_temporary_file_is_shared": "PASS",
+    "test_the_temporary_directory_is_the_same": "PASS",
+    "test_tmp_path_is_shared": "PASS",
+    "test_a_temporary_file_the_test_writes_is_read_by_the_candidate": "PASS",
+    "test_a_bytecode_cache_write_is_not_a_written_file": "PASS",
     "test_zz_a_later_test_cannot_miss_an_earlier_write": "FAIL",
 }
 _REFUSED = {
     "test_a_file_the_candidate_creates_is_refused",
     "test_a_forbidden_file_cannot_pass_unseen",
-    "test_a_temporary_file_is_refused",
     "test_zz_a_later_test_cannot_miss_an_earlier_write",
 }
 _IN_PROCESS_DIR = {
