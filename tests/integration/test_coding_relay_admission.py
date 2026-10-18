@@ -37,7 +37,7 @@ class _Upstream(BaseHTTPRequestHandler):
             {
                 "id": "chatcmpl-coding",
                 "model": "coder-upstream",
-                "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
                 "usage": {"prompt_tokens": 3, "completion_tokens": 2, "total_tokens": 5},
             }
         ).encode()
@@ -534,7 +534,7 @@ def test_each_call_appends_a_reservation_until_the_task_cap(client, role_urls) -
                 {
                     "id": "chatcmpl-wide",
                     "model": "coder-upstream",
-                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 3000, "completion_tokens": 40, "total_tokens": 3040},
                 }
             ).encode()
@@ -700,7 +700,7 @@ def test_oversized_prompt_is_rejected_before_the_provider(client, role_urls) -> 
                 {
                     "id": "chatcmpl-big",
                     "model": "coder-upstream",
-                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 250_000, "completion_tokens": 1, "total_tokens": 250_001},
                 }
             ).encode()

@@ -205,7 +205,12 @@ def test_relay_posts_the_provider_key_and_ignores_http_proxy(monkeypatch) -> Non
             encoded = json.dumps(
                 {
                     "id": "chatcmpl-upstream",
-                    "choices": [{"message": {"role": "assistant", "content": "ok"}}],
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ],
                     "usage": {"prompt_tokens": 20, "completion_tokens": 11, "total_tokens": 31},
                 }
             ).encode()
