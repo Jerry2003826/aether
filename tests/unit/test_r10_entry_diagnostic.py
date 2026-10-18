@@ -1,5 +1,5 @@
-"""An unexpected entry error keeps its type as the case detail, logs its message on one bounded
-stderr line, and the worker redacts secrets in both log tails before they are stored."""
+"""An unexpected entry error logs and reports only its type, and the worker redacts secrets in both
+log tails before they are stored."""
 
 from __future__ import annotations
 
@@ -35,22 +35,19 @@ def _crash(message: str, tmp_path: Path) -> subprocess.CompletedProcess[bytes]:
     return _entry(snippet, tmp_path)
 
 
-def test_an_unexpected_error_logs_its_message_and_keeps_the_type_as_detail(tmp_path: Path) -> None:
-    completed = _crash("[keep] copy failed\nsecond line", tmp_path)
+def test_an_unexpected_error_logs_only_its_type(tmp_path: Path) -> None:
+    # Docker's own json log keeps container output until the container is removed, and some stop
+    # paths can leave it (unconfirmed stop, worker crash, failed rm -f): nothing redacts that copy, so
+    # the message never leaves the entry. Only the type is logged and used as the detail.
+    message = f"postgresql://aether:{_FIXTURE_PASSWORD}@db:5432/aether\nsecond line"
+    completed = _crash(message, tmp_path)
     assert completed.returncode == 2
     result = json.loads(completed.stdout.decode().splitlines()[-1].removeprefix("RESULT "))
     assert result["cases"][0]["detail"] == "RuntimeError"
-    lines = [line for line in completed.stderr.decode().splitlines() if line.startswith("entry_failed ")]
-    assert lines == ["entry_failed RuntimeError: [keep] copy failed second line"]
-
-
-def test_the_logged_message_is_bounded(tmp_path: Path) -> None:
-    completed = _crash("x" * 5000, tmp_path)
-    assert completed.returncode == 2
-    lines = [line for line in completed.stderr.decode().splitlines() if line.startswith("entry_failed ")]
-    assert len(lines) == 1
-    assert lines[0].startswith("entry_failed RuntimeError: xxx")
-    assert len(lines[0]) <= len("entry_failed RuntimeError: ") + 500
+    lines = [line for line in completed.stderr.decode().splitlines() if line.startswith("entry_failed")]
+    assert lines == ["entry_failed RuntimeError"]
+    output = completed.stdout + completed.stderr
+    assert _FIXTURE_PASSWORD.encode() not in output and b"second line" not in output
 
 
 def _docker(code: str):
