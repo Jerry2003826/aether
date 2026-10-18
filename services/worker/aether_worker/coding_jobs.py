@@ -28,7 +28,7 @@ from aether_worker.coding_sandbox import (
     container_name,
     run_coding_sandbox,
 )
-from aether_worker.coding_workspace import WorkspaceError, parse_workspace, unified_patch
+from aether_worker.coding_workspace import UNCHANGED_PATCH, WorkspaceError, parse_workspace, unified_patch
 from aether_worker.runner import JOB_IMAGE
 
 _OPEN = ("QUEUED", "STARTING", "ACTIVE", "EXPORTING")
@@ -1044,7 +1044,7 @@ def _fail(
             row=row,
             state="FAILED",
             error_code=error_code,
-            patch=b"--- a/empty\n+++ b/empty\n",
+            patch=UNCHANGED_PATCH.encode(),
             result=result,
             events=events,
             revoke=False,
@@ -1432,9 +1432,33 @@ def _agent_patch(sandbox: dict[str, Any]) -> str | None:
     if not isinstance(result, dict):
         return None
     patch = result.get("patch")
-    if isinstance(patch, str) and patch.startswith("--- "):
+    if isinstance(patch, str) and (patch.startswith("--- ") or _git_patch_with_change(patch)):
         return patch
     return None
+
+
+# Lines under a `diff --git` header that git writes only for an actual change: hunks, a binary
+# patch with its data, file creation or deletion, a mode change, a rename or copy. A header with
+# only an index line, or "Binary files ... differ" without --binary data, changes nothing.
+_GIT_CHANGE_LINES = (
+    "--- ",
+    "+++ ",
+    "@@ ",
+    "GIT binary patch",
+    "new file mode ",
+    "deleted file mode ",
+    "old mode ",
+    "new mode ",
+    "rename from ",
+    "copy from ",
+)
+
+
+def _git_patch_with_change(patch: str) -> bool:
+    """A patch in git's own format (`diff --git a/... b/...`) that carries at least one change."""
+    if not patch.startswith("diff --git "):
+        return False
+    return any(line.startswith(_GIT_CHANGE_LINES) for line in patch.splitlines()[1:])
 
 
 def _patch_source(sandbox: dict[str, Any]) -> str:
