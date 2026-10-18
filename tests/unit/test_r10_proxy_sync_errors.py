@@ -14,7 +14,6 @@ import os
 from pathlib import Path
 
 import pytest
-
 from aether_worker import coding_protocol
 
 

@@ -410,10 +410,22 @@ class _Session:
             self.close()
             raise CandidateError(self._dead)
         # The candidate's changes to shared containers land before its result or its exception.
-        self._incoming(reply.get("sync", []))
-        if "err" in reply:
-            raise _exception(reply["err"])
-        return _decode(reply.get("ok"), self)
+        try:
+            self._incoming(reply.get("sync", []))
+            if "err" in reply:
+                raw = reply["err"]
+                if not (isinstance(raw, list) and len(raw) == 3 and all(type(item) is str for item in raw)):
+                    raise CandidateError("candidate_protocol")
+                error = _exception(raw)
+            else:
+                return _decode(reply.get("ok"), self)
+        except Exception:  # noqa: BLE001 - whatever the candidate sent that does not decode
+            # A malformed reply is the candidate breaking the protocol: the session is over, and the
+            # test sees candidate_protocol, never a TypeError or ValueError it could take as expected.
+            self._dead = "candidate_protocol"
+            self.close()
+            raise CandidateError(self._dead) from None
+        raise error
 
     def mirror(self, value: object) -> int:
         """The shared id of a builtin container the test hands to candidate code."""
