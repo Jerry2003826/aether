@@ -252,6 +252,45 @@ def _output(reply: dict) -> list[tuple[int, str]] | None:
     return found
 
 
+# The test process runs in the grading workspace, the candidate in its own src/ (TMPDIR its tmp/).
+# Carrying what the candidate writes over to the test's side would put candidate-written content in
+# the trusted process and the grading workspace, so it is not done: a candidate that writes files is
+# refused by name instead of graded against a view that misses them (Codex r4308195953).
+_CANDIDATE_WROTE_FILES = "candidate_wrote_files"
+
+
+def _files_state(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
+    """Every entry under the candidate's src/ and tmp/ (bytecode caches aside), by lstat, never followed.
+
+    A file the candidate created, removed, rewrote or renamed changes it; one it reads does not. A
+    directory this side cannot read counts as a change.
+    """
+    found: dict[str, tuple[int, ...]] = {}
+    if sandbox is None:
+        return found
+    pending = [(label, Path(sandbox[label])) for label in ("src", "tmp")]
+    while pending:
+        label, folder = pending.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            found[label] = (-1,)
+            continue
+        for entry in entries:
+            if entry.name == "__pycache__":
+                continue
+            name = label + "/" + entry.name
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                found[name] = (-1,)
+                continue
+            found[name] = (info.st_mode, info.st_size, info.st_mtime_ns, info.st_ino)
+            if stat.S_ISDIR(info.st_mode):
+                pending.append((name, Path(entry.path)))
+    return found
+
+
 class _OutputSink:
     """Candidate side: the writes of the current request, bounded."""
 
@@ -481,6 +520,10 @@ class _Session:
         self._synced: dict[int, str] = {}
         # One proxy per candidate handle, so the same candidate object is the same object to the test.
         self._remotes: dict[int, _Remote] = {}
+        # The candidate's src/ and tmp/ as they were before it started (see _files_state), and whether
+        # it has changed them since: its files are never synced to this side (ADR-F44).
+        self._files: dict[str, tuple[int, ...]] | None = None
+        self._wrote = False
 
     def remote(self, handle: int, make) -> _Remote:
         found = self._remotes.get(handle)
@@ -493,6 +536,7 @@ class _Session:
             # No candidate directory: never fall back to running candidate code in the grading workspace.
             self._dead = _ISOLATION_UNAVAILABLE + ":no_candidate_dir"
             raise CandidateError(self._dead)
+        self._files = _files_state(self._sandbox)
         child_in, to_child = os.pipe()
         from_child, child_out = os.pipe()
         env = _child_env()
@@ -546,6 +590,8 @@ class _Session:
     def _request(self, message: dict[str, object]) -> object:
         if self._dead is not None:
             raise CandidateError(self._dead)
+        if self._wrote:
+            raise _unsupported(_CANDIDATE_WROTE_FILES)
         if self._process is None:
             self._start()
         assert self._to is not None and self._from is not None
@@ -571,6 +617,7 @@ class _Session:
             else:
                 value = _decode(reply.get("ok"), self)
                 self._deliver(output)
+                self._check_files()
                 return value
         except Exception:  # noqa: BLE001 - whatever the candidate sent that does not decode
             # A malformed reply is the candidate breaking the protocol: the session is over, and the
@@ -579,7 +626,18 @@ class _Session:
             self.close()
             raise CandidateError(self._dead) from None
         self._deliver(output)
+        self._check_files()
         raise error
+
+    def wrote_files(self) -> bool:
+        """Whether the candidate has written, made or removed anything in its directories (sticky)."""
+        if not self._wrote and self._files is not None and _files_state(self._sandbox) != self._files:
+            self._wrote = True
+        return self._wrote
+
+    def _check_files(self) -> None:
+        if self.wrote_files():
+            raise _unsupported(_CANDIDATE_WROTE_FILES)
 
     def _deliver(self, output: list[tuple[int, str]] | None) -> None:
         """The candidate's writes, to whatever sys.stdout/sys.stderr the test has now (capsys, redirect_stdout)."""
@@ -2179,6 +2237,10 @@ def _run_pytest(root: Path, relative: str, module: types.ModuleType, request: di
             elif _Current.unsupported is not None:
                 # Any unsupported use of a candidate object fails the test, even if the test caught it.
                 verdict, detail = "FAIL", "candidate_object_unsupported:" + _Current.unsupported
+            elif _Current.session is not None and _Current.session.wrote_files():
+                # Every test after the candidate wrote files, even one that never calls it again: what
+                # it sees of the filesystem is not what an in-process run would show.
+                verdict, detail = "FAIL", "candidate_object_unsupported:" + _CANDIDATE_WROTE_FILES
             emit({"kind": "result", "name": _item_name(item) if item is not None else "", "verdict": verdict, "detail": detail})
             current = _Current.session
             if current is not None and current._dead is not None and self.session is not None:

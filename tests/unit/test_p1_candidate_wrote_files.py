@@ -69,6 +69,10 @@ from pathlib import Path
 import app
 
 
+def test_reading_its_own_files_still_works():
+    assert app.own_source() == "\\nimport "
+
+
 def test_a_file_the_candidate_creates_is_refused():
     app.create("made.txt")
     assert Path("made.txt").read_text() == "x"
@@ -77,10 +81,6 @@ def test_a_file_the_candidate_creates_is_refused():
 def test_a_forbidden_file_cannot_pass_unseen():
     app.create("forbidden")
     assert not Path("forbidden").exists()
-
-
-def test_reading_its_own_files_still_works():
-    assert app.own_source() == "\\nimport "
 
 
 def test_a_temporary_file_is_refused():
@@ -98,13 +98,14 @@ from pathlib import Path
 import app
 
 
+def test_reading_works():
+    assert app.own_source() == "\\nimport "
+
+
 def test_a_directory_the_candidate_makes_cannot_pass_unseen():
     app.mkdir("made")
     assert not Path("made").exists()
 
-
-def test_reading_works():
-    assert app.own_source() == "\\nimport "
 '''
 
 _REASON = "candidate_object_unsupported:candidate_wrote_files"

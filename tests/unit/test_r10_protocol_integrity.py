@@ -292,7 +292,10 @@ def test_a_test_package_under_a_plain_tests_dir_supports_relative_imports(tmp_pa
 
 
 def test_test_files_created_during_the_run_are_never_graded(tmp_path: Path) -> None:
-    """Trusted tests are collected from the baseline snapshot before any candidate code runs."""
+    """Trusted tests are collected from the baseline snapshot before any candidate code runs.
+
+    Writing them is itself refused (Codex r4308195953, ADR-F44): the import that wrote them fails each
+    module by name, and none of the written files is ever collected."""
     _write(
         tmp_path,
         {
@@ -309,8 +312,12 @@ def test_test_files_created_during_the_run_are_never_graded(tmp_path: Path) -> N
         },
     )
     code, body = _grade(tmp_path)
-    assert {case["name"] for case in body["cases"]} == {"test_a.test_a", "tests.test_b.test_b"}, body
-    assert (code, body["passed"], body["failed"]) == (0, 2, 0), body
+    refused = "import:candidate_object_unsupported:candidate_wrote_files"
+    assert {case["name"]: (case["verdict"], case["detail"]) for case in body["cases"]} == {
+        "test_a": ("FAIL", refused),
+        "tests.test_b": ("FAIL", refused),
+    }, body
+    assert (code, body["passed"], body["failed"]) == (1, 0, 2), body
 
 
 def test_same_named_helpers_in_two_test_dirs_resolve_to_each_tests_own_dir(tmp_path: Path) -> None:
