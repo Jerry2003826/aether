@@ -955,7 +955,14 @@ class _Remote:
         raise _unsupported("issubclass_candidate_class")
 
     __eq__ = __ne__ = __lt__ = __le__ = __gt__ = __ge__ = _refuse  # type: ignore[assignment]
-    __hash__ = object.__hash__
+
+    def __hash__(self) -> int:
+        # Identity, as in-process, while the object's class hashes as Python's builtins do. A class
+        # that rewrites __hash__ (or sets it to None by defining __eq__) would be answered by
+        # candidate code: refused, never answered with a hash made up here (Codex r4307762550).
+        if self._aether("hash_hook") is not False:
+            raise _unsupported("hash_of_candidate_object")
+        return object.__hash__(self)
 
     def _operate(self, name: str, *operands: object) -> object:
         return self._aether("operate", name=name, args=[_encode_tree(item) for item in operands])
@@ -1064,7 +1071,8 @@ class _RemoteData(_Remote):
 
     def __hash__(self) -> int:
         if "__hash__" in self._aether_hooks:
-            return object.__hash__(self)
+            # The class rewrites hash (or makes it unhashable with __eq__): never made up here.
+            raise _unsupported("hash_of_candidate_object")
         if self._aether_base not in _IMMUTABLE_BASES:
             raise TypeError(f"unhashable type: '{self._aether_type}'")
         return hash(self._aether_snapshot)
@@ -2185,6 +2193,10 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             return encode(decode(message["item"]) in target)
         if op == "str":
             return encode(exact(str(target)))
+        if op == "hash_hook":
+            # Whether hash(target) would run anything but a builtin hash (or refuse, with None).
+            owner = next(cls for cls in type(target).__mro__ if "__hash__" in cls.__dict__)
+            return ["b", owner.__dict__["__hash__"] is None or owner.__module__ != "builtins"]
         if op == "base":
             base = _data_base(type(target))
             if base is None:
