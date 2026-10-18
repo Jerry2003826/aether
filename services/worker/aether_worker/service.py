@@ -23,6 +23,7 @@ import aether_worker.goal_effect as goal_effect
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.coding_jobs import execute_queued_coding_jobs
+from aether_worker.coding_sandbox import sweep_leftover_coding_containers
 from aether_worker.console_commands import CONSOLE_KINDS, VERIFIER_KINDS, apply_console_commands, apply_verifier_commands
 from aether_worker.dispatcher import TEMPORAL_COMMAND_KINDS, deliver_pending
 from aether_worker.durable_workflow import DurableTaskWorkflow
@@ -256,6 +257,8 @@ def warn_if_git_missing() -> None:
 async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     children: list[subprocess.Popen[str]] = []
     warn_if_git_missing()
+    # Coding containers a previous run left behind (crash, unconfirmed stop, failed removal).
+    sweep_leftover_coding_containers()
     try:
         if endpoints is None:
             endpoints, children = _endpoints_for_process()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import os
 import re
 import shutil
 import subprocess
@@ -12,6 +13,7 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -57,6 +59,18 @@ CODING_MEMORY_BYTES = 805306368
 # (ADR-F44), so the container must outlast its cap. The job lease (30 s) is renewed on every 0.25 s poll
 # while the container runs, so a longer container time does not let it lapse.
 CODING_SANDBOX_TIMEOUT_SECONDS = 80 + PROTOCOL_CAP_SECONDS + 5 + 30
+# A stopped coding container older than this is left over (its worker collected it, or never will):
+# far past the time any worker needs between seeing the exit and removing the container.
+LEFTOVER_GRACE_SECONDS = 600
+_DEPLOYMENT_ENV = "AETHER_DEPLOYMENT_ID"
+_ZERO_TIME = "0001-01-01T00:00:00Z"
+
+
+def deployment_label() -> str:
+    """aether.deployment=<AETHER_DEPLOYMENT_ID, else local>: the startup sweep only ever touches
+    coding containers with this deployment's label, never another stack's on the same daemon."""
+    value = re.sub(r"[^A-Za-z0-9_.-]", "_", os.environ.get(_DEPLOYMENT_ENV, "").strip())[:64]
+    return f"aether.deployment={value or 'local'}"
 _MODEL_SOCKET = "/run/aether/proxy/model.sock"
 # The proxy (directory, job token) each container this process started is wired to, and the id
 # `docker run -d` answered for it ("" if it named none), by job id. A run always gets a fresh proxy
@@ -104,7 +118,7 @@ def container_arguments(
     text = checked_objective(objective)
     labels: list[str] = []
     if job_id is not None:
-        labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding"]
+        labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding", "--label", deployment_label()]
     proxy: list[str] = []
     if proxy_dir is not None and job_token:
         proxy = [
@@ -591,11 +605,83 @@ def _raise_after_stop(
     raise CodingSandboxError(confirmed_code, logs)
 
 
+def _remove_after_exit(name: str) -> None:
+    """rm -f, once more if it fails; a container still left is logged and swept at the next start."""
+    for _attempt in range(2):
+        if _sandbox_docker(["rm", "-f", name]).returncode == 0:
+            return
+    _LOG.warning("coding_container_left name=%s", name)
+
+
+def _parse_time(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value or value.startswith("0001-"):
+        return None
+    text = value.strip().replace("Z", "+00:00")
+    # Docker writes nanoseconds; datetime takes at most microseconds.
+    text = re.sub(r"(\.\d{6})\d+", r"\1", text)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+
+
+def _leftover(details: dict[str, Any], now: datetime) -> bool:
+    """Running (or paused, restarting) past the longest run a coding sandbox may take plus the grace,
+    or stopped (exited, dead, created and never started) for longer than the grace."""
+    state = details.get("State") if isinstance(details.get("State"), dict) else {}
+    status = str(state.get("Status") or "")
+    if status in {"running", "paused", "restarting"}:
+        started = _parse_time(state.get("StartedAt"))
+        return started is not None and (now - started).total_seconds() > CODING_SANDBOX_TIMEOUT_SECONDS + LEFTOVER_GRACE_SECONDS
+    stopped = _parse_time(state.get("FinishedAt")) or _parse_time(state.get("StartedAt")) or _parse_time(details.get("Created"))
+    return stopped is not None and (now - stopped).total_seconds() > LEFTOVER_GRACE_SECONDS
+
+
+def sweep_leftover_coding_containers(*, now: datetime | None = None) -> list[str]:
+    """Remove this deployment's leftover coding containers (see _leftover); the ids removed.
+
+    Run when the worker starts: a container that outlived its job (an unconfirmed stop, a failed rm -f,
+    a worker that died before removing it) keeps the job's output in Docker's own log until removed.
+    Only containers labelled aether.role=coding and this deployment_label(); never a young one, which a
+    live worker may still be collecting. Best effort: nothing here stops the worker from starting. With
+    a delegated sandbox (the runner owns Docker) the worker does not sweep.
+    """
+    if worker_delegates():
+        _LOG.info("coding_container_sweep skipped=delegated")
+        return []
+    moment = now or datetime.now(UTC)
+    removed: list[str] = []
+    try:
+        if not docker_available():
+            return []
+        listing = _sandbox_docker(["ps", "-aq", "--filter", "label=aether.role=coding", "--filter", f"label={deployment_label()}"])
+        if listing.returncode != 0:
+            return []
+        for container in listing.stdout.split():
+            inspected = _sandbox_docker(["inspect", "-f", '{"State":{{json .State}},"Created":{{json .Created}}}', container])
+            if inspected.returncode != 0:
+                continue
+            try:
+                details = json.loads(inspected.stdout)
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(details, dict) or not _leftover(details, moment):
+                continue
+            if _sandbox_docker(["rm", "-f", container]).returncode == 0:
+                removed.append(container)
+    except Exception:  # noqa: BLE001 - best effort; the worker starts either way
+        _LOG.warning("coding_container_sweep_failed", exc_info=True)
+    if removed:
+        _LOG.warning("coding_container_sweep removed=%d ids=%s", len(removed), ",".join(removed))
+    return removed
+
+
 def _collect_exit(name: str, *, heartbeat: Callable[[], None] | None = None) -> dict[str, Any]:
     captured = _bounded_logs(name, limit=RESULT_CAPTURE_LIMIT, heartbeat=heartbeat)
     logs = _log_tails(captured)
     code = _exit_code(name)
-    _sandbox_docker(["rm", "-f", name])
+    _remove_after_exit(name)
     result = _result_line(captured["stdout"])
     if code not in {0, 1} or result is None:
         raise CodingSandboxError("sandbox_failed", logs)

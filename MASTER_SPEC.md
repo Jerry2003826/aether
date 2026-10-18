@@ -789,7 +789,9 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 
 指标：queue depth、active jobs、workflow retry、unknown operations、approval age、budget held/actual、parser errors、index lag、retrieval latency、verification failure、skill rollback。为每个故障提供UI和诊断命令，不能只有日志里一个traceback。
 
-**编码评分：候选文件超过 8 MiB**：评分进程每步复制的候选非评分文件总量超过 8 MiB 时不跑任何测试，测试结果（`aether.coding_test_result`）里只有一条 `name=suite`、`verdict=FAIL`、`detail=candidate_files_too_large` 的用例，（评分进程 stderr 里的文件名清单不回传到作业日志）。排查：在任务基线与发布补丁里找出大文件（如 `find . -type f -size +512k -not -path "./tests/*" -not -path "./.git/*"`，再看补丁新增的数据、生成物或依赖目录），从任务基线移除或改放评分目录；这不是候选代码的测试失败，不要按普通 test_failed 处理。入口意外异常的 stderr 只有 `entry_failed <类型名>`，不含异常消息；存储前日志尾部经 `secret_scan.redact_text` 整段脱敏。
+**编码评分：候选文件超过 8 MiB**：评分进程每步复制的候选非评分文件总量超过 8 MiB 时不跑任何测试，测试结果（`aether.coding_test_result`）里只有一条 `name=suite`、`verdict=FAIL`、`detail=candidate_files_too_large` 的用例，（评分进程 stderr 里的文件名清单不回传到作业日志）。排查：在任务基线与发布补丁里找出大文件（如 `find . -type f -size +512k -not -path "./tests/*" -not -path "./.git/*"`，再看补丁新增的数据、生成物或依赖目录），从任务基线移除或改放评分目录；这不是候选代码的测试失败，不要按普通 test_failed 处理。
+
+**编码容器残留**：每个编码容器带 `aether.role=coding` 与 `aether.deployment=<AETHER_DEPLOYMENT_ID，未设为 local>` 标签。同一 Docker 守护进程上跑多套部署时，各自必须设置不同的 `AETHER_DEPLOYMENT_ID`。worker 启动时只清理本部署的残留容器：已停止超过 10 分钟的，或运行时间超过编码沙箱最长运行时长再加 10 分钟的；年轻容器与其他部署的容器不动。退出后 `rm -f` 失败会重试一次，仍失败时记 `coding_container_left`，等下次启动清理。委托模式（runner 管 Docker）下 worker 不清理，记 `coding_container_sweep skipped=delegated`。手动排查：`docker ps -a --filter label=aether.role=coding --filter label=aether.deployment=<id>`。入口意外异常的 stderr 只有 `entry_failed <类型名>`，不含异常消息；存储前日志尾部经 `secret_scan.redact_text` 整段脱敏。
 
 ## 7. 禁止默认危险的运维行为
 
