@@ -19,8 +19,10 @@ Isolation: three kinds of process, and candidate code only ever runs in the last
              timeout; the module's remaining tests then run in a fresh test process.
   candidate  started by the test process. Candidate modules there are proxies: attribute access and
              calls cross a pipe and only data comes back (builtin values, or opaque handles that refuse
-             comparison and truth), so candidate code can neither reach the test's frames, oracle or
-             result, nor hand back an object that compares equal to everything. It sees only candidate
+             comparison and truth; an instance of a builtin-type subclass is a handle that compares as
+             its builtin data unless its class defines that comparison), so candidate code can neither
+             reach the test's frames, oracle or result, nor hand back an object that compares equal to
+             everything. It sees only candidate
              files: its cwd is a fresh directory the grader fills with the workspace's non-grading files
              for that one test process, and before any candidate code runs it locks itself (Landlock) to that
              directory, a private temp dir and the system/interpreter paths, so the grading workspace,
@@ -38,6 +40,7 @@ from __future__ import annotations
 
 import base64
 import builtins
+import collections
 import ctypes
 import hashlib
 import importlib.abc
@@ -325,6 +328,14 @@ class _Session:
         self._mirrors: dict[int, object] = {}
         self._mirror_ids: dict[int, int] = {}
         self._synced: dict[int, str] = {}
+        # One proxy per candidate handle, so the same candidate object is the same object to the test.
+        self._remotes: dict[int, _Remote] = {}
+
+    def remote(self, handle: int, make) -> _Remote:
+        found = self._remotes.get(handle)
+        if found is None:
+            found = self._remotes[handle] = make()
+        return found
 
     def _start(self) -> None:
         if self._sandbox is None:
@@ -525,7 +536,7 @@ def _decode(node: object, session: _Session, depth: int = 0) -> object:
     tag, rest = node[0], node[1:]
     if tag == "n" and not rest:
         return None
-    if len(rest) != 1 and tag != "h":
+    if len(rest) != 1 and tag not in {"h", "v"}:
         raise CandidateError("candidate_protocol")
     value = rest[0] if rest else None
     if tag == "b" and type(value) is bool:
@@ -551,10 +562,37 @@ def _decode(node: object, session: _Session, depth: int = 0) -> object:
             result[_decode(pair[0], session, depth + 1)] = _decode(pair[1], session, depth + 1)
         return result
     if tag == "h" and len(rest) == 2 and type(rest[0]) is int and type(rest[1]) is str:
-        return _Remote(session, rest[0], rest[1][:200])
+        handle, kind = rest[0], rest[1][:200]
+        return session.remote(handle, lambda: _Remote(session, handle, kind))
+    if tag == "v":
+        return _decode_data_handle(rest, session, depth)
     if tag == "m" and type(value) is int and value in session._mirrors:
         return session._mirrors[value]
     raise CandidateError("candidate_protocol")
+
+
+def _decode_data_handle(rest: list[object], session: _Session, depth: int) -> object:
+    """["v", handle, qualname, base, snapshot, hooks, rebuild]: see _RemoteData."""
+    if not (
+        len(rest) == 6
+        and type(rest[0]) is int
+        and type(rest[1]) is str
+        and rest[2] in _DATA_BASES
+        and isinstance(rest[4], list)
+        and all(hook in _DATA_HOOKS for hook in rest[4])
+        and (rest[5] == "" or rest[5] in _STDLIB_KINDS)
+    ):
+        raise CandidateError("candidate_protocol")
+    handle, kind, base, hooks, rebuild = rest[0], rest[1][:200], rest[2], frozenset(rest[4]), rest[5]
+    snapshot = None
+    if base in _IMMUTABLE_BASES:
+        # Immutable: the data cannot change, so it is read once, in the test process.
+        snapshot = _decode(rest[3], session, depth + 1)
+        if type(snapshot) is not _DATA_BASES[base]:
+            raise CandidateError("candidate_protocol")
+    elif rest[3] is not None:
+        raise CandidateError("candidate_protocol")
+    return session.remote(handle, lambda: _RemoteData(session, handle, kind, base, snapshot, hooks, rebuild))
 
 
 def _encode_trusted(value: object, depth: int = 0) -> list[object]:
@@ -575,10 +613,55 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
 # Builtin containers that cross by reference, as in-process (Codex :512): each side keeps its own
 # object under a shared id and the states are exchanged on every request and reply, so in-place
 # changes, references kept by either side and identity behave as in one process. Candidate code only
-# runs while a request is open, so the test never observes a state in between. Subclasses (defaultdict,
-# OrderedDict, Counter, deque, ...) still cross by value.
+# runs while a request is open, so the test never observes a state in between. A candidate's instance of
+# a subclass (defaultdict, Counter, `class Result(list)`, a namedtuple, ...) crosses as a _RemoteData
+# handle; a subclass instance the test passes in still crosses by value, as its builtin base.
 _MIRRORED = (list, dict, set, bytearray)
 _MIRROR_KINDS: dict[object, type] = {"l": list, "d": dict, "S": set, "y": bytearray}
+
+# Builtin data types a candidate class can subclass (Codex :1504), each with a C method of the base
+# type that ignores the subclass's overrides and returns the exact base type.
+_BASE_COPIES: dict[type, Any] = {
+    int: int.__int__,
+    float: float.__float__,
+    complex: complex.__complex__,
+    str: str.__str__,
+    bytes: bytes.__bytes__,
+    tuple: lambda value: tuple.__getitem__(value, slice(None)),
+    frozenset: frozenset.copy,
+    list: list.copy,
+    dict: dict.copy,
+    set: set.copy,
+    bytearray: bytearray.copy,
+}
+_DATA_BASES: dict[str, type] = {kind.__name__: kind for kind in _BASE_COPIES}
+_IMMUTABLE_BASES = frozenset({"int", "float", "complex", "str", "bytes", "tuple", "frozenset"})
+_EXACT_DATA = (bool, int, float, complex, str, bytes, tuple, frozenset)
+# The hooks that decide comparison, truth and hash. A candidate class that defines one itself (before
+# its builtin base in the MRO) has that use refused, as for any candidate object.
+_DATA_HOOKS = ("__eq__", "__ne__", "__lt__", "__le__", "__gt__", "__ge__", "__hash__", "__bool__", "__len__")
+# Stdlib classes with their own comparison: the test rebuilds them from the data with its own copy of
+# the class (the candidate's copy is never trusted) and compares that.
+_STDLIB_KINDS: dict[str, type] = {"collections.Counter": collections.Counter, "collections.OrderedDict": collections.OrderedDict}
+
+
+def _data_base(kind: type) -> type | None:
+    return next((cls for cls in kind.__mro__ if cls in _BASE_COPIES), None)
+
+
+def _data_hooks(kind: type, base: type) -> tuple[list[str], str]:
+    """Candidate side: the hooks kind defines over its builtin base, and the stdlib class to rebuild."""
+    hooks: list[str] = []
+    rebuild = ""
+    for cls in kind.__mro__:
+        if cls is base:
+            break
+        name = f"{cls.__module__}.{cls.__qualname__}"
+        if _STDLIB_KINDS.get(name) is cls:
+            rebuild = rebuild or name
+            continue
+        hooks.extend(hook for hook in _DATA_HOOKS if hook in cls.__dict__ and hook not in hooks)
+    return hooks, rebuild
 
 
 def _encode_shared_item(item: object, depth: int) -> list[object]:
@@ -782,6 +865,74 @@ class _Remote:
 # Operations a candidate object answers for itself (Codex :627). Anything the proxy does not carry
 # fails the test as unsupported (above), never as Python's own TypeError on the proxy.
 _BINARY = ("add", "sub", "mul", "truediv", "floordiv", "mod", "pow", "matmul", "lshift", "rshift", "and", "or", "xor")
+class _RemoteData(_Remote):
+    """A candidate's instance of a builtin-type subclass (Codex :1504): `class Result(list)`, a
+    namedtuple, an IntEnum, a str subclass, Counter, ... It is a handle like any candidate object, so
+    attributes, methods and its own hooks (`__len__`, `__iter__`, `__missing__`, ...) run in the
+    candidate as in-process. Comparison, truth and hash are what in-process Python would use when the
+    class does not define them: those of its builtin data, computed here on data alone. A class that
+    defines one of them gets that use refused (ADR-F44), so it cannot make `result == expected` pass.
+    """
+
+    __slots__ = ("_aether_base", "_aether_hooks", "_aether_rebuild", "_aether_snapshot")
+
+    def __init__(
+        self, session: _Session, handle: int, kind: str, base: str, snapshot: object, hooks: frozenset[str], rebuild: str
+    ) -> None:
+        super().__init__(session, handle, kind)
+        object.__setattr__(self, "_aether_base", base)
+        object.__setattr__(self, "_aether_snapshot", snapshot)
+        object.__setattr__(self, "_aether_hooks", hooks)
+        object.__setattr__(self, "_aether_rebuild", rebuild)
+
+    def _aether_data(self, hook: str) -> object:
+        if hook in self._aether_hooks:
+            raise _unsupported("compare_candidate_object")
+        base = _DATA_BASES[self._aether_base]
+        if self._aether_base in _IMMUTABLE_BASES:
+            value = self._aether_snapshot
+        else:
+            # Mutable: read now, so changes made through candidate methods are seen.
+            value = self._aether("base")
+            if base is bytearray and type(value) is bytes:
+                value = bytearray(value)
+            if type(value) is not base:
+                raise CandidateError("candidate_protocol")
+        rebuild = _STDLIB_KINDS.get(self._aether_rebuild)
+        return value if rebuild is None else rebuild(value)
+
+    def __eq__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__eq__") == other
+
+    def __ne__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__ne__") != other
+
+    def __lt__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__lt__") < other  # type: ignore[operator]
+
+    def __le__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__le__") <= other  # type: ignore[operator]
+
+    def __gt__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__gt__") > other  # type: ignore[operator]
+
+    def __ge__(self, other: object) -> bool:  # type: ignore[override]
+        return self._aether_data("__ge__") >= other  # type: ignore[operator]
+
+    def __bool__(self) -> bool:
+        numeric = self._aether_base in {"int", "float", "complex"}
+        if "__bool__" in self._aether_hooks or ("__len__" in self._aether_hooks and not numeric):
+            raise _unsupported("truth_of_candidate_object")
+        return bool(self._aether_data(""))
+
+    def __hash__(self) -> int:
+        if "__hash__" in self._aether_hooks:
+            return object.__hash__(self)
+        if self._aether_base not in _IMMUTABLE_BASES:
+            raise TypeError(f"unhashable type: '{self._aether_type}'")
+        return hash(self._aether_snapshot)
+
+
 _OPERATIONS: dict[str, Any] = {
     **{name: getattr(operator, name + "_" if name in {"and", "or"} else name) for name in _BINARY},
     **{"i" + name: getattr(operator, "i" + name) for name in _BINARY},
@@ -1778,9 +1929,15 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             mirrors[shared] = value
         return ["m", mirror_ids[key]]
 
+    kept: dict[int, int] = {}
+
     def keep(value: object) -> list[object]:
-        handle = len(handles) + 1
-        handles[handle] = value
+        # One handle per object (handles keeps it alive, so its id stays its own).
+        handle = kept.get(id(value))
+        if handle is None:
+            handle = len(handles) + 1
+            handles[handle] = value
+            kept[id(value)] = handle
         return ["h", handle, type(value).__qualname__]
 
     def encode(value: object, depth: int = 0) -> list[object]:
@@ -1790,7 +1947,24 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
             return keep(value)
         if type(value) in _MIRRORED:
             return mirror(value)
-        return _encode_data(value, depth, encode) or keep(value)
+        if value is None or type(value) in _EXACT_DATA:
+            return _encode_data(value, depth, encode)
+        base = _data_base(type(value))
+        if base is None:
+            return keep(value)
+        # A builtin-type subclass (Codex :1504): kept by reference, with its builtin data for comparison.
+        held = keep(value)
+        hooks, rebuild = _data_hooks(type(value), base)
+        snapshot = _encode_data(_BASE_COPIES[base](value), depth, encode) if base.__name__ in _IMMUTABLE_BASES else None
+        return ["v", held[1], held[2], base.__name__, snapshot, hooks, rebuild]
+
+    def exact(value: object) -> object:
+        # str/bytes from a conversion (str(), format(), os.fspath(), bytes()) are text, not a handle.
+        if isinstance(value, str):
+            return str.__str__(value)
+        if isinstance(value, bytes):
+            return bytes.__bytes__(value)
+        return value
 
     def decode(node: object) -> object:
         if isinstance(node, list) and node and node[0] == "h":
@@ -1857,11 +2031,18 @@ def _candidate_main(read_fd: int, write_fd: int) -> None:
         if op == "contains":
             return encode(decode(message["item"]) in target)
         if op == "str":
-            return encode(str(target))
+            return encode(exact(str(target)))
+        if op == "base":
+            base = _data_base(type(target))
+            if base is None:
+                raise ValueError("unknown_op")
+            return _encode_data(_BASE_COPIES[base](target), 0, encode)
         if op == "operate":
             # One of a fixed set of operations, run here exactly as Python would run it in-process
             # (reflected and in-place forms included), so a TypeError is the candidate's own.
-            return encode(_OPERATIONS[message["name"]](*[decode(item) for item in message["args"]]))
+            name = message["name"]
+            result = _OPERATIONS[name](*[decode(item) for item in message["args"]])
+            return encode(exact(result) if name in {"format", "fspath", "bytes"} else result)
         raise ValueError("unknown_op")
 
     def receive_states(sync: list) -> None:
