@@ -753,6 +753,11 @@ def _remove_added_shadow_modules(work: Path, job: Path) -> list[str]:
     return flagged
 
 
+def _git_mode(path: Path) -> int:
+    """The mode copy_tree gives a job copy of `path`: git records only the executable bit."""
+    return 0o755 if _executable(path) else 0o644
+
+
 def _baseline_files(work: Path, editable: Collection[str] | None, marked: frozenset[str]) -> dict[str, bytes]:
     """Every grading file of the job-creation workspace, by content. Caches are never baseline."""
     found: dict[str, bytes] = {}
@@ -782,8 +787,10 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     Grading files that existed at baseline are rewritten from it; grading files the agent
     added are deleted, and so is every symlink. Other source files keep the agent's edits
     and additions, except NEW top-level modules or packages that shadow stdlib, installed
-    packages or verification._SHADOW_ROOTS names, which are deleted. The grading set is then
-    verified against the baseline SHA-256 hashes. After the cleanup an added startup hook
+    packages or verification._SHADOW_ROOTS names, which are deleted. Every baseline grading file also
+    gets the mode copy_tree gives it (0o755 if executable in the baseline, else 0o644), so a chmod
+    alone is undone. The grading set is then verified against the baseline SHA-256 hashes and those
+    modes. After the cleanup an added startup hook
     raises StartupHookAdded and an added shadow module raises ShadowModuleAdded.
     """
     # Root helpers marked in the baseline (`# aether: grading` on line one, or line two after a shebang
@@ -792,6 +799,9 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     marked = grading_files.marked_grading_files(work)
     baseline = _baseline_files(work, editable, marked)
     expected = {name: _digest(data) for name, data in baseline.items()}
+    # The mode is part of the trusted file: a chmod alone (world-writable, executable bit added or dropped)
+    # must not survive into the graded directory either.
+    modes = {name: _git_mode(work / name) for name in baseline}
     hooks: list[str] = []
     shadows = _remove_added_shadow_modules(work, job)
     for path in sorted(job.rglob("*"), key=lambda item: len(item.parts), reverse=True):
@@ -809,13 +819,13 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
             _remove(path)
     for name, data in baseline.items():
         target = job / name
-        if target.is_file() and not target.is_symlink() and _digest(target.read_bytes()) == expected[name]:
-            continue
-        if os.path.lexists(target):
-            _remove(target)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
-    _verify_grading_directory(job, expected, editable, marked)
+        if not (target.is_file() and not target.is_symlink() and _digest(target.read_bytes()) == expected[name]):
+            if os.path.lexists(target):
+                _remove(target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(data)
+        os.chmod(target, modes[name])
+    _verify_grading_directory(job, expected, editable, marked, modes)
     if hooks:
         raise StartupHookAdded("grading_startup_hook")
     if shadows:
@@ -823,7 +833,11 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
 
 
 def _verify_grading_directory(
-    job: Path, expected: dict[str, str], editable: Collection[str] | None, marked: frozenset[str] = frozenset()
+    job: Path,
+    expected: dict[str, str],
+    editable: Collection[str] | None,
+    marked: frozenset[str],
+    modes: dict[str, int],
 ) -> None:
     present = grading_files.grading_paths(job, editable, marked)
     if any((job / name).is_symlink() for name in present):
@@ -833,6 +847,8 @@ def _verify_grading_directory(
     for name in present:
         if _digest((job / name).read_bytes()) != expected[name]:
             raise RuntimeError("grading_hash_mismatch")
+        if stat.S_IMODE((job / name).stat().st_mode) != modes[name]:
+            raise RuntimeError("grading_mode_mismatch")
 
 
 def main() -> None:
