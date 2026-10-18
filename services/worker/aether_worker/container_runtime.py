@@ -331,7 +331,8 @@ def _ensure_run_image(image: str) -> subprocess.CompletedProcess[str] | None:
     try:
         client.images.get(image)
         return None
-    except ImageNotFound:
+    except NotFound:
+        # A 404 whatever the daemon's wording (ImageNotFound is only the subclass for some of them).
         pass
     from aether_worker import openhands_image  # openhands_image imports this module
 

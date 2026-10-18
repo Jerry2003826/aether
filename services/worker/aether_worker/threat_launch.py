@@ -21,7 +21,7 @@ from collections.abc import Callable
 from typing import Any
 
 import requests
-from docker.errors import DockerException, ImageNotFound, NotFound
+from docker.errors import DockerException, NotFound
 
 from aether_worker import container_runtime
 from aether_worker.loopback import LoopbackError, post_json
@@ -437,7 +437,8 @@ def _sdk_image(api: Any, image: str) -> None:
     try:
         api.inspect_image(image)
         return
-    except ImageNotFound:
+    except NotFound:
+        # Any 404 on the lookup: docker-py makes it ImageNotFound only for some daemon wordings.
         if "@sha256:" not in image:
             raise ThreatLaunchError("image_unavailable") from None
     api.pull(image)

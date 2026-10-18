@@ -7,7 +7,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from docker.errors import DockerException, ImageNotFound
+from docker.errors import DockerException, NotFound
 
 from aether_worker.container_runtime import build_context, docker_client, image_id_with_label
 
@@ -181,7 +181,8 @@ def _labels(image: Any) -> dict[str, str]:
 def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build: bool = True) -> str:
     """Image id for tag: the local image if present, else a pull (allow_pull), else a build (allow_build).
 
-    Only ImageNotFound on the local lookup counts as missing; any other Docker error
+    Only a 404 on the local lookup (NotFound, of which docker-py's ImageNotFound is the subclass it
+    picks for some daemon wordings) counts as missing; any other Docker error
     (daemon unreachable) propagates. A pull that fails for any Docker reason (not found,
     access denied, registry down) falls through to the build. Only the current OpenHands
     sandbox tag can be built. For that tag every image, local, pulled or built, must carry
@@ -197,7 +198,7 @@ def ensure_image(client: Any, tag: str, *, allow_pull: bool = True, allow_build:
 
     try:
         local = client.images.get(tag)
-    except ImageNotFound:
+    except NotFound:
         local = None
     if local is not None and acceptable(local):
         return str(local.id)
