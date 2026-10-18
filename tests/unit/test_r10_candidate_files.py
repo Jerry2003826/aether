@@ -275,9 +275,9 @@ def test_candidate_cannot_signal_the_test_or_grader_process(tmp_path: Path) -> N
     assert code == 0, body
 
 
-def test_candidate_files_over_the_cap_are_left_out_and_logged_by_name(tmp_path: Path) -> None:
-    # The per-step copy is bounded (8 MiB) so copying cannot eat the protocol budget; what is left out
-    # is logged by name and count, never by content.
+def test_candidate_files_over_the_cap_fail_the_run_and_are_logged_by_name(tmp_path: Path) -> None:
+    # The per-step copy is bounded (8 MiB) so copying cannot eat the protocol budget. Past it the run
+    # fails closed (Codex :819); what did not fit is logged by name and count, never by content.
     mib = 1024 * 1024
     marker = "CONTENT-MARKER-6d1f"
     (tmp_path / "big1.bin").write_bytes((marker + "\n").encode() * (5 * mib // 20))
@@ -291,7 +291,8 @@ def test_candidate_files_over_the_cap_are_left_out_and_logged_by_name(tmp_path: 
     )
     code, body, output = _grade(tmp_path)
     assert body is not None, output
-    assert code == 0, body
-    assert "candidate_files_dropped count=1 " in output, output[-2000:]
+    assert body["cases"] == [{"name": "suite", "verdict": "FAIL", "detail": "candidate_files_too_large"}], body
+    assert code != 0, body
+    assert "candidate_files_too_large count=1 " in output, output[-2000:]
     assert "big2.bin" in output
     assert marker not in output

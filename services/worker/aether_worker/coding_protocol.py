@@ -1141,17 +1141,20 @@ def _child_env() -> dict[str, str]:
 
 
 _ISOLATION_UNAVAILABLE = "candidate_isolation_unavailable"
-# Candidate (non-grading) files copied into each candidate directory; past this the rest are left out
-# (and logged by name). Copied once per step, so the bound keeps the copy far inside the protocol budget:
+# Candidate (non-grading) files copied into each candidate directory. Past this the run fails closed
+# (candidate_files_too_large, the names logged): grading a tree with files left out would grade
+# something other than the published patch (Codex :819). Copied once per step, so the bound keeps the copy far inside the protocol budget:
 # a full 8 MiB (1000 files) onto the sandbox's tmpfs measured ~30 ms per step, ~3 s over the ~105
 # steps the 240 s cap allows (each step is allowed 2 s), and it counts once against container memory. Source trees are far smaller; data sets that are
 # not tests do not belong in a graded workspace.
 _MAX_CANDIDATE_BYTES = 8 * 1024 * 1024
 _DROPPED_NAMES_LOGGED = 20
+_CANDIDATE_FILES_TOO_LARGE = "candidate_files_too_large"
 
 
-def _candidate_files(root: Path) -> dict[str, bytes]:
-    """The workspace files candidate code may see: regular, non-grading files outside skipped dirs.
+def _candidate_files(root: Path) -> tuple[dict[str, bytes], list[str]]:
+    """The workspace files candidate code may see: regular, non-grading files outside skipped dirs,
+    and the names of those that did not fit under _MAX_CANDIDATE_BYTES (the run then fails closed).
 
     Read once, before any candidate code runs, and written into a fresh directory for every test process.
     """
@@ -1188,9 +1191,9 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
         # Names and a count on the grader's stderr (the entry's log), never contents; not the result line.
         names = ", ".join(repr(name[:200]) for name in dropped[:_DROPPED_NAMES_LOGGED])
         more = f" (+{len(dropped) - _DROPPED_NAMES_LOGGED} more)" if len(dropped) > _DROPPED_NAMES_LOGGED else ""
-        sys.stderr.write(f"aether-protocol: candidate_files_dropped count={len(dropped)} limit_bytes={_MAX_CANDIDATE_BYTES} names=[{names}]{more}\n")
+        sys.stderr.write(f"aether-protocol: candidate_files_too_large count={len(dropped)} limit_bytes={_MAX_CANDIDATE_BYTES} names=[{names}]{more}\n")
         sys.stderr.flush()
-    return found
+    return found, dropped
 
 
 def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str) -> dict[str, Any]:
@@ -1607,7 +1610,11 @@ def run_suite(root: Path) -> dict[str, Any]:
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
     # What candidate code may see, read before any of it runs; and what it must never read.
-    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")], shared_memory)
+    candidate_files, over_cap = _candidate_files(root)
+    if over_cap:
+        # Before any test or candidate process exists: nothing is graded against a partial tree.
+        return {"passed": 0, "failed": 1, "errors": 0, "cases": [_case("suite", "FAIL", _CANDIDATE_FILES_TOO_LARGE)], "elapsed_seconds": 0.0}
+    candidate = (candidate_files, [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")], shared_memory)
     declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
     deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
     test_timeout = _test_timeout()
