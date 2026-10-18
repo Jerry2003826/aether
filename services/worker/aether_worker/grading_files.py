@@ -22,7 +22,12 @@ SHADOW_ROOTS (mirrors verification._SHADOW_ROOTS). They must only be called insi
 (openhands_sandbox_entry.py, running in the sandbox image), where that interpreter is the one
 that grades. Worker-side code must not call them, because the worker environment has a different
 package set; the worker only consumes the grading_shadow_module case detail.
-    grading_paths(root, editable=None)   relative POSIX paths of grading files under root (.git skipped).
+    grading_paths(root, editable=None, marked=frozenset())
+                                         relative POSIX paths of grading files under root (.git skipped).
+    marked_grading_files(baseline)       root-level .py files of the BASELINE whose first line starts with
+                                         GRADING_MARKER: grading helpers (threat model I-1, option 2).
+                                         Always computed from the baseline, never from the agent's copy;
+                                         pass the result as `marked` to is_grading_path/grading_paths.
     declared_tests(source)               test ids a test module declares (ast, baseline source).
     grading_steps(root)                  processes the protocol will start; sizes its time limit.
     protocol_timeout_seconds(steps)      the protocol's limit: base + per step, capped (ADR-F44).
@@ -75,6 +80,8 @@ IGNORED_DIRS = frozenset({".git"})
 # sandbox image (the grader runs it); kept here even where it is not installed.
 SHADOW_ROOTS = frozenset({"pytest", "_pytest", "pluggy", "sitecustomize", "usercustomize"})
 _EXTENSION_SUFFIXES = (".py", ".pyc", ".so", ".pyd")
+# First line of a root-level helper the task owner marks as grading (followed by end of line or spaces).
+GRADING_MARKER = b"# aether: grading"
 
 
 def _parts(relative: str | PurePosixPath) -> tuple[str, ...]:
@@ -101,8 +108,12 @@ def _is_test_file(parts: tuple[str, ...]) -> bool:
     return name.endswith(".py") and (name.startswith("test_") or name.endswith("_test.py"))
 
 
-def is_grading_path(relative: str | PurePosixPath, editable: Collection[str] | None = None) -> bool:
-    """True when `relative` belongs to grading and must match the baseline before the protocol runs."""
+def is_grading_path(
+    relative: str | PurePosixPath, editable: Collection[str] | None = None, marked: Collection[str] = frozenset()
+) -> bool:
+    """True when `relative` belongs to grading and must match the baseline before the protocol runs.
+
+    `marked` is marked_grading_files() of the baseline."""
     parts = _parts(relative)
     if not parts:
         return False
@@ -110,7 +121,32 @@ def is_grading_path(relative: str | PurePosixPath, editable: Collection[str] | N
         return True
     if editable is not None and _normal(relative) in {_normal(item) for item in editable}:
         return False
-    return _is_test_file(parts) or parts[-1] in SUPPORT_FILES
+    return _is_test_file(parts) or parts[-1] in SUPPORT_FILES or _normal(relative) in marked
+
+
+def _marked_first_line(head: bytes) -> bool:
+    line = head.split(b"\n", 1)[0].rstrip(b"\r")
+    return line.startswith(GRADING_MARKER) and not line[len(GRADING_MARKER) :].strip(b" \t")
+
+
+def marked_grading_files(baseline: Path) -> frozenset[str]:
+    """Root-level .py files of the baseline whose first line is GRADING_MARKER (regular files only)."""
+    found: set[str] = set()
+    try:
+        entries = sorted(baseline.iterdir())
+    except OSError:
+        return frozenset()
+    for path in entries:
+        if not path.name.endswith(".py") or path.is_symlink() or not path.is_file():
+            continue
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(len(GRADING_MARKER) + 256)
+        except OSError:
+            continue
+        if _marked_first_line(head):
+            found.add(path.name)
+    return frozenset(found)
 
 
 def _installed_top_level() -> frozenset[str]:
@@ -148,7 +184,7 @@ def is_shadow_module(relative: str | PurePosixPath) -> bool:
     return top is not None and top in shadow_names()
 
 
-def grading_paths(root: Path, editable: Collection[str] | None = None) -> set[str]:
+def grading_paths(root: Path, editable: Collection[str] | None = None, marked: Collection[str] = frozenset()) -> set[str]:
     """Relative POSIX paths of grading files (and symlinks) under root. `.git` is skipped."""
     found: set[str] = set()
     for path in root.rglob("*"):
@@ -158,7 +194,7 @@ def grading_paths(root: Path, editable: Collection[str] | None = None) -> set[st
         if path.is_dir() and not path.is_symlink():
             continue
         name = relative.as_posix()
-        if is_grading_path(name, editable):
+        if is_grading_path(name, editable, marked):
             found.add(name)
     return found
 

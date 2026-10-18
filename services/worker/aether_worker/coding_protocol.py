@@ -75,11 +75,19 @@ finally:
     sys.path.remove(_HERE)
 
 _skipped = grading_files.walk_skipped
+# Root helpers the BASELINE marks as grading (grading_files.marked_grading_files): set by the grader
+# from AETHER_PROTOCOL_BASELINE_DIR, and handed to every test process in its request. Never read from
+# the graded workspace, where the agent could have removed or added the marker.
+_MARKED: frozenset[str] = frozenset()
+
+
+def _is_grading(name: str) -> bool:
+    return grading_files.is_grading_path(name, marked=_MARKED)
 
 
 def _guarded(name: str) -> bool:
     """Snapshot and verify Python sources and grading files; other data may change freely."""
-    return name.endswith(".py") or grading_files.is_grading_path(name)
+    return name.endswith(".py") or _is_grading(name)
 
 
 def _files(root: Path) -> dict[str, Path]:
@@ -179,9 +187,11 @@ def _declared(name: str, declared: frozenset[str] | None) -> bool:
 
 def _baseline_modules() -> frozenset[str] | None:
     """Python files of the read-only baseline the entry names (AETHER_PROTOCOL_BASELINE_DIR); listed, never run."""
+    global _MARKED
     path = os.environ.pop(_BASELINE_ENV, "")
     if not path:
         return None
+    _MARKED = grading_files.marked_grading_files(Path(path))
     return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
 
 
@@ -208,7 +218,7 @@ _is_test_module = grading_files.is_test_module
 
 def _is_candidate(name: str) -> bool:
     """Workspace Python that is not grading: the candidate's code. It only ever runs in the candidate process."""
-    return name.endswith(".py") and not grading_files.is_grading_path(name)
+    return name.endswith(".py") and not _is_grading(name)
 
 
 def _test_modules(sources: dict[str, bytes]) -> list[tuple[str, str, str]]:
@@ -1176,7 +1186,7 @@ def _candidate_files(root: Path) -> tuple[dict[str, bytes], list[str]]:
                     pending.append(path)
                 continue
             name = path.relative_to(root).as_posix()
-            if not path.is_file() or grading_files.is_grading_path(name):
+            if not path.is_file() or _is_grading(name):
                 continue
             try:
                 data = path.read_bytes()
@@ -1603,9 +1613,10 @@ def run_suite(root: Path) -> dict[str, Any]:
     cases: list[dict[str, str]] = []
     passed = 0
     failed = 0
+    # First: it also sets _MARKED, which decides what is grading for everything below.
+    baseline_modules = _baseline_modules()
     files = _files(root)
     sources = {name: path.read_bytes() for name, path in files.items()}
-    baseline_modules = _baseline_modules()
     baseline = {name: hashlib.sha256(data).hexdigest() for name, data in sources.items()}
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
@@ -1645,6 +1656,7 @@ def run_suite(root: Path) -> dict[str, Any]:
             "label": label,
             "call_timeout": call_timeout,
             "declared": None if baseline_modules is None else sorted(baseline_modules),
+            "marked": sorted(_MARKED),
         }
         outcome = _grade_module(root, request, declared, unsupported, test_timeout, deadline, candidate, lambda: _tampered(root, baseline))
         if outcome is None:
@@ -1895,6 +1907,8 @@ def _run_pytest(root: Path, relative: str, module: types.ModuleType, request: di
 
 
 def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
+    global _MARKED
+    _MARKED = frozenset(str(name) for name in request.get("marked") or ())
     sources = {name: base64.b64decode(data) for name, data in request["sources"].items()}
     bases = list(request["bases"])
     relative, import_name, label = request["relative"], request["import_name"], request["label"]

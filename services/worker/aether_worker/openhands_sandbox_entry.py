@@ -382,8 +382,10 @@ def _patch(before: dict[str, str], root: Path) -> str:
     """The agent's source change. Grading files and caches are grading input, never part of it."""
     after = _snapshot(root)
     chunks: list[str] = []
+    # Marked root helpers are judged from the read-only baseline (WORK), never from the agent's copy.
+    marked = grading_files.marked_grading_files(WORK)
     for name in sorted(set(before) | set(after)):
-        if grading_files.is_grading_path(name) or grading_files.is_cache_path(name):
+        if grading_files.is_grading_path(name, marked=marked) or grading_files.is_cache_path(name):
             continue
         old = before.get(name)
         new = after.get(name)
@@ -680,10 +682,10 @@ def _remove_added_shadow_modules(work: Path, job: Path) -> list[str]:
     return flagged
 
 
-def _baseline_files(work: Path, editable: Collection[str] | None) -> dict[str, bytes]:
+def _baseline_files(work: Path, editable: Collection[str] | None, marked: frozenset[str]) -> dict[str, bytes]:
     """Every grading file of the job-creation workspace, by content. Caches are never baseline."""
     found: dict[str, bytes] = {}
-    for name in sorted(grading_files.grading_paths(work, editable)):
+    for name in sorted(grading_files.grading_paths(work, editable, marked)):
         path = work / name
         if grading_files.is_cache_path(name) or path.is_symlink() or not path.is_file():
             continue
@@ -704,7 +706,8 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     """Make every grading file of the job directory match the baseline, file by file.
 
     Grading files are the denylist in aether_worker.grading_files (tests, oracle.py,
-    conftest.py, pytest.ini, pyproject.toml, setup.cfg, tox.ini, startup hooks, caches).
+    conftest.py, pytest.ini, pyproject.toml, setup.cfg, tox.ini, startup hooks, caches), plus
+    the root helpers the baseline marks with GRADING_MARKER (see marked_grading_files).
     Grading files that existed at baseline are rewritten from it; grading files the agent
     added are deleted, and so is every symlink. Other source files keep the agent's edits
     and additions, except NEW top-level modules or packages that shadow stdlib, installed
@@ -712,7 +715,10 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
     verified against the baseline SHA-256 hashes. After the cleanup an added startup hook
     raises StartupHookAdded and an added shadow module raises ShadowModuleAdded.
     """
-    baseline = _baseline_files(work, editable)
+    # Root helpers marked in the baseline (first line `# aether: grading`) are grading files; the job
+    # copy's first line does not count, so removing the marker changes nothing and adding one gains nothing.
+    marked = grading_files.marked_grading_files(work)
+    baseline = _baseline_files(work, editable, marked)
     expected = {name: _digest(data) for name, data in baseline.items()}
     hooks: list[str] = []
     shadows = _remove_added_shadow_modules(work, job)
@@ -725,7 +731,7 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
         elif path.is_dir():
             if grading_files.is_cache_path(name):
                 _remove(path)
-        elif grading_files.is_grading_path(name, editable) and name not in expected:
+        elif grading_files.is_grading_path(name, editable, marked) and name not in expected:
             if grading_files.is_startup_hook(name):
                 hooks.append(name)
             _remove(path)
@@ -737,15 +743,17 @@ def restore_grading_directory(work: Path, job: Path, editable: Collection[str] |
             _remove(target)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    _verify_grading_directory(job, expected, editable)
+    _verify_grading_directory(job, expected, editable, marked)
     if hooks:
         raise StartupHookAdded("grading_startup_hook")
     if shadows:
         raise ShadowModuleAdded("grading_shadow_module")
 
 
-def _verify_grading_directory(job: Path, expected: dict[str, str], editable: Collection[str] | None) -> None:
-    present = grading_files.grading_paths(job, editable)
+def _verify_grading_directory(
+    job: Path, expected: dict[str, str], editable: Collection[str] | None, marked: frozenset[str] = frozenset()
+) -> None:
+    present = grading_files.grading_paths(job, editable, marked)
     if any((job / name).is_symlink() for name in present):
         raise RuntimeError("grading_symlink")
     if present != set(expected):
