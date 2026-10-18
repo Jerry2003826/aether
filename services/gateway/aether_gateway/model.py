@@ -26,7 +26,14 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DataError, IntegrityError
 
 from aether_domain.security import sha256_text
-from aether_storage.budget import add_call_cost, apply_reservation_extension, remove_call_cost, reservation_can_grow
+from aether_storage.budget import (
+    add_call_cost,
+    apply_reservation_extension,
+    coding_call_micro_usd,
+    priced_micro_usd,
+    remove_call_cost,
+    reservation_can_grow,
+)
 from aether_storage.db import Database
 
 litellm.suppress_debug_info = True
@@ -967,7 +974,7 @@ class ModelGateway:
             ).mappings().first()
             parent = conn.execute(
                 text(
-                    "SELECT usage_status, usage_detail FROM model_requests "
+                    "SELECT usage_status, usage_detail, reserved_micro_usd FROM model_requests "
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
                 ),
                 {"project_id": project_id, "task_id": task_id, "request_key": parent_key},
@@ -999,12 +1006,31 @@ class ModelGateway:
                 call_reserve_tokens=call_reserve,
                 call_tokens=call_tokens,
             )
+            # Money is checked on its own, with every call priced and rounded up by itself (ADR-F46
+            # R7): what the calls so far cost, plus the next call's allowance, must fit the money held.
+            reserved_micro = _count(parent.get("reserved_micro_usd"))
+            occupied_micro = (
+                priced_micro_usd(detail, "measured", measured)
+                + priced_micro_usd(detail, "unknown_reserved", unknown)
+                + priced_micro_usd(detail, "pending", pending)
+            )
             if gap is None:
                 if reserved_tokens < 1 or measured + unknown + pending + call_tokens > reserved_tokens:
                     raise GatewayDenied("budget_exceeded")
-            elif gap > 0:
-                call_micro = _positive_int(detail.get("call_reserve_micro_usd")) or call_reserve or gap
-                micro = coding_reservation_micro(gap, call_tokens=call_reserve or gap, call_micro=call_micro)
+                if occupied_micro + coding_call_micro_usd(call_tokens, detail) > reserved_micro:
+                    raise GatewayDenied("budget_exceeded")
+                micro = 0
+            else:
+                allowance = max(call_reserve or 0, call_tokens)
+                money_need = occupied_micro + coding_call_micro_usd(allowance, detail)
+                micro = 0
+                if gap > 0:
+                    call_micro = _positive_int(detail.get("call_reserve_micro_usd")) or call_reserve or gap
+                    micro = coding_reservation_micro(gap, call_tokens=call_reserve or gap, call_micro=call_micro)
+                # Rounding each call up can need more money than the token top-up priced at once.
+                micro += max(0, money_need - (reserved_micro + micro))
+            if micro > 0 or (gap or 0) > 0:
+                gap = gap or 0
                 if account is None or not reservation_can_grow(dict(account), amount=micro, tokens=gap):
                     raise GatewayDenied("budget_exceeded")
                 apply_reservation_extension(

@@ -189,8 +189,11 @@ def apply_reservation_extension(
     tokens: int,
     detail: dict,
 ) -> None:
-    """Add to a reserved row already locked by the caller. The account row is locked too."""
-    if amount < 0 or tokens < 1:
+    """Add to a reserved row already locked by the caller. The account row is locked too.
+
+    tokens may be 0 when only money is short (calls rounded up one by one, ADR-F46 R7).
+    """
+    if amount < 0 or tokens < 0 or amount + tokens < 1:
         raise BudgetError("invalid_amount")
     detail["reserved_tokens"] = int(detail.get("reserved_tokens") or 0) + tokens
     detail["reservation_extensions"] = int(detail.get("reservation_extensions") or 0) + 1
