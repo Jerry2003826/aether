@@ -237,7 +237,6 @@ _BASELINE_ENV = "AETHER_PROTOCOL_BASELINE_DIR"
 # the candidate's semaphores, queues and shared memory live in it. Required: without it nothing is graded
 # (never a fallback to /dev/shm, which nobody emptied).
 _SHM_ENV = "AETHER_PROTOCOL_SHM_DIR"
-_DEFAULT_SHM = "/dev/shm"
 _SHM_UNCONFIGURED = "shared_memory_unconfigured"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
 # The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
@@ -829,7 +828,7 @@ def _candidate_files(root: Path) -> dict[str, bytes]:
     return found
 
 
-def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str = _DEFAULT_SHM) -> dict[str, Any]:
+def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str) -> dict[str, Any]:
     """A fresh directory for one test's candidate process: src/ (its cwd, the candidate files) and tmp/."""
     top = Path(tempfile.mkdtemp(prefix="aether-candidate-"))
     src, tmp = top / "src", top / "tmp"
@@ -900,7 +899,7 @@ def _within(path: str, parent: str) -> bool:
     return path == parent or path.startswith(parent.rstrip("/") + "/")
 
 
-def _sandbox_rules(write: list[str], deny: list[str], shm: str = _DEFAULT_SHM) -> list[tuple[str, int]]:
+def _sandbox_rules(write: list[str], deny: list[str], shm: str) -> list[tuple[str, int]]:
     """(path, rights) for the candidate process. A read path that holds a denied one is refused.
 
     `shm` is the sandbox's shared memory: full access (POSIX semaphores and shared memory need it), and
@@ -930,7 +929,7 @@ def _sandbox_rules(write: list[str], deny: list[str], shm: str = _DEFAULT_SHM) -
     return rules
 
 
-def _landlock(write: list[str], deny: list[str], shm: str = _DEFAULT_SHM) -> None:
+def _landlock(write: list[str], deny: list[str], shm: str) -> None:
     """Lock this process (and everything it starts) to the system, the interpreter and `write`; with
     Landlock ABI 6 it also cannot signal, or reach abstract unix sockets of, any process outside its domain.
 
@@ -1016,7 +1015,7 @@ _TIMED_OUT = {"kind": "result", "verdict": "FAIL", "detail": "timeout"}
 
 
 def _run_in_child(
-    root: Path, request: dict[str, object], timeout: float, candidate: tuple[dict[str, bytes], list[str]]
+    root: Path, request: dict[str, object], timeout: float, candidate: tuple[dict[str, bytes], list[str], str]
 ) -> dict[str, object] | None:
     """Run one step (collect a module, or one test) in a fresh test process; its reply or None.
 

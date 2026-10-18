@@ -181,7 +181,11 @@ def test_candidate_multiprocessing_still_works_under_the_protocol(tmp_path: Path
     assert completed.returncode == 0
 
 
-@pytest.mark.parametrize("configured", [None, "", "relative/shm", "/nonexistent/aether-shm"], ids=["unset", "empty", "relative", "missing"])
+@pytest.mark.parametrize(
+    "configured",
+    [None, "", "relative/shm", "/nonexistent/aether-shm", "symlink"],
+    ids=["unset", "empty", "relative", "missing", "symlink"],
+)
 def test_the_protocol_grades_nothing_without_its_shared_memory_directory(tmp_path: Path, configured: str | None) -> None:
     """No AETHER_PROTOCOL_SHM_DIR (or not an existing absolute directory): no fallback to /dev/shm,
     which nobody emptied; nothing is graded and no candidate code runs."""
@@ -194,6 +198,12 @@ def test_the_protocol_grades_nothing_without_its_shared_memory_directory(tmp_pat
         )
         (work / "test_app.py").write_text("import app\n\ndef test_value():\n    assert app.value() == 42\n", encoding="utf-8")
         env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_")}
+        if configured == "symlink":
+            # An absolute symlink to a real, existing shared-memory directory is still refused.
+            link = tmp_path / "shm-link"
+            link.symlink_to("/dev/shm", target_is_directory=True)
+            assert link.is_dir()
+            configured = str(link)
         if configured is not None:
             env["AETHER_PROTOCOL_SHM_DIR"] = configured
         completed = subprocess.run(
