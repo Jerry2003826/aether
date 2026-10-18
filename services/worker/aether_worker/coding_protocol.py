@@ -357,6 +357,7 @@ class _Session:
         env = _child_env()
         for name in ("TMPDIR", "TEMP", "TMP"):
             env[name] = str(self._sandbox["tmp"])
+        _Spawn.allowed = True
         try:
             self._process = subprocess.Popen(  # this interpreter running this file
                 [sys.executable, "-I", str(Path(__file__).resolve()), "--candidate", str(child_in), str(child_out), str(os.getpid())],
@@ -373,6 +374,7 @@ class _Session:
                 # Stays in the test process's group, which the grader kills after every test.
             )
         finally:
+            _Spawn.allowed = False
             os.close(child_in)
             os.close(child_out)
         self._to, self._from = to_child, from_child
@@ -763,6 +765,57 @@ def _unsupported(reason: str) -> CandidateObjectUnsupported:
     if _Current.unsupported is None:
         _Current.unsupported = reason
     return CandidateObjectUnsupported(reason)
+
+
+class _Spawn:
+    # True only while _Session._start starts the candidate process: the one process a test process
+    # may start. Everything else that would start one is refused (threat model I-16).
+    allowed = False
+
+
+# Audit events that start a process (os.spawn* and pty.spawn go through os.fork / os.forkpty).
+_SPAWN_EVENTS = frozenset({"subprocess.Popen", "os.system", "os.exec", "os.posix_spawn", "os.fork", "os.forkpty"})
+# libc symbols that start a process (or anything, for syscall) when called through ctypes.
+_SPAWN_SYMBOLS = frozenset(
+    {
+        "fork", "vfork", "clone", "clone3", "system", "popen", "syscall", "posix_spawn", "posix_spawnp",
+        "execve", "execv", "execvp", "execvpe", "execl", "execlp", "execle", "fexecve",
+    }
+)
+
+
+def _spawn_hook(event: str, args: tuple[object, ...]) -> None:
+    if event in _SPAWN_EVENTS:
+        refused = True
+    elif event == "ctypes.dlsym":
+        name = args[1] if len(args) > 1 else None
+        refused = isinstance(name, (str, bytes)) and (name if isinstance(name, str) else name.decode("ascii", "replace")) in _SPAWN_SYMBOLS
+    else:
+        return
+    if refused and not _Spawn.allowed:
+        raise _unsupported("process_spawn")
+
+
+def _refuse_processes() -> None:
+    """Threat model I-16: from here this test process starts no process but its candidate process.
+
+    A child of a trusted test (subprocess, os.system, fork, posix_spawn, exec, multiprocessing, or
+    libc's through ctypes) would run outside the candidate's Landlock sandbox with this process's view
+    of the grading workspace. Each is refused with CandidateObjectUnsupported("process_spawn"), which
+    fails the test whatever the test does with it. multiprocessing starts its spawn and forkserver
+    children with _posixsubprocess.fork_exec, which raises no audit event: that entry is wrapped too.
+    """
+    import _posixsubprocess
+
+    original = _posixsubprocess.fork_exec
+
+    def fork_exec(*args: object, **kwargs: object) -> int:
+        if not _Spawn.allowed:
+            raise _unsupported("process_spawn")
+        return original(*args, **kwargs)
+
+    _posixsubprocess.fork_exec = fork_exec
+    sys.addaudithook(_spawn_hook)
 
 
 def _encode_tree(value: object, depth: int = 0) -> list[object]:
@@ -1919,6 +1972,8 @@ def _runner_step(root: Path, request: dict[str, Any], emit) -> str:
     _Current.session = _Session(
         root, sources, bases, float(request["call_timeout"]), declared, sandbox if isinstance(sandbox, dict) else None
     )
+    # Before any test code runs, its import included.
+    _refuse_processes()
     try:
         try:
             if import_name:
@@ -1942,6 +1997,9 @@ def _runner_main(read_fd: int, write_fd: int, parent: int) -> None:
     _die_with_parent(parent)
     _not_dumpable()
     sys.dont_write_bytecode = True
+    # The report pipe stays out of anything started from here (threat model I-16); pass_fds made it
+    # inheritable for this process only.
+    os.set_inheritable(write_fd, False)
     request = _receive(read_fd)
     os.close(read_fd)
     if not isinstance(request, dict):
