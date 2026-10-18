@@ -15,11 +15,14 @@ _PLUGIN = Path(__file__).with_name("trace_secret_plugin.py").resolve()
 
 
 def plugin_config() -> dict[str, object]:
-    """Builtin AWS detector plus the trace plugin loaded by file path."""
+    """Builtin AWS, basic-auth and keyword detectors plus the trace plugin loaded by file path."""
     return {
         "plugins_used": [
             {"name": "TraceSecretDetector", "path": f"file://{_PLUGIN.as_posix()}"},
             {"name": "AWSKeyDetector"},
+            # user:password@ in a connection URL, and quoted 'password': '...' / "password": "...".
+            {"name": "BasicAuthDetector"},
+            {"name": "KeywordDetector"},
         ],
         "filters_used": [],
     }

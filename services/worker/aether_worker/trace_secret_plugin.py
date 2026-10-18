@@ -15,5 +15,7 @@ class TraceSecretDetector(RegexBasedDetector):
     denylist = (
         re.compile(r"sk-live-[A-Za-z0-9_-]+"),
         re.compile(r"api_key=\S+"),
+        # Unquoted password=... (libpq DSN, PGPASSWORD=...), which KeywordDetector only finds quoted.
+        re.compile(r"(?i)password=\S+"),
         re.compile(r"密钥\S*"),
     )
