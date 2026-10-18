@@ -25,7 +25,7 @@ import pytest
 from tests.unit.test_openhands_coding import _ENTRY, _PYTHON, _SocketModel
 
 _PROTOCOL = Path("services/worker/aether_worker/coding_protocol.py").resolve()
-_SECRET = "s3cr3t-expected-4f1d"
+_SECRET = "oracle-sentinel-in-shm"
 
 
 @pytest.fixture
