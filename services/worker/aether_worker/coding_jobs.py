@@ -1402,6 +1402,8 @@ GRADING_TIMEOUT = "grading_timeout"
 MODEL_CHANNEL_OPEN = "model_channel_open"
 # The entry omitted the agent's patch (patch_omitted=too_large) so the RESULT line stays whole.
 PATCH_TOO_LARGE = "patch_too_large"
+# The protocol's candidate files passed its copy cap: no test ran, so it is not a test failure.
+CANDIDATE_FILES_TOO_LARGE = "candidate_files_too_large"
 
 
 def _graded(body: dict[str, Any]) -> bool:
@@ -1419,6 +1421,18 @@ def _runner_details(sandbox: dict[str, Any]) -> set[str]:
         for case in result.get("cases") or []
         if isinstance(case, dict) and case.get("name") == "runner" and isinstance(case.get("detail"), str)
     }
+
+
+def _suite_failure(sandbox: dict[str, Any]) -> str | None:
+    """The detail of the protocol's whole-suite failure case (name "suite"), if that is the only case."""
+    result = sandbox.get("result")
+    cases = result.get("cases") if isinstance(result, dict) else None
+    if not isinstance(cases, list) or len(cases) != 1 or not isinstance(cases[0], dict):
+        return None
+    case = cases[0]
+    if case.get("name") != "suite" or case.get("verdict") != "FAIL" or not isinstance(case.get("detail"), str):
+        return None
+    return case["detail"]
 
 
 def _grading_violation(sandbox: dict[str, Any]) -> str | None:
@@ -1563,6 +1577,8 @@ def _coding_terminal(
         return "FAILED", "agent_no_change"
     if not passed and GRADING_TIMEOUT in _runner_details(sandbox):
         return "FAILED", GRADING_TIMEOUT
+    if not passed and _suite_failure(sandbox) == CANDIDATE_FILES_TOO_LARGE:
+        return "FAILED", CANDIDATE_FILES_TOO_LARGE
     return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
 
 
