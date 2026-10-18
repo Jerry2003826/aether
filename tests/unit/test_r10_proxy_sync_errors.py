@@ -98,3 +98,14 @@ def test_a_bad_result_from_the_candidate_kills_the_session(tmp_path: Path, monke
     assert str(raised.value) == "candidate_protocol"
     assert session._dead == "candidate_protocol"
     assert process.killed
+
+
+@pytest.mark.parametrize("err", [["ValueError", "x"], "boom", ["ValueError", 1, "x"]], ids=["two_items", "not_a_list", "not_text"])
+def test_a_malformed_error_from_the_candidate_kills_the_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, err: object) -> None:
+    session, process, _sent = _session(tmp_path, monkeypatch, [])
+    monkeypatch.setattr(coding_protocol, "_receive", lambda _fd, _deadline=None: {"err": err, "sync": []})
+    with pytest.raises(coding_protocol.CandidateError) as raised:
+        session.call("ping")
+    assert str(raised.value) == "candidate_protocol"
+    assert session._dead == "candidate_protocol"
+    assert process.killed
