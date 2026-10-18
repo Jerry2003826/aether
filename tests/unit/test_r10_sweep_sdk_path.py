@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
@@ -52,9 +53,10 @@ class _Containers:
             raise NotFound("no such container")
         return self.items[name]
 
-    def list(self, *, all: bool = False, filters: dict[str, Any] | None = None) -> list[_Container]:
+    def list(self, **options: Any) -> list[_Container]:
         """Docker's own filter semantics: every label must match, any one status may."""
-        filters = filters or {}
+        assert options.get("all") is True
+        filters = options.get("filters") or {}
         self.filters.append(filters)
         labels = filters.get("label", [])
         statuses = filters.get("status", [])
@@ -143,3 +145,41 @@ def test_the_templates_the_sdk_path_renders_still_answer(client: _Client) -> Non
     assert execute_docker(["image", "inspect", "--format", "{{.Id}}", "python:3.12-alpine"]).stdout == "sha256:fixture-image-id\n"
     assert execute_docker(["image", "inspect", "python:3.12-alpine"]).returncode == 0
     assert execute_docker(["inspect", "aether-code-listed"]).returncode == 0
+
+
+def test_ps_passes_status_filters_as_status_not_as_labels(client: _Client) -> None:
+    client.add("aether-code-exited", "exited", {"aether.role": "coding"})
+    client.add("aether-code-dead", "dead", {"aether.role": "coding"})
+    client.add("aether-code-running", "running", {"aether.role": "coding"})
+    completed = execute_docker(
+        ["ps", "-aq", "--filter", "label=aether.role=coding", "--filter", "status=exited", "--filter", "status=dead"]
+    )
+    assert client.containers.filters == [{"label": ["aether.role=coding"], "status": ["exited", "dead"]}]
+    assert completed.returncode == 0
+    assert sorted(completed.stdout.split()) == ["aether-code-dead", "aether-code-exited"]
+
+
+def test_ps_with_a_filter_the_sdk_path_does_not_translate_is_an_error(client: _Client) -> None:
+    client.add("aether-code-exited", "exited", {"aether.role": "coding"})
+    completed = execute_docker(["ps", "-aq", "--filter", "label=aether.role=coding", "--filter", "ancestor=python:3.12-alpine"])
+    assert completed.returncode != 0
+    assert completed.stdout == ""
+    assert client.containers.filters == []
+
+
+def test_the_runner_sweep_through_the_sdk_removes_this_instances_old_exited_containers(
+    monkeypatch: pytest.MonkeyPatch, client: _Client
+) -> None:
+    monkeypatch.setenv("AETHER_PROCESS_ROLE", "runner")
+    monkeypatch.setenv("AETHER_WORKER_INSTANCE_ID", "worker-seven")
+    monkeypatch.setattr(coding_sandbox, "docker_available", lambda: True)
+    mine = {"aether.role": "coding", "aether.worker-instance": "worker-seven"}
+    client.add("aether-code-mine-exited", "exited", mine)
+    client.add("aether-code-mine-dead", "dead", mine)
+    client.add("aether-code-mine-running", "running", mine)
+    client.add("aether-code-other-exited", "exited", {"aether.role": "coding", "aether.worker-instance": "another-instance"})
+    later = datetime(2026, 10, 18, 12, 0, tzinfo=UTC)
+    removed = coding_sandbox.sweep_leftover_coding_containers(now=later)
+    assert sorted(removed) == ["aether-code-mine-dead", "aether-code-mine-exited"]
+    assert sorted(client.removed) == ["aether-code-mine-dead", "aether-code-mine-exited"]
+    assert set(client.containers.items) == {"aether-code-mine-running", "aether-code-other-exited"}
