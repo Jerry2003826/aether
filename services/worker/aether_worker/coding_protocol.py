@@ -337,6 +337,7 @@ class _Session:
         # positive ids, the candidate negative ones; both sides keep the last state exchanged.
         self._mirrors: dict[int, object] = {}
         self._mirror_ids: dict[int, int] = {}
+        self._next_mirror = 1
         self._synced: dict[int, str] = {}
         # One proxy per candidate handle, so the same candidate object is the same object to the test.
         self._remotes: dict[int, _Remote] = {}
@@ -440,9 +441,18 @@ class _Session:
         """The shared id of a builtin container the test hands to candidate code."""
         key = id(value)
         if key not in self._mirror_ids:
-            handle = len(self._mirror_ids) + 1
+            handle = self._next_mirror
+            self._next_mirror += 1
             self._mirror_ids[key] = handle
             self._mirrors[handle] = value
+            try:
+                # Its contents must be able to cross now: a container refused on the way in (a subclass,
+                # a callable inside) never reaches the candidate, so it must not stay shared and fail
+                # every later request of the module (contents added later are refused when they cross).
+                _encode_data(value, 0, _encode_shared_item)
+            except BaseException:
+                del self._mirror_ids[key], self._mirrors[handle]
+                raise
         return self._mirror_ids[key]
 
     def _outgoing(self) -> list[object]:
@@ -688,7 +698,17 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
         return ["h", _session().module_handle(value.__name__), ""]
     if type(value) in _MIRRORED:
         return ["m", _session().mirror(value)]
+    if type(value) not in _PASSED_EXACT and isinstance(value, _PASSED_BASES):
+        # A builtin subclass of the test's (IntEnum, namedtuple, OrderedDict, `class Items(list)`): its class
+        # cannot enter the candidate process and narrowing it to the base would drop its type and overrides
+        # (Codex r4308195944), so it is refused, at any depth.
+        raise _unsupported("subclass_passed_to_candidate")
     return _encode_data(value, depth, lambda item, level: _encode_trusted(item, level))
+
+
+# What the test may pass into candidate code by value: exact builtin types only (see _encode_trusted).
+_PASSED_EXACT = frozenset({type(None), bool, int, float, complex, str, bytes, tuple, frozenset})
+_PASSED_BASES = (int, float, complex, str, bytes, bytearray, tuple, frozenset, list, dict, set)
 
 
 # Builtin containers that cross by reference, as in-process (Codex :512): each side keeps its own
@@ -696,7 +716,7 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
 # changes, references kept by either side and identity behave as in one process. Candidate code only
 # runs while a request is open, so the test never observes a state in between. A candidate's instance of
 # a subclass (defaultdict, Counter, `class Result(list)`, a namedtuple, ...) crosses as a _RemoteData
-# handle; a subclass instance the test passes in still crosses by value, as its builtin base.
+# handle; a subclass instance the test passes in is refused (subclass_passed_to_candidate).
 _MIRRORED = (list, dict, set, bytearray)
 # Shared containers are re-encoded on every request (there is no cheap way to tell an untouched builtin
 # container), so their encoded total is capped like the candidate files: past it the session fails
