@@ -175,3 +175,52 @@ def test_a_deleted_and_an_edited_file_apply_together(tmp_path: Path) -> None:
     applied = _applied(tmp_path, baseline, _patch_after(tmp_path, baseline, change))
     assert not (applied / "old.py").exists()
     assert (applied / "app.py").read_text(encoding="utf-8") == "def value():\n    return 42\n"
+
+
+def test_the_published_patch_reproduces_non_utf8_files_byte_for_byte(tmp_path: Path) -> None:
+    """Codex P1 (openhands_sandbox_entry.py:325): applied with git apply, the published patch yields
+    exactly the bytes that were graded, including files that are not UTF-8."""
+    baseline = {
+        "app.py": b"def value():\n    return 1\n",
+        "latin.txt": b"caf\xe9\n",
+        "blob.bin": b"\xff\xfe\x00old\x80",
+        "gone.bin": b"\x81\x82\n",
+        "keep.txt": b"same \xe9\n",
+    }
+    graded = {
+        "app.py": b"def value():\n    return 2\n",
+        # Two distinct invalid sequences that decode to the same text under errors="replace".
+        "latin.txt": b"caf\xe8\n",
+        "blob.bin": b"\xff\xfe\x00new\x80\x00 no trailing newline",
+        "made.bin": b"\x00\x01\x02\xfe\xff",
+        "keep.txt": b"same \xe9\n",
+    }
+    job = tmp_path / "job"
+    applied = tmp_path / "applied"
+    for root in (job, applied):
+        root.mkdir()
+        for name, data in baseline.items():
+            (root / name).write_bytes(data)
+    change = (
+        "(job / 'app.py').write_bytes(b'def value():\\n    return 2\\n')\n"
+        "(job / 'latin.txt').write_bytes(b'caf\\xe8\\n')\n"
+        "(job / 'blob.bin').write_bytes(b'\\xff\\xfe\\x00new\\x80\\x00 no trailing newline')\n"
+        "(job / 'made.bin').write_bytes(b'\\x00\\x01\\x02\\xfe\\xff')\n"
+        "(job / 'gone.bin').unlink()\n"
+    )
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n" + change + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    patch = completed.stdout.decode("utf-8")
+    (tmp_path / "published.diff").write_text(patch, encoding="utf-8")
+    done = subprocess.run(
+        ["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr + patch
+    found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
+    assert found == graded, patch
+    assert not (applied / "gone.bin").exists(), patch
