@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -18,6 +19,8 @@ def _verdicts(root: Path, test_module: str) -> dict[str, tuple[str, str]]:
     completed = subprocess.run(
         [sys.executable, "-I", str(_PROTOCOL)],
         cwd=root,
+        # The protocol grades only with its shared-memory directory named (the entry names the emptied one).
+        env={**os.environ, "AETHER_PROTOCOL_SHM_DIR": "/dev/shm"},
         capture_output=True,
         text=True,
         timeout=60,

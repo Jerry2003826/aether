@@ -30,6 +30,7 @@ def _write(root: Path, files: dict[str, str]) -> None:
 
 def _env(**extra: str) -> dict[str, str]:
     env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_")}
+    env["AETHER_PROTOCOL_SHM_DIR"] = "/dev/shm"  # required by the protocol; the entry names the emptied one
     env.update(extra)
     return env
 

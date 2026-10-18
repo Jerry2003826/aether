@@ -172,6 +172,7 @@ def test_candidate_multiprocessing_still_works_under_the_protocol(tmp_path: Path
     (work / "app.py").write_text(_MP_APP, encoding="utf-8")
     (work / "test_app.py").write_text("import app\n\ndef test_mp():\n    assert app.value() == [3, [1, 4, 9]]\n", encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_")}
+    env["AETHER_PROTOCOL_SHM_DIR"] = "/dev/shm"  # the sandbox's own, as the entry names it there
     completed = subprocess.run(
         [sys.executable, "-I", str(_PROTOCOL)], cwd=work, env=env, capture_output=True, text=True, timeout=120, check=False
     )

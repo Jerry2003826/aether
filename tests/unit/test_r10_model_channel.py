@@ -62,6 +62,7 @@ def test_neither_the_candidate_nor_the_test_process_sees_model_or_credential_env
         key: value for key, value in os.environ.items() if not key.startswith("AETHER_")
     }
     env.update(_MODEL_ENV)
+    env["AETHER_PROTOCOL_SHM_DIR"] = "/dev/shm"  # required by the protocol; the entry names the emptied one
     completed = subprocess.run(
         [sys.executable, "-I", str(_PROTOCOL)],
         cwd=tmp_path,

@@ -35,6 +35,7 @@ _DRIVER = (
     f"open(secret, 'w').write({_NONCE!r})\n"
     "env = {k: v for k, v in os.environ.items() if not k.startswith('AETHER_')}\n"
     "env['AETHER_PROTOCOL_NONCE_FILE'] = secret\n"
+    "env['AETHER_PROTOCOL_SHM_DIR'] = '/dev/shm'\n"
     "done = subprocess.run([sys.executable, '-I', '/opt/aether/coding_protocol.py'], cwd=job, env=env,\n"
     "                      capture_output=True, text=True, timeout=200)\n"
     "print(json.dumps({'exit': done.returncode, 'stdout': done.stdout, 'stderr': done.stderr[-4000:]}))\n"

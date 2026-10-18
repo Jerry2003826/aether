@@ -73,6 +73,7 @@ def _grade(root: Path, baseline: Path | None) -> dict[str, tuple[str, str]]:
     env = {
         key: value for key, value in os.environ.items() if not key.startswith("AETHER_")
     }
+    env["AETHER_PROTOCOL_SHM_DIR"] = "/dev/shm"  # required by the protocol; the entry names the emptied one
     if baseline is not None:
         env["AETHER_PROTOCOL_BASELINE_DIR"] = str(baseline)
     completed = subprocess.run(

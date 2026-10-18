@@ -177,9 +177,13 @@ def _baseline_modules() -> frozenset[str] | None:
     return frozenset(name for name in _files(Path(path)) if name.endswith(".py"))
 
 
-def _shared_memory() -> str:
-    """The shared-memory directory the candidate may use (AETHER_PROTOCOL_SHM_DIR, else /dev/shm)."""
-    return os.path.realpath(os.environ.pop(_SHM_ENV, "") or _DEFAULT_SHM)
+def _shared_memory() -> str | None:
+    """The shared-memory directory the candidate may use (AETHER_PROTOCOL_SHM_DIR), or None when it is
+    not named, not absolute, or not an existing directory: then the run grades nothing."""
+    value = os.environ.pop(_SHM_ENV, "")
+    if not value or not os.path.isabs(value) or os.path.islink(value) or not os.path.isdir(value):
+        return None
+    return os.path.realpath(value)
 
 
 def _spec(fullname: str, origin_path: Path, data: bytes, package: bool = False):
@@ -230,9 +234,11 @@ _CALL_TIMEOUT_ENV = "AETHER_PROTOCOL_CALL_TIMEOUT_SECONDS"
 _NONCE_ENV = "AETHER_PROTOCOL_NONCE_FILE"
 _BASELINE_ENV = "AETHER_PROTOCOL_BASELINE_DIR"
 # The sandbox's shared memory, which the entry has emptied after the agent stopped (it names it here);
-# the candidate's semaphores, queues and shared memory live in it. Run directly: /dev/shm.
+# the candidate's semaphores, queues and shared memory live in it. Required: without it nothing is graded
+# (never a fallback to /dev/shm, which nobody emptied).
 _SHM_ENV = "AETHER_PROTOCOL_SHM_DIR"
 _DEFAULT_SHM = "/dev/shm"
+_SHM_UNCONFIGURED = "shared_memory_unconfigured"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
 # The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
 _BUDGET_ENV = "AETHER_PROTOCOL_BUDGET_SECONDS"
@@ -1105,6 +1111,10 @@ def run_suite(root: Path) -> dict[str, Any]:
     come from the baseline source, and a test without a well-formed reply from its own process is a FAIL.
     """
     started = time.monotonic()
+    shared_memory = _shared_memory()
+    if shared_memory is None:
+        # Before anything else, and before any test or candidate process exists.
+        return {"passed": 0, "failed": 1, "errors": 0, "cases": [_case("suite", "FAIL", _SHM_UNCONFIGURED)], "elapsed_seconds": 0.0}
     cases: list[dict[str, str]] = []
     passed = 0
     failed = 0
@@ -1115,7 +1125,7 @@ def run_suite(root: Path) -> dict[str, Any]:
     tests = _test_modules(sources)
     encoded = {name: base64.b64encode(data).decode("ascii") for name, data in sources.items()}
     # What candidate code may see, read before any of it runs; and what it must never read.
-    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")], _shared_memory())
+    candidate = (_candidate_files(root), [str(root), os.environ.get("AETHER_SANDBOX_WORK", "/work")], shared_memory)
     declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
     deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
     test_timeout = _test_timeout()

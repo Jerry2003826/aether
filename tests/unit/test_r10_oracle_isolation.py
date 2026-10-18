@@ -29,6 +29,7 @@ def _grade(root: Path) -> tuple[int, dict | None, str]:
     secret.write_text(_NONCE, encoding="utf-8")
     env = {key: value for key, value in os.environ.items() if not key.startswith("AETHER_")}
     env["AETHER_PROTOCOL_NONCE_FILE"] = str(secret)
+    env["AETHER_PROTOCOL_SHM_DIR"] = "/dev/shm"  # required by the protocol; the entry names the emptied one
     completed = subprocess.run(
         [sys.executable, "-I", str(_PROTOCOL)],
         cwd=root,
