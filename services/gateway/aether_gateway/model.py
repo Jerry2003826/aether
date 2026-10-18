@@ -217,6 +217,20 @@ def _redact(value: str, secret: str) -> str:
     return value.replace(secret, "[REDACTED]")
 
 
+
+def _recorded_call(child_detail: dict[str, Any], fallback_tokens: int) -> tuple[int, int | None]:
+    """(tokens, micro-USD) admission wrote on a coding_call row (ADR-F46 R7).
+
+    A row admitted before the amount was recorded has neither; its tokens come from
+    reserved_tokens (or fallback_tokens) and the money is priced again (None).
+    """
+    tokens = _positive_int(child_detail.get("call_tokens"))
+    micro = child_detail.get("call_micro_usd")
+    if tokens and type(micro) is int and micro >= 0:
+        return tokens, micro
+    return _positive_int(child_detail.get("reserved_tokens")) or fallback_tokens, None
+
+
 def _count(value: object) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value < 0:
         return 0
@@ -1051,7 +1065,9 @@ class ModelGateway:
                 )
             detail["pending_tokens"] = pending + call_tokens
             # Each call is priced on its own at the reservation's rate, so it is rounded up once.
-            add_call_cost(detail, "pending", call_tokens)
+            # The amount is written on the call's own row too; finishing the call removes exactly it.
+            call_micro = coding_call_micro_usd(call_tokens, detail)
+            add_call_cost(detail, "pending", call_tokens, micro_usd=call_micro)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1085,6 +1101,8 @@ class ModelGateway:
                 )
             child_detail = {
                 "reserved_tokens": call_tokens,
+                "call_tokens": call_tokens,
+                "call_micro_usd": call_micro,
                 "input_estimate_tokens": call_tokens - CODING_CALL_OUTPUT_CAP,
                 "dispatch_state": "sending",
                 "dispatch_holder": attempt_id,
@@ -1164,9 +1182,9 @@ class ModelGateway:
                 if isinstance(detail, str):
                     detail = json.loads(detail)
                 detail = dict(detail or {})
-                held = _positive_int(_object_detail(row["usage_detail"]).get("reserved_tokens")) or CODING_CALL_OUTPUT_CAP
+                held, held_micro = _recorded_call(_object_detail(row["usage_detail"]), CODING_CALL_OUTPUT_CAP)
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - held)
-                remove_call_cost(detail, "pending", held)
+                remove_call_cost(detail, "pending", held, micro_usd=held_micro)
                 conn.execute(
                     text(
                         "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1262,11 +1280,12 @@ class ModelGateway:
                 # The job stopped waiting and already charged this call at its reservation.
                 _logger().info("relay_late_answer_ignored project=%s", _public(project_id, self.provider_key))
                 return
-            detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
-            remove_call_cost(detail, "pending", self._coding_call_tokens)
+            call_tokens, call_micro = self._admitted_call(conn, project_id, task_id)
+            detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - call_tokens)
+            remove_call_cost(detail, "pending", call_tokens, micro_usd=call_micro)
             if counted is None:
                 detail["usage_missing"] = True
-                self._note_unknown_call(detail)
+                self._note_unknown_call(detail, call_tokens, call_micro)
             else:
                 incoming, outgoing = counted
                 detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
@@ -1325,8 +1344,9 @@ class ModelGateway:
             if exc.error_body_truncated:
                 detail["error_body_truncated"] = True
             if release_pending:
-                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
-                remove_call_cost(detail, "pending", self._coding_call_tokens)
+                call_tokens, call_micro = self._admitted_call(conn, project_id, task_id)
+                detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - call_tokens)
+                remove_call_cost(detail, "pending", call_tokens, micro_usd=call_micro)
                 if exc.usage is not None:
                     # An incomplete reply that still reported usage is charged that measured usage.
                     incoming, outgoing = exc.usage
@@ -1336,7 +1356,7 @@ class ModelGateway:
                 elif exc.sent and (exc.upstream_status is None or exc.error_body_truncated):
                     # Sent but no whole answer (a timeout, a cut body, an error reply cut short): the
                     # provider may bill it, so its hold is charged at settlement.
-                    self._note_unknown_call(detail)
+                    self._note_unknown_call(detail, call_tokens, call_micro)
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
@@ -1389,14 +1409,29 @@ class ModelGateway:
                         },
                     )
 
-    def _note_unknown_call(self, detail: dict[str, Any]) -> None:
+    def _admitted_call(self, conn: Connection, project_id: str, task_id: str) -> tuple[int, int | None]:
+        """The tokens and money admission recorded on the current call's own row."""
+        if not self._coding_child_key:
+            return self._coding_call_tokens, None
+        child = conn.execute(
+            text(
+                "SELECT usage_detail FROM model_requests WHERE project_id = :project_id AND task_id = :task_id "
+                "AND request_key = :request_key FOR UPDATE"
+            ),
+            {"project_id": project_id, "task_id": task_id, "request_key": self._coding_child_key},
+        ).mappings().first()
+        if child is None:
+            return self._coding_call_tokens, None
+        return _recorded_call(_object_detail(child["usage_detail"]), self._coding_call_tokens)
+
+    def _note_unknown_call(self, detail: dict[str, Any], call_tokens: int, call_micro: int | None) -> None:
         """Count a call whose usage never arrived and keep its reservation for settlement.
 
         These counters only grow: a later call that reports usage does not erase them.
         """
         detail["unknown_usage_calls"] = _count(detail.get("unknown_usage_calls")) + 1
-        detail["unknown_reserved_tokens"] = _count(detail.get("unknown_reserved_tokens")) + self._coding_call_tokens
-        add_call_cost(detail, "unknown_reserved", self._coding_call_tokens)
+        detail["unknown_reserved_tokens"] = _count(detail.get("unknown_reserved_tokens")) + call_tokens
+        add_call_cost(detail, "unknown_reserved", call_tokens, micro_usd=call_micro)
 
     def _write_child_observation(
         self,

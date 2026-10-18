@@ -85,23 +85,30 @@ def coding_call_micro_usd(tokens: int, detail: dict) -> int:
 COST_KINDS = ("measured", "unknown_reserved", "pending")
 
 
-def add_call_cost(detail: dict, kind: str, tokens: int) -> None:
-    """Price one call of `tokens` on its own and add it to `kind`."""
+def add_call_cost(detail: dict, kind: str, tokens: int, micro_usd: int | None = None) -> None:
+    """Add one call of `tokens` to `kind`: at `micro_usd` when that call's amount was already
+    recorded, otherwise priced on its own now."""
     if tokens <= 0:
         return
-    detail[f"{kind}_micro_usd"] = _count(detail.get(f"{kind}_micro_usd")) + coding_call_micro_usd(tokens, detail)
+    amount = coding_call_micro_usd(tokens, detail) if micro_usd is None else max(0, micro_usd)
+    detail[f"{kind}_micro_usd"] = _count(detail.get(f"{kind}_micro_usd")) + amount
     detail[f"{kind}_priced_tokens"] = _count(detail.get(f"{kind}_priced_tokens")) + tokens
 
 
-def remove_call_cost(detail: dict, kind: str, tokens: int) -> None:
-    """Take one call of `tokens` back out of `kind` (a pending call that finished either way)."""
+def remove_call_cost(detail: dict, kind: str, tokens: int, micro_usd: int | None = None) -> None:
+    """Take one call of `tokens` back out of `kind` (a pending call that finished either way).
+
+    micro_usd is the amount admission recorded for that call; it is subtracted exactly. Only a
+    call admitted before amounts were recorded (micro_usd None) is priced again.
+    """
     if tokens <= 0:
         return
     priced = _count(detail.get(f"{kind}_priced_tokens"))
     if not priced:
         return
+    amount = coding_call_micro_usd(tokens, detail) if micro_usd is None else max(0, micro_usd)
     detail[f"{kind}_priced_tokens"] = max(0, priced - tokens)
-    detail[f"{kind}_micro_usd"] = max(0, _count(detail.get(f"{kind}_micro_usd")) - coding_call_micro_usd(tokens, detail))
+    detail[f"{kind}_micro_usd"] = max(0, _count(detail.get(f"{kind}_micro_usd")) - amount)
 
 
 def move_call_cost(detail: dict, source: str, target: str) -> None:
