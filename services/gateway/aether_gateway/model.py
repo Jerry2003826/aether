@@ -352,7 +352,12 @@ def usage_counts(usage: object) -> tuple[int, int] | None:
 
 
 def parse_upstream_chat(raw: bytes, content_type: str) -> dict[str, Any]:
-    """One chat completion. SSE is folded into that object, including a final usage chunk."""
+    """One complete chat completion. SSE is folded into that object, including a final usage chunk.
+
+    A reply is complete only with a finish signal: choices[0].finish_reason is a non-empty string
+    (for SSE, on at least one event). Without one it is upstream_incomplete, never a reply; it
+    carries the usage that came back, if any, so it is charged as measured rather than reserved.
+    """
     if _is_event_stream(raw, content_type):
         return _aggregate_sse(raw)
     try:
@@ -361,7 +366,21 @@ def parse_upstream_chat(raw: bytes, content_type: str) -> dict[str, Any]:
         raise GatewayDenied("upstream_error", sent=True) from exc
     if not isinstance(loaded, dict):
         raise GatewayDenied("upstream_error", sent=True)
+    choices = loaded.get("choices")
+    choice = choices[0] if isinstance(choices, list) and choices and isinstance(choices[0], dict) else {}
+    if not _finish_signal(choice.get("finish_reason")):
+        raise _incomplete(loaded.get("usage"))
     return loaded
+
+
+def _finish_signal(reason: object) -> bool:
+    return isinstance(reason, str) and bool(reason)
+
+
+def _incomplete(usage: object) -> GatewayDenied:
+    """A reply without a finish signal: sent, and charged by the usage it carried, if any."""
+    _logger().warning("upstream_incomplete reason=no_finish_reason usage=%s", "yes" if usage_counts(usage) is not None else "no")
+    return GatewayDenied("upstream_incomplete", sent=True, usage=usage_counts(usage))
 
 
 def _usage_token(usage: dict[str, Any], *names: str) -> int | None:
@@ -429,7 +448,7 @@ def _aggregate_sse(raw: bytes) -> dict[str, Any]:
             continue
         choice = choices[0]
         reason = choice.get("finish_reason")
-        if isinstance(reason, str) and reason:
+        if _finish_signal(reason):
             finish = reason
         delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
@@ -442,6 +461,9 @@ def _aggregate_sse(raw: bytes) -> dict[str, Any]:
         calls = source.get("tool_calls")
         if isinstance(calls, list):
             _merge_tool_calls(tool_calls, calls)
+    if finish is None:
+        # [DONE] or the end of the stream is not a finish signal: the stream stopped short.
+        raise _incomplete(usage)
     message_out: dict[str, Any] = {"role": role, "content": "".join(content) if content else None}
     if tool_calls:
         message_out["tool_calls"] = [tool_calls[index] for index in sorted(tool_calls)]
@@ -556,6 +578,7 @@ class GatewayDenied(Exception):
         upstream_status: int | None = None,
         provider_error: str | None = None,
         error_body_truncated: bool = False,
+        usage: tuple[int, int] | None = None,
     ) -> None:
         super().__init__(code)
         self.code = code
@@ -563,6 +586,8 @@ class GatewayDenied(Exception):
         self.upstream_status = upstream_status
         self.provider_error = provider_error
         self.error_body_truncated = error_body_truncated
+        # Prompt and completion tokens an incomplete reply still reported; None when it had none.
+        self.usage = usage
 
 
 class ModelGateway:
@@ -1271,7 +1296,13 @@ class ModelGateway:
             if release_pending:
                 detail["pending_tokens"] = max(0, _count(detail.get("pending_tokens")) - self._coding_call_tokens)
                 remove_call_cost(detail, "pending", self._coding_call_tokens)
-                if exc.sent and (exc.upstream_status is None or exc.error_body_truncated):
+                if exc.usage is not None:
+                    # An incomplete reply that still reported usage is charged that measured usage.
+                    incoming, outgoing = exc.usage
+                    detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
+                    detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
+                    add_call_cost(detail, "measured", incoming + outgoing)
+                elif exc.sent and (exc.upstream_status is None or exc.error_body_truncated):
                     # Sent but no whole answer (a timeout, a cut body, an error reply cut short): the
                     # provider may bill it, so its hold is charged at settlement.
                     self._note_unknown_call(detail)
@@ -1287,6 +1318,16 @@ class ModelGateway:
                     "request_key": parent_key,
                 },
             )
+            if release_pending and exc.usage is not None:
+                self._write_child_observation(
+                    conn,
+                    project_id=project_id,
+                    task_id=task_id,
+                    incoming=exc.usage[0],
+                    outgoing=exc.usage[1],
+                    revision=None,
+                    usage_missing=False,
+                )
             if self._coding_child_key:
                 child = conn.execute(
                     text(
