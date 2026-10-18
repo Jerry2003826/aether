@@ -179,3 +179,46 @@ def test_only_root_level_python_files_whose_first_line_is_the_marker_are_marked(
     )
     (tmp_path / "linked.py").symlink_to(tmp_path / "check.py")
     assert grading_files.marked_grading_files(tmp_path) == frozenset({"check.py", "spaced.py"})
+
+
+def _grading_files():
+    sys.path.append(str(_ENTRY_DIR))
+    try:
+        import grading_files
+    finally:
+        sys.path.remove(str(_ENTRY_DIR))
+    return grading_files
+
+
+_SHEBANG_CHECK = "#!/usr/bin/env python3\n# aether: grading\ndef ok(value):\n    return value == 42\n"
+
+
+def test_the_marker_may_follow_a_shebang_or_coding_line(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        {
+            "shebang.py": _SHEBANG_CHECK,
+            "coding.py": "# -*- coding: utf-8 -*-\n# aether: grading\nX = 1\n",
+            "vim_coding.py": "# vim: set fileencoding=utf-8 :\n# aether: grading\nX = 1\n",
+            "crlf.py": "#!/usr/bin/env python3\r\n# aether: grading\r\nX = 1\r\n",
+            # Line two only after a shebang or coding line; never later than line two.
+            "comment_first.py": "# helper\n# aether: grading\nX = 1\n",
+            "third_line.py": "#!/usr/bin/env python3\n# -*- coding: utf-8 -*-\n# aether: grading\nX = 1\n",
+            "shebang_lookalike.py": "#!/usr/bin/env python3\n# aether: grading-ish\nX = 1\n",
+        },
+    )
+    assert _grading_files().marked_grading_files(tmp_path) == frozenset({"shebang.py", "coding.py", "vim_coding.py", "crlf.py"})
+
+
+def test_a_helper_marked_after_a_shebang_is_restored(tmp_path: Path) -> None:
+    baseline = {**_BASELINE, "check.py": _SHEBANG_CHECK}
+    found = _restored(tmp_path, baseline, {"check.py": "#!/usr/bin/env python3\ndef ok(value):\n    return True\n"})
+    assert found["check.py"] == _SHEBANG_CHECK
+
+
+def test_candidate_code_cannot_replace_a_helper_marked_after_a_shebang(tmp_path: Path) -> None:
+    baseline = {**_BASELINE, "check.py": _SHEBANG_CHECK}
+    app = "import check\ncheck.ok = lambda value: True\n\ndef value():\n    return 41\n"
+    code, body, output = _graded(tmp_path, {**baseline, "app.py": app}, baseline)
+    assert code == 1, (body, output[-2000:])
+    assert body["passed"] == 0, body
