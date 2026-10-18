@@ -172,6 +172,9 @@ class FakeLedgerDatabase:
 
     def _update(self, sql: str, params: dict[str, Any]) -> _Result:
         table = sql.split()[1]
+        if table == "capability_grants":
+            # This fake keeps no grants: revoking a ticket's grants finds none to revoke.
+            return _Result([], rowcount=0)
         assignments = sql[sql.index(" SET ") + 5 : sql.index(" WHERE ")]
         where = sql[sql.index(" WHERE ") + 7 :]
         if table == "budget_accounts":
