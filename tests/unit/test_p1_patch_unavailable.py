@@ -1,7 +1,7 @@
 """Without git, the published patch cannot be written; the job still ends with its own state and code.
 
 unified_patch raises WorkspaceError("patch_unavailable") when git cannot run. The two places that
-call it, _publish (through _published_patch, when the agent left no patch) and _publish_stop (a
+call it, _publish (through _published_patch_or_error, when the agent left no patch) and _publish_stop (a
 cancel or deadline stop), must not crash or turn the job into FAILED/patch_unavailable: they store
 the terminal state and error code they were given, with the unchanged marker as the patch and
 patch_error recorded in the events.

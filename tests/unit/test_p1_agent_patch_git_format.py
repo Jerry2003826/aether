@@ -14,7 +14,7 @@ from aether_worker.coding_jobs import (
     _agent_patch,
     _coding_terminal,
     _patch_source,
-    _published_patch,
+    _published_patch_or_error,
 )
 from aether_worker.coding_workspace import unified_patch
 
@@ -57,7 +57,7 @@ def test_a_git_format_agent_patch_is_published(case: str) -> None:
     assert _agent_patch(sandbox) == patch
     assert _patch_source(sandbox) == "agent_edit"
     workspace = {"base_files": {"app.py": "def value():\n    return 0\n"}, "files": {"app.py": "x = 1\n"}, "tests": {}}
-    assert _published_patch(workspace, sandbox) == patch.encode()
+    assert _published_patch_or_error(workspace, sandbox, job_id="job") == (patch.encode(), None)
     assert _coding_terminal(sandbox, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == (
         "FINISHED",
         None,

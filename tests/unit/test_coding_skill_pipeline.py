@@ -9,7 +9,7 @@ import math
 import pytest
 
 from aether_worker.bundle_files import BundleError, parse_file_map
-from aether_worker.coding_jobs import _coding_terminal, _log_job, _patch_source, _published_patch
+from aether_worker.coding_jobs import _coding_terminal, _log_job, _patch_source, _published_patch_or_error
 from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.coding_workspace import WorkspaceError, parse_workspace, unified_patch
 from aether_worker.skill_dataset import DatasetError, parse_candidate, parse_dataset
@@ -83,10 +83,12 @@ def test_published_patch_comes_from_agent_edits_and_a_missed_call_cannot_finish(
     parsed = parse_workspace(json.dumps(_workspace()).encode())
     edited = _sandbox(1, requests=2, edits=1, patch=_AGENT_PATCH)
     assert _patch_source(edited) == "agent_edit"
-    assert _published_patch(parsed, edited) == _AGENT_PATCH.encode()
+    assert _published_patch_or_error(parsed, edited, job_id="job") == (_AGENT_PATCH.encode(), None)
     untouched = _sandbox(1, requests=1)
     assert _patch_source(untouched) == "candidate_files"
-    assert b"return 42" in _published_patch(parsed, untouched)
+    patch, patch_error = _published_patch_or_error(parsed, untouched, job_id="job")
+    assert patch_error is None
+    assert b"return 42" in patch
     done = _finished()
     assert _coding_terminal(done, upstream_error=None, measured=(8, 4), usage_missing=False, channel_revoked=True) == ("FINISHED", None)
     blank = _sandbox(1, requests=0)
@@ -163,16 +165,18 @@ def test_a_terminal_only_agent_patch_is_published_without_file_editor_calls() ->
     agent_patch = "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 0\n+    return 7\n"
     terminal = _sandbox(1, requests=2, edits=0, patch=agent_patch)
     assert _patch_source(terminal) == "agent_edit"
-    assert _published_patch(parsed, terminal) == agent_patch.encode()
+    assert _published_patch_or_error(parsed, terminal, job_id="job") == (agent_patch.encode(), None)
     unknown = _sandbox(1, requests=2, patch=agent_patch)
     unknown["result"]["edit_calls"] = "not-a-number"
     assert _patch_source(unknown) == "agent_edit"
-    assert _published_patch(parsed, unknown) == agent_patch.encode()
+    assert _published_patch_or_error(parsed, unknown, job_id="job") == (agent_patch.encode(), None)
     for rejected in ("", "diff --git a/app.py b/app.py\n", None, 7):
         sandbox = _sandbox(1, requests=2, edits=3)
         sandbox["result"]["patch"] = rejected
         assert _patch_source(sandbox) == "candidate_files"
-        assert b"return 42" in _published_patch(parsed, sandbox)
+        patch, patch_error = _published_patch_or_error(parsed, sandbox, job_id="job")
+        assert patch_error is None
+        assert b"return 42" in patch
 
 
 def test_coding_job_log_has_no_patch_text(caplog) -> None:

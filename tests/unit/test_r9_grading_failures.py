@@ -8,7 +8,7 @@ import subprocess
 import pytest
 
 from aether_worker import coding_sandbox
-from aether_worker.coding_jobs import _coding_terminal, _patch_source, _published_patch
+from aether_worker.coding_jobs import _coding_terminal, _patch_source, _published_patch_or_error
 
 _PATCH = "--- a/app.py\n+++ b/app.py\n@@ -1,2 +1,2 @@\n def value():\n-    return 0\n+    return 42\n"
 
@@ -50,4 +50,4 @@ def test_grading_violation_exit_1_is_failed_with_the_agent_patch(monkeypatch, de
     assert _coding_terminal(sandbox, upstream_error=None, measured=(30, 9), usage_missing=False, channel_revoked=True) == ("FAILED", detail)
     assert _patch_source(sandbox) == "agent_edit"
     workspace = {"base_files": {"app.py": "def value():\n    return 0\n"}, "files": {"app.py": "def value():\n    return 0\n"}}
-    assert _published_patch(workspace, sandbox) == _PATCH.encode()
+    assert _published_patch_or_error(workspace, sandbox, job_id="job") == (_PATCH.encode(), None)

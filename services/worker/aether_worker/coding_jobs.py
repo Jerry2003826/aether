@@ -1475,13 +1475,6 @@ def _patch_source(sandbox: dict[str, Any]) -> str:
     return "agent_edit" if _agent_patch(sandbox) is not None else "candidate_files"
 
 
-def _published_patch(workspace: dict[str, dict[str, str]], sandbox: dict[str, Any]) -> bytes:
-    patch = _agent_patch(sandbox)
-    if patch is not None:
-        return patch.encode()
-    return unified_patch(workspace["base_files"], workspace["files"]).encode()
-
-
 def _published_patch_or_error(
     workspace: dict[str, dict[str, str]], sandbox: dict[str, Any], *, job_id: str
 ) -> tuple[bytes, str | None]:
