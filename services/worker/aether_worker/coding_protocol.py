@@ -441,14 +441,24 @@ class _Session:
         in the candidate before any candidate code runs. Encoding may share new nested containers."""
         sync: list[object] = []
         done: set[int] = set()
+        total = 0
+        changed: list[tuple[int, str, list[object]]] = []
         while len(done) < len(self._mirrors):
             for handle in [key for key in self._mirrors if key not in done]:
                 done.add(handle)
                 state = _encode_data(self._mirrors[handle], 0, _encode_shared_item)
                 text = json.dumps(state)
+                # Every shared container is encoded on every request, changed or not: all of them count.
+                total += len(text)
+                if total > _MAX_SHARED_BYTES:
+                    self._dead = _SHARED_TOO_LARGE
+                    self.close()
+                    raise CandidateError(self._dead)
                 if self._synced.get(handle) != text:
-                    self._synced[handle] = text
-                    sync.append([handle, state])
+                    changed.append((handle, text, state))
+        for handle, text, state in changed:
+            self._synced[handle] = text
+            sync.append([handle, state])
         return sync
 
     def _incoming(self, sync: object) -> None:
@@ -629,6 +639,11 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
 # a subclass (defaultdict, Counter, `class Result(list)`, a namedtuple, ...) crosses as a _RemoteData
 # handle; a subclass instance the test passes in still crosses by value, as its builtin base.
 _MIRRORED = (list, dict, set, bytearray)
+# Shared containers are re-encoded on every request (there is no cheap way to tell an untouched builtin
+# container), so their encoded total is capped like the candidate files: past it the session fails
+# closed with shared_containers_too_large, before anything reaches the candidate.
+_MAX_SHARED_BYTES = 8 * 1024 * 1024
+_SHARED_TOO_LARGE = "shared_containers_too_large"
 _MIRROR_KINDS: dict[object, type] = {"l": list, "d": dict, "S": set, "y": bytearray}
 
 # Builtin data types a candidate class can subclass (Codex :1504), each with a C method of the base
