@@ -90,7 +90,7 @@ def _file_cases(candidate: Path, suite: Path, path: Path) -> list[ProtocolCase] 
         tree = ast.parse(path.read_text(encoding="utf-8"))
     except (OSError, SyntaxError, UnicodeError):
         return None
-    if any(isinstance(node, ast.ClassDef) and node.name.startswith("Test") for node in tree.body):
+    if not all(_replayable_statement(node) for node in tree.body):
         return None
     aliases = _aliases(tree)
     if aliases is None:
@@ -98,8 +98,6 @@ def _file_cases(candidate: Path, suite: Path, path: Path) -> list[ProtocolCase] 
     relative = path.relative_to(suite).as_posix()
     cases: list[ProtocolCase] = []
     for node in tree.body:
-        if isinstance(node, ast.AsyncFunctionDef) and node.name.startswith("test"):
-            return None
         if not isinstance(node, ast.FunctionDef) or not node.name.startswith("test"):
             continue
         converted = _function_cases(candidate, relative, node, aliases)
@@ -107,6 +105,29 @@ def _file_cases(candidate: Path, suite: Path, path: Path) -> list[ProtocolCase] 
             return None
         cases.extend(converted)
     return cases
+
+
+# xunit hooks pytest runs around a module's or function's tests; the probes never run them.
+_XUNIT_HOOKS = frozenset(
+    {"setup_module", "teardown_module", "setUpModule", "tearDownModule", "setup_function", "teardown_function"}
+)
+
+
+def _replayable_statement(node: ast.stmt) -> bool:
+    """True only for top-level statements whose whole effect on the run is the literal asserts we replay.
+
+    This is an allowlist on purpose: pytest collects and runs more than top-level ``test*`` functions
+    (unittest.TestCase subclasses under any name, test functions imported or bound by assignment, xunit
+    hooks, fixtures), so anything outside it keeps the suite on cooperative pytest rather than letting
+    the protocol certify a pass from the part it understood.
+    """
+    if isinstance(node, ast.Expr):
+        return isinstance(node.value, ast.Constant) and isinstance(node.value.value, str)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        return not any((alias.asname or alias.name).lower().startswith("test") for alias in node.names)
+    if isinstance(node, ast.FunctionDef):
+        return node.name.startswith("test") or (not node.decorator_list and node.name not in _XUNIT_HOOKS)
+    return False
 
 
 def _aliases(tree: ast.AST) -> dict[str, tuple[str, tuple[str, ...]]] | None:
