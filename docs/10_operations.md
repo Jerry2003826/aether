@@ -60,6 +60,8 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 
 指标：queue depth、active jobs、workflow retry、unknown operations、approval age、budget held/actual、parser errors、index lag、retrieval latency、verification failure、skill rollback。为每个故障提供UI和诊断命令，不能只有日志里一个traceback。
 
+**编码评分：候选文件超过 8 MiB**：评分进程每步复制的候选非评分文件总量超过 8 MiB 时不跑任何测试，测试结果（`aether.coding_test_result`）里只有一条 `name=suite`、`verdict=FAIL`、`detail=candidate_files_too_large` 的用例，（评分进程 stderr 里的文件名清单不回传到作业日志）。排查：在任务基线与发布补丁里找出大文件（如 `find . -type f -size +512k -not -path "./tests/*" -not -path "./.git/*"`，再看补丁新增的数据、生成物或依赖目录），从任务基线移除或改放评分目录；这不是候选代码的测试失败，不要按普通 test_failed 处理。入口意外异常的 stderr 只有 `entry_failed <类型名>`，不含异常消息；存储前日志尾部经 `secret_scan.redact_text` 整段脱敏。
+
 ## 7. 禁止默认危险的运维行为
 
 不使用`docker compose down -v`作为普通重启/升级；不自动清空DB；不把任何admin端口映射0.0.0.0；不在前端bundle注入provider key。备份恢复、数据导出、真实PR发布需要显式命令和授权。安装脚本不改机器范围防火墙/安全设置；需要这些权限的部署步骤先生成配置供owner执行/批准，并把相关验收标清。
