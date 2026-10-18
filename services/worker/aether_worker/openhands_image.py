@@ -107,11 +107,16 @@ def _context_files(root: Path) -> list[Path]:
             files.add(item)
         if not path.exists():
             raise FileNotFoundError(name)
+    # .dockerignore decides which context files reach the build (Codex :98), so it is part of the image too.
+    # A context without one sends everything; its absence is then reflected by it not being hashed.
+    ignore = root / ".dockerignore"
+    if ignore.is_file():
+        files.add(ignore)
     return sorted(files, key=lambda item: item.relative_to(root).as_posix())
 
 
 def context_hash(root: Path | None = None) -> str:
-    """SHA-256 over path and content of the Dockerfile, every file it copies, and the lock files."""
+    """SHA-256 over path and content of the Dockerfile, .dockerignore, every file it copies, and the lock files."""
     base = repository_root() if root is None else root
     digest = hashlib.sha256()
     for path in _context_files(base):
