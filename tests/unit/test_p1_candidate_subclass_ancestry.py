@@ -3,12 +3,14 @@
 The reverse of r4308195944: a `class Result(list)` instance (or namedtuple, IntEnum member, Counter)
 returned by candidate code is a handle in the test process, and `isinstance(x, list)` was False, so a
 trusted `assert not isinstance(app.result(), list)` passed against a candidate it fails in-process.
-Now `x.__class__` is a stand-in built in the test process from the trusted classes of the candidate
-class's MRO (the builtin data types, OrderedDict, defaultdict, Counter and the enum bases, each checked
+Now the handle's class, for isinstance and issubclass, is a stand-in built in the test process from the
+trusted classes of the candidate class's MRO (the builtin data types, OrderedDict, defaultdict, Counter and the enum bases, each checked
 by identity against the copy the protocol imported before any candidate code ran); isinstance and
 issubclass against those, and the ABCs they are registered with, answer as in-process. A class whose
 MRO holds any other class that is not the candidate's own (a stdlib or library class, or one that
 claims a stdlib module) is refused as candidate_object_unsupported:subclass_ancestry_unavailable.
+Reading `x.__class__` in a trusted test is refused as class_of_candidate_object (Codex r4309057196):
+the stand-in is not the candidate's class, so a test that inspects it is not judged.
 """
 
 from __future__ import annotations
@@ -149,6 +151,7 @@ def test_a_stdlib_enum_outside_the_trusted_set_is_refused():
 '''
 
 _REASON = "candidate_object_unsupported:subclass_ancestry_unavailable"
+_CLASS = "candidate_object_unsupported:class_of_candidate_object"
 _IN_PROCESS = {
     "test_a_list_subclass_is_a_list": "PASS",
     "test_a_list_subclass_cannot_pass_as_not_a_list": "FAIL",
@@ -164,7 +167,11 @@ _IN_PROCESS = {
     "test_a_class_claiming_a_stdlib_name_is_refused": "PASS",
     "test_a_stdlib_enum_outside_the_trusted_set_is_refused": "PASS",
 }
-_REFUSED = {"test_a_class_claiming_a_stdlib_name_is_refused", "test_a_stdlib_enum_outside_the_trusted_set_is_refused"}
+_REFUSED = {
+    "test_a_class_claiming_a_stdlib_name_is_refused": _REASON,
+    "test_a_stdlib_enum_outside_the_trusted_set_is_refused": _REASON,
+    "test_its_class_is_a_list_subclass_named_as_the_candidate_class": _CLASS,
+}
 
 
 def _work(tmp_path: Path) -> Path:
@@ -204,9 +211,11 @@ def test_the_in_process_run_gives_the_expected_verdicts(tmp_path: Path) -> None:
     for verdict, name in re.findall(r"^(PASSED|FAILED) test_app\.py::(\w+)", completed.stdout, re.MULTILINE):
         found[name] = "PASS" if verdict == "PASSED" else "FAIL"
     assert found == _IN_PROCESS, completed.stdout[-4000:]
+
+
 def test_builtin_ancestry_is_kept_or_refused_by_name(tmp_path: Path) -> None:
     cases, output = _grade(_work(tmp_path))
     expected = {name: ("FAIL" if name in _REFUSED else verdict) for name, verdict in _IN_PROCESS.items()}
     assert {name: verdict for name, (verdict, _detail) in cases.items()} == expected, output[-4000:]
-    for name in _REFUSED:
-        assert cases[name][1] == _REASON, (name, cases[name], output[-4000:])
+    for name, reason in _REFUSED.items():
+        assert cases[name][1] == reason, (name, cases[name], output[-4000:])
