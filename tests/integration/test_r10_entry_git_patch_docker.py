@@ -71,7 +71,7 @@ def test_the_image_has_git() -> None:
     if not docker_available():
         pytest.fail("Docker is required for the coding sandbox check")
     image = ensure_openhands_sandbox()
-    completed = execute_docker(["run", "--rm", "--network", "none", "--entrypoint", "git", image, "--version"], timeout=120)
+    completed = execute_docker(["run", "--rm", "--network", "none", image, "git", "--version"], timeout=120)
     assert completed.returncode == 0 and completed.stdout.startswith("git version "), completed.stdout + completed.stderr
 
 
