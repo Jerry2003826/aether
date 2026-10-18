@@ -20,7 +20,7 @@ from typing import Any
 import requests
 from docker.errors import DockerException
 
-from aether_worker.container_runtime import container_logs
+from aether_worker.container_runtime import LEFTOVER_INSPECT_TEMPLATE, container_logs
 from aether_worker.grading_files import PROTOCOL_CAP_SECONDS
 from aether_worker.openhands_image import (
     IMAGE_UNAVAILABLE,
@@ -713,7 +713,7 @@ def sweep_leftover_coding_containers(*, now: datetime | None = None) -> list[str
         if listing.returncode != 0:
             return []
         for container in listing.stdout.split():
-            inspected = _sandbox_docker(["inspect", "-f", '{"State":{{json .State}},"Created":{{json .Created}}}', container])
+            inspected = _sandbox_docker(["inspect", "-f", LEFTOVER_INSPECT_TEMPLATE, container])
             if inspected.returncode != 0:
                 continue
             try:

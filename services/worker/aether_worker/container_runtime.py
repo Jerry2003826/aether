@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import json
 import subprocess
 import threading
 from pathlib import Path
@@ -21,6 +22,8 @@ from aether_worker.output_bounds import (
 )
 
 _CLIENT: object | None = None
+# What the coding container sweep asks `docker inspect -f` for: State and Created as one JSON object.
+LEFTOVER_INSPECT_TEMPLATE = '{"State":{{json .State}},"Created":{{json .Created}}}'
 _LOG_STREAM_LIMIT = LOG_CAPTURE_LIMIT
 # A foreground run's stdout carries its result (the grader's ISOLATION and GRADE lines, the GRADE
 # line holding up to the candidate's values), so it gets the result window; stderr is only a log.
@@ -194,8 +197,9 @@ def _inspect(args: list[str]) -> subprocess.CompletedProcess[str]:
         container.reload()
     except NotFound:
         return _failed("missing")
-    state = container.attrs.get("State") or {}
-    rendered = _state_template(template, state, str(container.attrs.get("Id") or container.id))
+    rendered = _state_template(template, container.attrs, str(container.attrs.get("Id") or container.id))
+    if rendered is None:
+        return _failed(f"unsupported_template:{template}")
     return _ok(rendered + "\n", "")
 
 
@@ -210,6 +214,9 @@ def _image_inspect(args: list[str]) -> subprocess.CompletedProcess[str]:
         return _failed("missing")
     if template == "{{.Id}}":
         return _ok(str(image.id) + "\n", "")
+    if template:
+        # Never an empty answer for a template this path cannot render: the caller would parse "".
+        return _failed(f"unsupported_template:{template}")
     return _ok("", "")
 
 
@@ -496,7 +503,11 @@ def _volume(spec: str) -> tuple[str, str, str]:
     return host, container_path, mode or "rw"
 
 
-def _state_template(template: str, state: dict[str, Any], image_id: str) -> str:
+def _state_template(template: str, attrs: dict[str, Any], image_id: str) -> str | None:
+    """`docker inspect -f` for the templates callers use; None for any other (the caller fails)."""
+    state = attrs.get("State") or {}
+    if template == LEFTOVER_INSPECT_TEMPLATE:
+        return json.dumps({"State": state, "Created": attrs.get("Created")}, separators=(",", ":"))
     if template == "{{.State.Running}}":
         return "true" if state.get("Running") else "false"
     if template == "{{.State.Status}}":
@@ -506,7 +517,7 @@ def _state_template(template: str, state: dict[str, Any], image_id: str) -> str:
     if template == "{{.Id}}":
         return image_id
     if template:
-        return ""
+        return None
     return str(state.get("Status") or "")
 
 
