@@ -12,6 +12,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 _PROTOCOL = Path("services/worker/aether_worker/coding_protocol.py").resolve()
 _NONCE = "n0nce-5b1e9d03c7a24f86"
 
@@ -63,5 +65,38 @@ def test_a_failing_top_level_test_named_with_the_bare_test_prefix_fails_the_suit
         "test_mod.test_ok": ("PASS", ""),
         "test_mod.testFailure": ("FAIL", "AssertionError"),
         "test_mod.testPasses": ("PASS", ""),
+    }, output
+    assert code == 1, output
+
+
+@pytest.mark.parametrize(
+    ("relative", "label"),
+    [
+        ("test_bad-file.py", "test_bad-file"),
+        ("tests/test_bad-file.py", "tests.test_bad-file"),
+        ("checks/bad-file_test.py", "checks.bad-file_test"),
+    ],
+)
+def test_a_test_file_whose_name_is_not_an_identifier_is_collected_and_can_fail_the_suite(
+    tmp_path: Path, relative: str, label: str
+) -> None:
+    # pytest collects test_bad-file.py like any test_*.py; a passing module elsewhere must not hide it.
+    _write(
+        tmp_path,
+        {
+            "app.py": _APP,
+            "test_ok.py": "import app\n\ndef test_ok():\n    assert app.value() == 1\n",
+            relative: (
+                "import app\n\n"
+                "def test_good():\n    assert app.value() == 1\n\n"
+                "def test_bad():\n    assert app.value() == 2\n"
+            ),
+        },
+    )
+    code, verdicts, output = _grade(tmp_path)
+    assert verdicts == {
+        "test_ok.test_ok": ("PASS", ""),
+        f"{label}.test_good": ("PASS", ""),
+        f"{label}.test_bad": ("FAIL", "AssertionError"),
     }, output
     assert code == 1, output
