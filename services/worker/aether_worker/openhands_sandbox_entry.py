@@ -12,6 +12,7 @@ import shutil
 import signal
 import socket
 import socketserver
+import stat
 import subprocess
 import sys
 import tempfile
@@ -129,6 +130,8 @@ def copy_tree(src: Path, dst: Path) -> None:
             raise RuntimeError("special")
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(path.read_bytes())
+        # The one mode bit git records: the published patch is taken against this copy.
+        target.chmod(0o755 if _executable(path) else 0o644)
 
 
 def network_errno() -> int | None:
@@ -356,16 +359,21 @@ def job_directory() -> Path:
     return Path(tempfile.mkdtemp(prefix="aether-job-"))
 
 
-def _snapshot(root: Path) -> dict[str, bytes]:
-    """Bytes of every regular file. Present-but-empty is b"", absent is a missing key."""
-    found: dict[str, bytes] = {}
+def _executable(path: Path) -> bool:
+    """The executable bit as git records it (100755 vs 100644): the owner's execute bit."""
+    return bool(path.stat().st_mode & stat.S_IXUSR)
+
+
+def _snapshot(root: Path) -> dict[str, tuple[bytes, bool]]:
+    """Bytes and executable bit of every regular file. Present-but-empty is b"", absent is a missing key."""
+    found: dict[str, tuple[bytes, bool]] = {}
     for path in sorted(root.rglob("*")):
         relative = path.relative_to(root)
         if any(part in _SKIP for part in relative.parts):
             continue
         if path.is_symlink() or not path.is_file():
             continue
-        found[relative.as_posix()] = path.read_bytes()
+        found[relative.as_posix()] = (path.read_bytes(), _executable(path))
     return found
 
 
@@ -375,13 +383,14 @@ class PatchUnavailable(RuntimeError):
     runner detail patch_unavailable (exit 2, never graded), never as agent_no_change."""
 
 
-def _patch(before: dict[str, bytes], root: Path) -> str:
+def _patch(before: dict[str, tuple[bytes, bool]], root: Path) -> str:
     """The agent's source change, written by git itself (`git diff --no-index --binary`), as the
     worker's unified_patch does. Grading files and caches are grading input, never part of it.
 
     Each changed file is written byte for byte into a before and an after tree, so created, deleted
     and empty files, a missing final newline and a change only to it all take git's own form, and
-    `git apply` reproduces the graded files exactly. A file that is not UTF-8 on either side goes out
+    `git apply` reproduces the graded files exactly. The executable bit goes with each file, so a mode
+    change (alone or with content) is a change and the patch carries git's old/new mode lines. A file that is not UTF-8 on either side goes out
     as a GIT binary patch, so the patch text stays valid UTF-8. Text changes come first. No change is "".
     """
     after = _snapshot(root)
@@ -395,7 +404,7 @@ def _patch(before: dict[str, bytes], root: Path) -> str:
     ]
     if not changed:
         return ""
-    binary = {name for name in changed if not (_utf8(before.get(name)) and _utf8(after.get(name)))}
+    binary = {name for name in changed if not (_utf8(_data(before, name)) and _utf8(_data(after, name)))}
     parts = []
     text = [name for name in changed if name not in binary]
     if text:
@@ -403,6 +412,11 @@ def _patch(before: dict[str, bytes], root: Path) -> str:
     if binary:
         parts.append(_git_diff(before, after, sorted(binary), force_binary=True))
     return "".join(parts)
+
+
+def _data(tree: dict[str, tuple[bytes, bool]], name: str) -> bytes | None:
+    entry = tree.get(name)
+    return None if entry is None else entry[0]
 
 
 def _utf8(value: bytes | None) -> bool:
@@ -415,7 +429,9 @@ def _utf8(value: bytes | None) -> bool:
     return True
 
 
-def _git_diff(old: dict[str, bytes], new: dict[str, bytes], names: list[str], *, force_binary: bool) -> str:
+def _git_diff(
+    old: dict[str, tuple[bytes, bool]], new: dict[str, tuple[bytes, bool]], names: list[str], *, force_binary: bool
+) -> str:
     """git diff --no-index --binary of two scratch trees named a and b holding `names` (so the paths
     read a/<name> and b/<name>). No configuration or attributes from the system, the user or the job
     apply: HOME and XDG_CONFIG_HOME are the scratch directory, there is no system or global config,
@@ -428,8 +444,9 @@ def _git_diff(old: dict[str, bytes], new: dict[str, bytes], names: list[str], *,
                 if name in tree:
                     path = top / side / name
                     path.parent.mkdir(parents=True, exist_ok=True)
-                    path.write_bytes(tree[name])
-                    path.chmod(0o644)
+                    data, executable = tree[name]
+                    path.write_bytes(data)
+                    path.chmod(0o755 if executable else 0o644)
         attributes = top / "attributes"
         attributes.write_text("* binary\n" if force_binary else "", encoding="utf-8")
         environment = {
