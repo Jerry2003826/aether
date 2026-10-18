@@ -10,6 +10,7 @@ from typing import Any
 
 import docker
 import requests
+import urllib3
 from docker.errors import BuildError, DockerException, ImageNotFound, NotFound
 from docker.utils import parse_repository_tag
 
@@ -249,14 +250,16 @@ def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProce
                 status = container.wait()
             else:
                 status = container.wait(timeout=timeout)
-        except (DockerException, requests.exceptions.RequestException) as exc:
-            if timeout is not None:
-                try:
-                    container.kill()
-                except (DockerException, requests.exceptions.RequestException):
-                    pass
+        except (DockerException, requests.exceptions.RequestException, OSError) as exc:
+            # The container may still be running whatever went wrong: never leave it behind.
+            try:
+                container.kill()
+            except (DockerException, requests.exceptions.RequestException, OSError):
+                pass
+            if timeout is not None and _is_read_timeout(exc):
                 raise subprocess.TimeoutExpired(["docker", "run", parsed["image"]], timeout) from exc
-            return _failed(str(exc))
+            # An API error, a daemon that went away or a broken stream is not a deadline.
+            return _failed(f"docker_error: {exc}")
         stdout_tail, stderr_tail = _read_tails(container, stdout_limit=_RUN_STDOUT_LIMIT, stderr_limit=_RUN_STDERR_LIMIT)
         stdout = stdout_tail.decode("utf-8", "replace")
         stderr = stderr_tail.decode("utf-8", "replace")
@@ -269,6 +272,27 @@ def _run(args: list[str], *, timeout: float | None) -> subprocess.CompletedProce
                 container.remove(force=True)
             except DockerException:
                 pass
+
+
+def _is_read_timeout(exc: BaseException) -> bool:
+    """True only when wait() gave up because its read timeout passed (classified by type, never by text).
+
+    docker-py raises requests' ReadTimeout over TCP; over the unix socket the same timeout can surface
+    as a requests ConnectionError wrapping urllib3's ReadTimeoutError, or as a bare socket timeout.
+    """
+    seen: set[int] = set()
+    pending: list[object] = [exc]
+    while pending:
+        current = pending.pop()
+        if not isinstance(current, BaseException) or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, (requests.exceptions.ReadTimeout, urllib3.exceptions.ReadTimeoutError, TimeoutError)):
+            return True
+        pending.extend(current.args)
+        pending.append(current.__cause__)
+        pending.append(current.__context__)
+    return False
 
 
 def _ensure_run_image(image: str) -> subprocess.CompletedProcess[str] | None:
