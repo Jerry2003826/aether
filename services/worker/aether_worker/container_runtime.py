@@ -151,9 +151,29 @@ def _info(args: list[str]) -> subprocess.CompletedProcess[str]:
     return _ok("", "")
 
 
+def _sdk_filters(args: list[str], allowed: frozenset[str]) -> dict[str, list[str]] | None:
+    """`--filter key=value` flags as docker-py filters, one list per key (label, status, ...).
+
+    None when a key is not in `allowed`: dropping it or folding it into another key would change
+    what is selected.
+    """
+    filters: dict[str, list[str]] = {}
+    for item in _flags(args, "--filter"):
+        key, separator, value = item.partition("=")
+        if not separator or key not in allowed:
+            return None
+        filters.setdefault(key, []).append(value)
+    return filters
+
+
+_PS_FILTERS = frozenset({"label", "status"})
+_IMAGE_FILTERS = frozenset({"label"})
+
+
 def _ps(args: list[str]) -> subprocess.CompletedProcess[str]:
-    labels = [item.removeprefix("label=") for item in _flags(args, "--filter")]
-    filters = {"label": labels} if labels else {}
+    filters = _sdk_filters(args, _PS_FILTERS)
+    if filters is None:
+        return _failed("unsupported_filter")
     found = docker_client().containers.list(all=True, filters=filters)
     lines = [str(container.id) for container in found]
     text = "\n".join(lines)
@@ -221,11 +241,10 @@ def _image_inspect(args: list[str]) -> subprocess.CompletedProcess[str]:
 
 
 def _images(args: list[str]) -> subprocess.CompletedProcess[str]:
-    label = ""
-    for item in _flags(args, "--filter"):
-        if item.startswith("label="):
-            label = item.removeprefix("label=")
-    found = docker_client().images.list(filters={"label": [label]} if label else None)
+    filters = _sdk_filters(args, _IMAGE_FILTERS)
+    if filters is None:
+        return _failed("unsupported_filter")
+    found = docker_client().images.list(filters=filters or None)
     lines = [str(image.id) for image in found]
     text = "\n".join(lines)
     return _ok(text + ("\n" if text else ""), "")
