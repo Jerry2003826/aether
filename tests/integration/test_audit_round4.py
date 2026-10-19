@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import json
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -14,7 +15,8 @@ from types import SimpleNamespace
 
 import litellm
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
+from sqlalchemy.engine import Engine
 from temporalio.client import Client
 from temporalio.worker import Worker
 
@@ -293,7 +295,44 @@ def test_round4_async_activity_remains_responsive(client, role_urls, monkeypatch
     assert asyncio.run(scenario()) < 0.25
 
 
+SQL_DELAY_SECONDS = 0.002
+
+
+@pytest.fixture
+def slow_database():
+    """Add 2 ms to every SQL statement run on an activity thread, like a slower CI runner.
+
+    Activities hand blocking work to ``asyncio.to_thread``, whose threads are named
+    ``asyncio_<n>``; the test thread and the event loop are not delayed.
+    """
+
+    def delay(conn, cursor, statement, parameters, context, executemany):
+        if threading.current_thread().name.startswith("asyncio_"):
+            time.sleep(SQL_DELAY_SECONDS)
+
+    event.listen(Engine, "before_cursor_execute", delay)
+    try:
+        yield SQL_DELAY_SECONDS
+    finally:
+        event.remove(Engine, "before_cursor_execute", delay)
+
+
 def test_round4_slow_call_does_not_block_another_temporal_task(client, role_urls, monkeypatch) -> None:
+    _slow_and_fast_tasks(client, role_urls, monkeypatch)
+
+
+def test_round4_slow_call_does_not_block_another_task_on_a_slow_database(client, role_urls, monkeypatch, slow_database) -> None:
+    """The same property must hold when every database statement is a little slower."""
+    _slow_and_fast_tasks(client, role_urls, monkeypatch)
+
+
+def test_round4_blocking_check_reports_a_worker_with_one_activity_slot(client, role_urls, monkeypatch) -> None:
+    """A worker that runs one activity at a time serializes the tasks; the check must say so."""
+    with pytest.raises(AssertionError, match="fast task blocked by slow call"):
+        _slow_and_fast_tasks(client, role_urls, monkeypatch, max_concurrent_activities=1)
+
+
+def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activities: int | None = None) -> None:
     address = _temporal_address()
     owner, project, _headers = _project(client)
     database = Database(role_urls["aether_worker"])
@@ -344,7 +383,8 @@ def test_round4_slow_call_does_not_block_another_temporal_task(client, role_urls
 
     async def run() -> float:
         temporal = await Client.connect(address)
-        async with Worker(temporal, task_queue=queue, workflows=[DurableTaskWorkflow], activities=[prepare_task, execute_task]):
+        slots = {} if max_concurrent_activities is None else {"max_concurrent_activities": max_concurrent_activities}
+        async with Worker(temporal, task_queue=queue, workflows=[DurableTaskWorkflow], activities=[prepare_task, execute_task], **slots):
 
             async def launch(created: dict):
                 handle = await temporal.start_workflow(
