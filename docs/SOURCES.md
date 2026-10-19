@@ -77,5 +77,10 @@ https://developers.openai.com/codex/learn/best-practices
 
 确认范围：任务计划、上下文控制和实际验证
 
+## S16 · ir_measures
+https://github.com/terrierteam/ir_measures
+
+确认范围：离线检索指标 R@k、RR@k、nDCG@k（经 pytrec_eval，trec_eval 语义），ADR-F48
+
 ## 提供的本地资料
 已读取并比对V1.2设计/合同/任务、V1.3增量与DeepSeek总纲。它们完整保存在archive。DeepSeek是研究材料而非授权指令，不继承其中未经本轮验证的市场数字或许可证结论。
