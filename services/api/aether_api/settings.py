@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 from typing import Annotated
 
-from pydantic import field_validator
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -27,10 +27,13 @@ class Settings(BaseSettings):
     cookie_secure: bool = False
     artifact_root: Path = Path("data/artifacts")
     index_root: Path = Path("data/indexes")
-    session_hours: int = 12
-    idle_minutes: int = 30
-    login_failure_limit: int = 5
-    login_window_seconds: int = 900
+    # Authentication limits must be positive (Codex r4309229029): 0 or less would lock every login out
+    # (failure limit), create sessions that are already expired (hours, idle) or disable throttling
+    # (window), so such a value fails at startup instead.
+    session_hours: Annotated[int, Field(gt=0)] = 12
+    idle_minutes: Annotated[int, Field(gt=0)] = 30
+    login_failure_limit: Annotated[int, Field(gt=0)] = 5
+    login_window_seconds: Annotated[int, Field(gt=0)] = 900
     trust_forwarded_for: bool = False
 
     @field_validator("allow_testclient", "cookie_secure", "trust_forwarded_for", mode="before")
