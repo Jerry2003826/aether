@@ -18,7 +18,13 @@ neither read nor write it (its Landlock domain holds only its src/ and tmp/). A 
 for a file under the test's tmp_path, or is handed its path in disguise, cannot rewrite it. A path inside
 the test's temporary directory passed to candidate code (as str, bytes or a path object, at any depth)
 is refused as candidate_object_unsupported:test_tmp_path_passed_to_candidate, never silently a path the
-candidate cannot reach. What remains different from in-process is named in _DIFFERS below.
+candidate cannot reach.
+
+A test that looks for a candidate's temporary file in its own temporary directory cannot see it, so
+`assert not Path(gettempdir(), name).exists()` would pass where it fails in-process. A test that passes
+while the candidate's tmp/ still holds a file the candidate wrote during that test is therefore refused
+as candidate_object_unsupported:candidate_left_tmp_files (code review); a candidate that removes its
+temporary files is unaffected. What remains different from in-process is named in _DIFFERS below.
 """
 
 from __future__ import annotations
@@ -68,6 +74,14 @@ def scratch():
     path = Path(tempfile.gettempdir(), "scratch.txt")
     path.write_text("s")
     return path.read_text()
+
+
+def scratch_cleaned():
+    path = Path(tempfile.gettempdir(), "cleaned.txt")
+    path.write_text("c")
+    text = path.read_text()
+    path.unlink()
+    return text
 
 
 def mkdir(name):
@@ -129,8 +143,12 @@ def test_reading_its_own_files_still_works():
     assert app.own_source() == "\\nimport "
 
 
-def test_a_scratch_file_in_the_candidates_tmp_is_not_a_written_file():
+def test_a_scratch_file_left_in_the_candidates_tmp_is_refused():
     assert app.scratch() == "s"
+
+
+def test_a_scratch_file_the_candidate_removes_is_not_refused():
+    assert app.scratch_cleaned() == "c"
 
 
 def test_the_candidate_cannot_rewrite_a_file_under_tmp_path_it_was_not_given(tmp_path):
@@ -217,11 +235,13 @@ def test_a_directory_the_candidate_makes_cannot_pass_unseen():
 
 _REASON = "candidate_object_unsupported:candidate_wrote_files"
 _TMP_PATH = "candidate_object_unsupported:test_tmp_path_passed_to_candidate"
+_LEFT_TMP = "candidate_object_unsupported:candidate_left_tmp_files"
 _IN_PROCESS = {
     "test_a_file_the_candidate_creates_is_refused": "PASS",
     "test_a_forbidden_file_cannot_pass_unseen": "FAIL",
     "test_reading_its_own_files_still_works": "PASS",
-    "test_a_scratch_file_in_the_candidates_tmp_is_not_a_written_file": "PASS",
+    "test_a_scratch_file_left_in_the_candidates_tmp_is_refused": "PASS",
+    "test_a_scratch_file_the_candidate_removes_is_not_refused": "PASS",
     "test_the_candidate_cannot_rewrite_a_file_under_tmp_path_it_was_not_given": "FAIL",
     "test_the_candidate_cannot_rewrite_a_file_under_tmp_path_by_a_disguised_path": "FAIL",
     "test_passing_tmp_path_to_the_candidate_is_refused": "PASS",
@@ -242,18 +262,18 @@ _REFUSED = {
     "test_passing_a_file_under_tmp_path_is_refused": _TMP_PATH,
     "test_passing_a_path_object_under_tmp_path_is_refused": _TMP_PATH,
     "test_passing_the_temporary_directory_nested_is_refused": _TMP_PATH,
+    "test_a_scratch_file_left_in_the_candidates_tmp_is_refused": _LEFT_TMP,
+    "test_a_scratch_file_the_candidate_wrote_is_not_in_the_tests_tmp": _LEFT_TMP,
 }
 # Isolation that in-process lacks: the candidate cannot reach the test's temporary directory at all.
 _PROTECTED = {
     "test_the_candidate_cannot_rewrite_a_file_under_tmp_path_it_was_not_given",
     "test_the_candidate_cannot_rewrite_a_file_under_tmp_path_by_a_disguised_path",
 }
-# Not detectable, recorded in ADR-F44: a test that names the temporary directory itself (not a path it
-# passes) sees its own, not the candidate's, so gettempdir() differs and a scratch file the candidate
-# wrote to its own TMPDIR is not in the test's.
+# Not detectable, recorded in ADR-F44: a test that compares its own temporary directory with the
+# candidate's sees two different directories (in-process PASS, here FAIL; never a false pass).
 _DIFFERS = {
     "test_the_temporary_directories_are_not_shared": ("FAIL", "AssertionError"),
-    "test_a_scratch_file_the_candidate_wrote_is_not_in_the_tests_tmp": ("PASS", ""),
 }
 _IN_PROCESS_DIR = {
     "test_a_directory_the_candidate_makes_cannot_pass_unseen": "FAIL",
