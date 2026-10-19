@@ -1568,8 +1568,9 @@ def _coding_terminal(
     """FINISHED needs a completed agent, an agent change and a passing protocol.
 
     A budget rejection or a blank report (the agent raised before it finished)
-    is FAILED even when the files on disk already pass; a conversation the step
-    limit stopped is FAILED/agent_iteration_limit, likewise (ADR-F47). A conversation that
+    is FAILED even when the files on disk already pass. A conversation the step
+    limit stopped (agent_stop=iteration_limit) is judged on its change and tests
+    like a finished one; without a passing change it is FAILED/agent_iteration_limit (ADR-F47). A conversation that
     finishes without changing any source file (empty or missing patch; grading
     files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
@@ -1599,11 +1600,11 @@ def _coding_terminal(
         return "FAILED", PATCH_TOO_LARGE
     if admission_error:
         return "FAILED", admission_error
-    if not _agent_completed(body):
-        if body.get("agent_stop") == "iteration_limit":
-            # Stopped at AETHER_CODING_MAX_ITERATIONS before its finish step: not FINISHED even when
-            # the files already pass (ADR-F47), and named, not folded into agent_interrupted.
-            return "FAILED", "agent_iteration_limit"
+    # Stopped at AETHER_CODING_MAX_ITERATIONS before its finish step (ADR-F47): judged like a finished
+    # conversation on its change and tests, so a passing change is FINISHED (the stored result and the
+    # coding_job log keep agent_stop=iteration_limit); otherwise FAILED/agent_iteration_limit.
+    stopped = body.get("agent_stop") == "iteration_limit"
+    if not _agent_completed(body) and not stopped:
         return "FAILED", "agent_interrupted"
     if upstream_error:
         return "FAILED", upstream_error
@@ -1614,12 +1615,14 @@ def _coding_terminal(
     if not called and measured is None:
         return "FAILED", "model_not_called"
     if _agent_patch(sandbox) is None:
-        return "FAILED", "agent_no_change"
+        return "FAILED", ("agent_iteration_limit" if stopped else "agent_no_change")
     if not passed and GRADING_TIMEOUT in _runner_details(sandbox):
         return "FAILED", GRADING_TIMEOUT
     if not passed and _suite_failure(sandbox) == CANDIDATE_FILES_TOO_LARGE:
         return "FAILED", CANDIDATE_FILES_TOO_LARGE
-    return ("FINISHED" if passed else "FAILED"), (None if passed else "test_failed")
+    if passed:
+        return "FINISHED", None
+    return "FAILED", ("agent_iteration_limit" if stopped else "test_failed")
 
 
 def _usage(result: dict[str, Any] | None) -> tuple[int, int] | None:
@@ -1708,7 +1711,7 @@ def _log_job(
     logger = _logger()
     logger.info(
         "coding_job job=%s fencing=%s state=%s error=%s model_requests=%s edit_calls=%s input_tokens=%s output_tokens=%s patch_source=%s"
-        " result_line_bytes=%s",
+        " result_line_bytes=%s agent_stop=%s",
         job_id,
         fencing,
         state,
@@ -1720,6 +1723,7 @@ def _log_job(
         patch_source,
         # Set by the entry only when it dropped a patch too large for the RESULT line (patch_too_large).
         _result_line_bytes(result),
+        result.get("agent_stop") if result.get("agent_stop") == "iteration_limit" else "",
     )
 
 

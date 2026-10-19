@@ -605,8 +605,11 @@ def _run_agent(job: Path, objective: str, iterations: int) -> dict[str, object]:
         if conversation.state.execution_status == ConversationExecutionStatus.FINISHED:
             report = _collect(agent, conversation)
         elif _stopped_by_iteration_limit(conversation):
-            # Not FINISHED, even if the files already pass (ADR-F47): said explicitly, so the worker
-            # records FAILED/agent_iteration_limit rather than the generic agent_interrupted.
+            # The SDK stopped it at max_iteration_per_run, not an error (ADR-F47): its usage and work
+            # are reported as for a finished run, and the stop is named so the worker judges it on the
+            # change and the tests and records it, never as a silent finish.
+            report = _collect(agent, conversation)
+            report["agent_completed"] = False
             report["agent_stop"] = "iteration_limit"
     except Exception as exc:
         sys.stderr.write(f"agent_failed {type(exc).__name__}\n")
