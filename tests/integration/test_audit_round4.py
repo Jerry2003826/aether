@@ -296,6 +296,7 @@ def test_round4_async_activity_remains_responsive(client, role_urls, monkeypatch
 
 
 SQL_DELAY_SECONDS = 0.002
+RACE_TIMEOUT_SECONDS = 30.0
 
 
 @pytest.fixture
@@ -333,6 +334,14 @@ def test_round4_blocking_check_reports_a_worker_with_one_activity_slot(client, r
 
 
 def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activities: int | None = None) -> None:
+    """Hold the slow task inside its model call until the fast task has finished.
+
+    The check is causal, not a wall-clock budget: the fast task is started only once
+    the slow call is in progress, and the slow call is released only after the fast
+    result arrives or the bounded wait expires. A worker that serializes the tasks
+    therefore fails with an explicit message instead of depending on machine speed.
+    Every wait is bounded by RACE_TIMEOUT_SECONDS so a real block never hangs CI.
+    """
     address = _temporal_address()
     owner, project, _headers = _project(client)
     database = Database(role_urls["aether_worker"])
@@ -361,14 +370,26 @@ def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activ
     record_owner_approval(database, owner_id=owner, project_id=project, task_id=slow["task_id"], workflow_id=slow["workflow_id"])
     record_owner_approval(database, owner_id=owner, project_id=project, task_id=fast["task_id"], workflow_id=fast["workflow_id"])
     state = {"calls": 0}
+    in_slow_call = threading.Event()
+    release_slow = threading.Event()
+    order: list[str] = []
+    order_lock = threading.Lock()
+
+    def note(label: str) -> None:
+        with order_lock:
+            order.append(label)
 
     def completion(**kwargs):
         state["calls"] += 1
         content = kwargs["messages"][0]["content"]
         if "SLOWMARK" in content:
-            time.sleep(1.2)
+            note("slow-call-start")
+            in_slow_call.set()
+            released = release_slow.wait(RACE_TIMEOUT_SECONDS)
+            note("slow-call-end" if released else "slow-call-not-released")
             output = f"资料记载：{slow_fact}"
         else:
+            note("fast-call")
             output = f"资料记载：{fast_fact}"
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=output))],
@@ -380,10 +401,16 @@ def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activ
     monkeypatch.setattr(litellm, "completion", completion)
     configure(_endpoints(role_urls, root))
     queue = f"round4-parallel-{uuid.uuid4()}"
+    slots = {} if max_concurrent_activities is None else {"max_concurrent_activities": max_concurrent_activities}
 
-    async def run() -> float:
+    async def bounded(awaitable, failure: str):
+        try:
+            return await asyncio.wait_for(awaitable, timeout=RACE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            raise AssertionError(f"{failure} within {RACE_TIMEOUT_SECONDS:.0f} s (order={order})") from None
+
+    async def run() -> None:
         temporal = await Client.connect(address)
-        slots = {} if max_concurrent_activities is None else {"max_concurrent_activities": max_concurrent_activities}
         async with Worker(temporal, task_queue=queue, workflows=[DurableTaskWorkflow], activities=[prepare_task, execute_task], **slots):
 
             async def launch(created: dict):
@@ -398,16 +425,27 @@ def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activ
                 return handle
 
             slow_handle = await launch(slow)
-            await asyncio.sleep(0.3)
-            started = time.monotonic()
-            fast_handle = await launch(fast)
-            await asyncio.wait_for(fast_handle.result(), timeout=1.0)
-            elapsed = time.monotonic() - started
-            await slow_handle.result()
-            return elapsed
+            fast_handle = None
+            try:
+                started = await asyncio.to_thread(in_slow_call.wait, RACE_TIMEOUT_SECONDS)
+                assert started, f"slow task never reached its model call within {RACE_TIMEOUT_SECONDS:.0f} s (order={order})"
+                fast_handle = await launch(fast)
+                try:
+                    await asyncio.wait_for(fast_handle.result(), timeout=RACE_TIMEOUT_SECONDS)
+                except TimeoutError:
+                    note("fast-timeout")
+                else:
+                    note("fast-done")
+            finally:
+                release_slow.set()
+            await bounded(slow_handle.result(), "slow task did not finish after its call was released")
+            if fast_handle is not None:
+                await bounded(fast_handle.result(), "fast task did not finish after the slow call was released")
 
-    elapsed = asyncio.run(run())
-    assert elapsed < 1.0
+    asyncio.run(run())
+    assert "fast-done" in order and order.index("fast-done") < order.index("slow-call-end"), (
+        f"fast task blocked by slow call: deadlock/serialization (order={order})"
+    )
     assert state["calls"] >= 2
 
 
