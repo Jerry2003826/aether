@@ -55,21 +55,23 @@ def coding_call_reserve_tokens() -> int:
 
 
 def coding_call_reserve_micro_usd(prices: dict[str, Any] | None = None) -> int:
-    """Money held per coding call: AETHER_CODING_CALL_RESERVE_MICRO_USD when set to a positive integer,
-    otherwise the per-call tokens at the higher of the two prices, rounded up.
+    """Money held per coding call: the per-call tokens at the higher of the two prices, rounded up,
+    or AETHER_CODING_CALL_RESERVE_MICRO_USD when that is set to a larger positive integer.
 
+    A configured value below the priced hold is raised to it (ADR-F49): one call priced at the higher
+    price always fits its hold, so an output-heavy call cannot overrun a hold configured too small.
     A coding reservation always passes the prices it records (coding_prices()). Without them the
-    hold is the token count, a sizing unit only: measured usage is always priced by the prices.
+    hold is the configured value or the token count, a sizing unit only: measured usage is always
+    priced by the prices.
     """
     explicit = _positive_value(os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", ""))
-    if explicit is not None:
-        return explicit
     tokens = coding_call_reserve_tokens()
     if prices is None:
-        return tokens
+        return explicit if explicit is not None else tokens
     _version, per_input, per_output = coding_prices_of(prices)
     held = tokens * max(per_input, per_output)
-    return max(1, (held + MICRO_USD_PRICE_UNIT_TOKENS - 1) // MICRO_USD_PRICE_UNIT_TOKENS)
+    priced = max(1, (held + MICRO_USD_PRICE_UNIT_TOKENS - 1) // MICRO_USD_PRICE_UNIT_TOKENS)
+    return max(explicit or 0, priced)
 
 
 def _positive_env(name: str, default: int) -> int:
