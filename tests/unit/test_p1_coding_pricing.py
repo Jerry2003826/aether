@@ -220,3 +220,73 @@ def test_admission_refuses_a_row_it_cannot_price(monkeypatch: pytest.MonkeyPatch
         )
     assert caught.value.code == code
     assert int(db.request(_PROJECT, _TASK, _KEY)["usage_detail"].get("pending_tokens") or 0) == 0
+
+
+def _answer_with(harness: _Harness, incoming: int, outgoing: int, reply_model: str) -> None:
+    """Make the harness's one in-flight call answer with this usage and this reply `model`."""
+
+    def forward(_body: dict) -> dict:
+        harness._open_call()
+        harness.entered.set()
+        harness.release.wait(30)
+        try:
+            gateway, session = harness._gateway()
+            result = {"id": "c", "model": reply_model, "choices": [], "usage": {"prompt_tokens": incoming, "completion_tokens": outgoing}}
+            gateway._add_measured_usage(session, result)
+            return result
+        finally:
+            harness.forward_done.set()
+
+    harness.forward = forward  # type: ignore[method-assign]
+
+
+def test_the_per_call_hold_uses_the_higher_price_so_an_output_heavy_call_settles_within_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Input cheap, output 36 times dearer. The hold per call is the reserved tokens at the higher price:
+    # 4096 * 10 = 40960. A call of 10 in / 4000 out costs 10 * 0.28 + 4000 * 10 = 40002.8 -> 40003, inside it.
+    # Holding at the input price (4096 * 0.28 = 1147) would make this ordinary call an overrun.
+    monkeypatch.setenv(_IN, "280000")
+    monkeypatch.setenv(_OUT, "10000000")
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "20")
+    harness = _Harness(monkeypatch, first_call=None, release_after=0.5)
+    _answer_with(harness, 10, 4000, "coder")
+    outcome = harness.run()
+    row = harness.db.request(_PROJECT, _TASK, _KEY)
+    detail = row["usage_detail"]
+    account = harness.db.account(_PROJECT, _TASK)
+    assert detail["call_reserve_micro_usd"] == 4096 * 10 == row["reserved_micro_usd"], outcome
+    assert row["usage_status"] == "known"
+    assert account["spent_micro_usd"] == 40_003
+    assert account["spent_micro_usd"] <= row["reserved_micro_usd"]
+    assert detail["book_result"] == "settled"
+    assert "overrun_micro_usd" not in detail
+    assert (account["held_micro_usd"], account["tokens_held"]) == (0, 0)
+
+
+def test_the_hold_takes_the_higher_price_whichever_side_it_is_on() -> None:
+    from aether_worker.coding_jobs import coding_call_reserve_micro_usd
+
+    output_dear = {"pricing_version": "v", "input_micro_usd_per_mtok": 280_000, "output_micro_usd_per_mtok": 10_000_000}
+    input_dear = {"pricing_version": "v", "input_micro_usd_per_mtok": 10_000_000, "output_micro_usd_per_mtok": 280_000}
+    assert coding_call_reserve_micro_usd(output_dear) == coding_call_reserve_micro_usd(input_dear) == 4096 * 10
+
+
+def test_prices_follow_the_request_alias_not_the_model_the_reply_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    import litellm
+
+    # The provider answers naming another model, priced differently in the same table (ADR-F46: the
+    # reply's model is recorded as the revision only). The bill stays at the request alias's prices.
+    assert (litellm.model_cost["gpt-4o"]["input_cost_per_token"], litellm.model_cost["gpt-4o"]["output_cost_per_token"]) != (2.8e-07, 4.2e-07)
+    monkeypatch.setenv("AETHER_LIVE_MODEL_ALIAS", "deepseek-chat")
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "20")
+    harness = _Harness(monkeypatch, first_call=None, release_after=0.5)
+    _answer_with(harness, 120, 30, "gpt-4o")
+    outcome = harness.run()
+    row = harness.db.request(_PROJECT, _TASK, _KEY)
+    detail = row["usage_detail"]
+    assert row["model_revision"] == "gpt-4o", outcome
+    assert detail["pricing_model"] == "deepseek-chat"
+    assert (detail["input_micro_usd_per_mtok"], detail["output_micro_usd_per_mtok"]) == (280_000, 420_000)
+    # 120 * 0.28 + 30 * 0.42 = 46.2 -> 47 at deepseek-chat's prices; gpt-4o's would be 120 * 2.5 + 30 * 10 = 600.
+    assert harness.db.account(_PROJECT, _TASK)["spent_micro_usd"] == 47
+    # The version recorded on the reservation is the one written with the bill.
+    assert detail["pricing_version"] == row["pricing_version"] == f"litellm-{version('litellm')}"
