@@ -1,8 +1,8 @@
 {
   "spec_version": "1.4",
-  "as_of": "2026-10-19",
+  "as_of": "2026-10-20",
   "artifact_type": "core_done_live_pending",
-  "current_task": "p1-codex10 configurable coding iteration limit ADR-F47",
+  "current_task": "p1-codex10 coding iteration-limit boundary test and coding pricing by input/output unit prices ADR-F49",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -21,7 +21,7 @@
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-19 for p1-codex10 code head 0fc69eb (rebased on 9dd4619), run with env -u AETHER_LIVE_MODEL_KEY. unit 1174 passed in 862.75s. Integration on a temporary Postgres and Temporal: 419 ran, 415 passed, 4 failed, 0 skipped; the failures are environment-only: two Hermes probes (hermes_cli_missing, no .hermes venv), the Tor fixture timeout, and test_console_records under load (3 passed when rerun alone). verify_freeze passed with api_operations 50. ruff: no new findings against 9dd4619. gitleaks 8.30.1 with .gitleaks.toml and .gitleaksignore: 0 in the tree and 0 in full history (1 before .gitleaksignore). live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-20 for p1-codex10 code head 703d2e7 (docs head on top; based on 339c3f0), run with env -u AETHER_LIVE_MODEL_KEY. unit 1216 passed on the head; per commit: 95ef7f8 1192 passed, the red commit 176d420 fails only its 22 new pricing tests (1192 passed), 0673990 1213 passed, 703d2e7 1216 passed. Integration on a temporary Postgres and Temporal: 421 ran, 418 passed, 3 failed, 0 skipped; the failures are environment-only: two Hermes probes (hermes_cli_missing, no .hermes venv) and the Tor fixture timeout (it fails the same way on 339c3f0). test_round4_slow_call_does_not_block_another_temporal_task passed. verify_freeze passed. ruff: no new findings against 339c3f0. gitleaks 8.30.1 with .gitleaks.toml and .gitleaksignore: 0 in the tree and 0 in full history. Live key grep 0. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -203,12 +203,15 @@
     "comparative_evidence": "not_run"
   },
   "latest_ci": {
-    "commit": "d0b4e7f062e17efab9de00a3ba7ce4332f322493",
+    "commit": "84c9e7739627465e1d42f1aec336d56ae61908b9",
     "workflow": "ci",
-    "push_run": "39189904470",
-    "pull_request_run": "39189908345",
+    "push_run": "39251595737",
+    "push_conclusion": "success",
+    "pull_request_run": "39251604404",
+    "pull_request_conclusion": "failure",
+    "pull_request_failure": "integration: test_audit_round4.py::test_round4_slow_call_does_not_block_another_temporal_task TimeoutError (1 failed, 418 passed); the push run on the same commit passed",
     "pull_request": 31,
-    "conclusion": "success",
-    "completed_at": "2026-10-19T02:46:38Z"
+    "conclusion": "mixed",
+    "completed_at": "2026-10-19T12:47:39Z"
   }
 }
