@@ -475,7 +475,9 @@ def _request_kind(method: str, path: str) -> tuple[str, str]:
 
 def _log_line(kind: str, path: str, number: int, status: int, error: str) -> None:
     """One line per request. Count `kind=chat ... status=200` lines for the calls the gateway accepted:
-    the sandbox's revoke (kind=revoke) and refused calls (409, 401) are never chat successes. No token,
+    the sandbox's revoke (kind=revoke) and refused calls (409, 401) are never chat successes. Count by
+    status=200 whatever error says: a reply the gateway accepted but that timed out on the way back to the
+    sandbox logs `kind=chat status=200 error=write_timeout` and is still billed as a coding_call. No token,
     header, body or other path is part of it."""
     _logger().info("coding_proxy kind=%s path=%s request=%s status=%s error=%s", kind, path, number, status, error)
 
