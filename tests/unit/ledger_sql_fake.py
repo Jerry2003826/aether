@@ -77,6 +77,7 @@ class FakeLedgerDatabase:
             "usage_status": "reserved",
             "usage_detail": {},
             "model_revision": None,
+            "pricing_version": None,
             "completed_at": None,
         }
         row.update(values)
