@@ -328,6 +328,42 @@ def _output(reply: dict) -> list[tuple[int, str]] | None:
 # the trusted process and the grading workspace, so it is not done: a candidate that writes files is
 # refused by name instead of graded against a view that misses them (Codex r4308195953).
 _CANDIDATE_WROTE_FILES = "candidate_wrote_files"
+# The candidate's tmp/ is not shared with the test, so a test that looks for a candidate's temporary file
+# in its own temporary directory cannot see it (`assert not Path(gettempdir(), name).exists()` would pass
+# where it fails in-process). A test that passes while tmp/ still holds a file the candidate wrote during
+# that test is refused instead (code review); a candidate that removes its temporary files is unaffected.
+_CANDIDATE_LEFT_TMP_FILES = "candidate_left_tmp_files"
+
+
+def _tmp_files(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
+    """Every non-directory entry under the candidate's tmp/, by lstat, never followed (a directory's own
+    times change when files in it are made and removed, so directories are walked, not counted). A
+    directory this side cannot read counts as an entry that is always new."""
+    found: dict[str, tuple[int, ...]] = {}
+    if sandbox is None or not sandbox.get("tmp"):
+        return found
+    pending = [("tmp", Path(sandbox["tmp"]))]
+    unreadable = 0
+    while pending:
+        label, folder = pending.pop()
+        try:
+            entries = list(os.scandir(folder))
+        except OSError:
+            unreadable += 1
+            found[label + "/"] = (-1, unreadable)
+            continue
+        for entry in entries:
+            name = label + "/" + entry.name
+            try:
+                info = entry.stat(follow_symlinks=False)
+            except OSError:
+                found[name] = (-1,)
+                continue
+            if stat.S_ISDIR(info.st_mode):
+                pending.append((name, Path(entry.path)))
+            else:
+                found[name] = (info.st_mode, info.st_size, info.st_mtime_ns, info.st_ino)
+    return found
 
 
 def _files_state(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
@@ -830,6 +866,8 @@ class _Current:
     session: _Session | None = None
     # The first unsupported use of a candidate object in this test process, if any.
     unsupported: str | None = None
+    # The candidate's tmp/ files when the current test started (see _CANDIDATE_LEFT_TMP_FILES).
+    tmp_before: dict[str, tuple[int, ...]] | None = None
 
 
 def _session() -> _Session:
@@ -2409,6 +2447,8 @@ def _run_pytest(
 
         def pytest_runtest_logstart(self, nodeid, location) -> None:
             _Current.unsupported = None
+            current = _Current.session
+            _Current.tmp_before = _tmp_files(current._sandbox) if current is not None else {}
 
         @pytest.hookimpl(wrapper=True)
         def pytest_runtest_makereport(self, item, call):
@@ -2445,6 +2485,13 @@ def _run_pytest(
                 # Every test after the candidate wrote files, even one that never calls it again: what
                 # it sees of the filesystem is not what an in-process run would show.
                 verdict, detail = "FAIL", "candidate_object_unsupported:" + _CANDIDATE_WROTE_FILES
+            elif verdict == "PASS" and _Current.session is not None:
+                # A pass while tmp/ holds a file the candidate wrote (or changed) during this test: the
+                # test could not have seen it where an in-process test would.
+                before = _Current.tmp_before or {}
+                after = _tmp_files(_Current.session._sandbox)
+                if any(before.get(name) != state or state[0] == -1 for name, state in after.items()):
+                    verdict, detail = "FAIL", "candidate_object_unsupported:" + _CANDIDATE_LEFT_TMP_FILES
             emit({"kind": "result", "name": _item_name(item) if item is not None else "", "verdict": verdict, "detail": detail})
             current = _Current.session
             if current is not None and current._dead is not None and self.session is not None:
