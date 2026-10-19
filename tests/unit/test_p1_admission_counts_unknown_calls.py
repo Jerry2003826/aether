@@ -25,10 +25,12 @@ _TASK = "t"
 _PARENT = "coding-job-1-7"
 
 
-def _setup(monkeypatch: pytest.MonkeyPatch, *, reserved: int, detail: dict[str, Any]) -> tuple[FakeLedgerDatabase, ModelGateway]:
+def _setup(
+    monkeypatch: pytest.MonkeyPatch, *, reserved: int, detail: dict[str, Any], account: dict[str, Any] | None = None
+) -> tuple[FakeLedgerDatabase, ModelGateway]:
     monkeypatch.setattr(gateway_model, "_coding_lease_held", lambda _conn, **_fence: True)
     db = FakeLedgerDatabase()
-    db.add_account(_PROJECT, _TASK, held_micro_usd=reserved, tokens_held=reserved, requests_admitted=1)
+    db.add_account(_PROJECT, _TASK, held_micro_usd=reserved, tokens_held=reserved, requests_admitted=1, **(account or {}))
     db.add_request(_PROJECT, _TASK, _PARENT, reserved_micro_usd=reserved, usage_detail={"reserved_tokens": reserved, **detail})
     return db, ModelGateway(cast(Database, db), upstream_base="http://127.0.0.1:9/v1", provider_key="unit-key")
 
@@ -85,7 +87,28 @@ def test_the_next_call_is_admitted_on_top_of_an_unknown_call_not_inside_its_hold
     assert account["tokens_held"] == 0
 
 
-def test_a_row_without_a_per_call_rate_or_prices_is_refused_not_priced_one_per_token(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_row_that_cannot_grow_refuses_a_call_that_fits_only_by_reusing_an_unknown_calls_hold(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Priced row with its per-call rate; the account ceiling leaves nothing above the 2000 already held
+    # (token_limit 2500 less the 20% verification fraction), so the reservation cannot grow and the
+    # next call must fit in what is left beside the unknown call.
+    db, gateway = _setup(
+        monkeypatch,
+        reserved=2000,
+        detail={"call_reserve_tokens": 1000, "call_reserve_micro_usd": 1000, **prices_at(1000, 1000)},
+        account={"token_limit": 2500},
+    )
+    _open(gateway, 1, 1000)
+    gateway._note_upstream_failure(_session(), GatewayDenied("upstream_error", sent=True), release_pending=True)
+
+    with pytest.raises(GatewayDenied) as caught:
+        _open(gateway, 2, 1001)
+
+    assert caught.value.code == "budget_exceeded"
+    assert db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]["pending_tokens"] == 0
+    assert db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]["unknown_reserved_tokens"] == 1000
+
+
+def test_admission_refuses_a_row_missing_its_prices_or_per_call_rate(monkeypatch: pytest.MonkeyPatch) -> None:
     # A row with no call_reserve_tokens/_micro_usd (or no prices) cannot price a call: refused explicitly (ADR-F49).
     db, gateway = _setup(monkeypatch, reserved=2000, detail={"call_reserve_tokens": 1000, "call_reserve_micro_usd": 1000})
     with pytest.raises(GatewayDenied) as caught:
