@@ -97,6 +97,8 @@ class CodingModelProxy:
         self._revoked_by: str | None = None
         self._forwarding = 0
         self._stopped = threading.Event()
+        self._requests = 0
+        self._requests_lock = threading.Lock()
         self.directory = Path(tempfile.mkdtemp(prefix="aether-model-"))
         try:
             _grant_directory(self.directory)
@@ -111,6 +113,12 @@ class CodingModelProxy:
         self._server.proxy = self
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
         self._thread.start()
+
+    def next_request(self) -> int:
+        """This proxy's next request number, from 1: one per connection, logged on its line."""
+        with self._requests_lock:
+            self._requests += 1
+            return self._requests
 
     @property
     def active_connections(self) -> int:
@@ -333,7 +341,7 @@ class _UnixServer(socketserver.ThreadingUnixStreamServer):
     def process_request(self, request, client_address) -> None:
         """Start a handler thread only while a connection slot is free; otherwise refuse at once."""
         if not self.slots.acquire(blocking=False):
-            _logger().info("coding_proxy status=503 error=too_many_connections")
+            _log_line("none", "-", self.proxy.next_request(), 503, "too_many_connections")
             _refuse(request)
             self.shutdown_request(request)
             return
@@ -389,16 +397,19 @@ class _Handler(socketserver.StreamRequestHandler):
         self.rfile = io.BufferedReader(_DeadlineReader(self.connection, deadline))
 
     def handle(self) -> None:
+        self._number = self.server.proxy.next_request()
+        self._kind, self._path = "none", "-"
         try:
             head = _read_head(self.rfile)
             screened = None
             parsed = None
             if head is not None:
+                self._kind, self._path = _request_kind(head[0], head[1])
                 screened = self.server.proxy.screen(*head)
                 if screened is None:
                     parsed = _read_body(self.rfile, *head)
         except (TimeoutError, OSError):
-            _logger().info("coding_proxy status=408 error=read_timeout")
+            _log_line(self._kind, self._path, self._number, 408, "read_timeout")
             return
         # The reply gets the same bound, so a client that stops reading cannot pin the thread.
         self.connection.settimeout(self.server.read_timeout)
@@ -448,9 +459,25 @@ class _Handler(socketserver.StreamRequestHandler):
             _write_json(self.wfile, status, payload)
         except (TimeoutError, OSError):
             # The client stopped reading. One line, no socketserver traceback.
-            _logger().info("coding_proxy status=%s error=write_timeout", status)
+            _log_line(self._kind, self._path, self._number, status, "write_timeout")
             return
-        _logger().info("coding_proxy status=%s error=%s", status, error if isinstance(error, str) else "")
+        _log_line(self._kind, self._path, self._number, status, error if isinstance(error, str) else "")
+
+
+def _request_kind(method: str, path: str) -> tuple[str, str]:
+    """(kind, path to log): only the two fixed endpoint paths are ever logged, never another path."""
+    if method == "POST" and path in _CHAT_PATHS:
+        return "chat", path
+    if method == "POST" and path == REVOKE_PATH:
+        return "revoke", REVOKE_PATH
+    return "other", "-"
+
+
+def _log_line(kind: str, path: str, number: int, status: int, error: str) -> None:
+    """One line per request. Count `kind=chat ... status=200` lines for the calls the gateway accepted:
+    the sandbox's revoke (kind=revoke) and refused calls (409, 401) are never chat successes. No token,
+    header, body or other path is part of it."""
+    _logger().info("coding_proxy kind=%s path=%s request=%s status=%s error=%s", kind, path, number, status, error)
 
 
 def _refuse(request: socket.socket) -> None:

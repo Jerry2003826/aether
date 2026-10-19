@@ -215,7 +215,7 @@ def test_a_reply_write_timeout_is_one_log_line(proxy, monkeypatch, caplog, capsy
         sock.close()
     assert proxy.wait_until_active(0, timeout=2.0)
     lines = [record.getMessage() for record in caplog.records if "write_timeout" in record.getMessage()]
-    assert lines == ["coding_proxy status=200 error=write_timeout"]
+    assert lines == ["coding_proxy kind=chat path=/v1/chat/completions request=1 status=200 error=write_timeout"]
     assert "Traceback" not in capsys.readouterr().err
 
 
