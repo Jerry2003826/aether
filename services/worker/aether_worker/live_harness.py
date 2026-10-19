@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -25,7 +24,7 @@ from urllib.parse import urlsplit
 
 from aether_worker.openhands_image import RUN_IMAGE_REASONS
 from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
-from aether_worker.runner import _docker
+from aether_worker.runner import _docker, probe_docker_daemon
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
@@ -295,10 +294,12 @@ def _network_errno(stdout: str) -> int | None:
 def _linux_isolation(secret: str) -> dict[str, Any]:
     if sys.platform != "linux":
         return {"status": NOT_RUN, "reason": "not_linux"}
-    if shutil.which("docker") is None:
+    # The same detection that enables the runner: the check runs through the SDK, so a host with the SDK
+    # and a reachable daemon but no docker CLI still runs it. docker_missing only when neither is there.
+    runtime = probe_docker_daemon()
+    if runtime.get("reason") == "cli_missing":
         return {"status": NOT_RUN, "reason": "docker_missing"}
-    info = _docker(["info"])
-    if info.returncode != 0:
+    if "server_version" not in runtime:
         return {"status": NOT_RUN, "reason": "docker_unavailable"}
     command = _isolation_command()
     if secret and any(secret in part for part in command):

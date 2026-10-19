@@ -112,9 +112,9 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
     env["AETHER_HIDE_PATH"] = str(hide_path)
     env["PATH"] = f"{Path(sys.executable).resolve().parent}:{env['PATH']}"
     docker = "not_supported"
-    if os.environ.get(_PROCESS_ROLE) != _WORKER_ROLE and shutil.which("docker"):
-        info = _docker(["info"])
-        docker = "present" if info.returncode == 0 else "not_supported"
+    # Through the SDK like every runner Docker call: no docker CLI is needed to see the daemon.
+    if os.environ.get(_PROCESS_ROLE) != _WORKER_ROLE and probe_docker_daemon()[_RUNTIME] == _ENABLED:
+        docker = "present"
     try:
         completed = subprocess.run(
             [

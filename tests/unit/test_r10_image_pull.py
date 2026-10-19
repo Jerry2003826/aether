@@ -77,7 +77,7 @@ class _Client:
 
 @pytest.fixture
 def docker_host(monkeypatch):
-    monkeypatch.setattr("aether_worker.live_harness.shutil.which", lambda _name: "/usr/bin/docker")
+    monkeypatch.setattr("shutil.which", lambda _name, *args, **kwargs: "/usr/bin/docker")
     monkeypatch.setattr("aether_worker.live_harness.sys.platform", "linux")
     monkeypatch.delenv("AETHER_PROCESS_ROLE", raising=False)
 
