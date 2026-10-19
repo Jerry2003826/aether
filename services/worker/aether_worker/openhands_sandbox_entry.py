@@ -28,6 +28,7 @@ import openhands.tools.file_editor as file_editor_tool
 import openhands.tools.terminal as terminal_tool
 from openhands.sdk import LLM, Agent, Conversation, ConversationExecutionStatus, Tool
 from openhands.sdk.event import ActionEvent
+from openhands.sdk.event.conversation_error import ConversationErrorEvent
 from openhands.sdk.workspace.local import LocalWorkspace
 
 # grading_files.py ships next to this script (repo and image); `-I` drops the script dir from sys.path.
@@ -511,6 +512,16 @@ def _collect(agent: Agent, conversation: Conversation) -> dict[str, object]:
     }
 
 
+def _stopped_by_iteration_limit(conversation: Conversation) -> bool:
+    """The SDK ended the run at max_iteration_per_run: ERROR status with its MaxIterationsReached event."""
+    if conversation.state.execution_status != ConversationExecutionStatus.ERROR:
+        return False
+    return any(
+        isinstance(event, ConversationErrorEvent) and event.code == "MaxIterationsReached"
+        for event in conversation.state.events
+    )
+
+
 class ObjectiveMissing(RuntimeError):
     pass
 
@@ -593,6 +604,10 @@ def _run_agent(job: Path, objective: str, iterations: int) -> dict[str, object]:
         conversation.run()
         if conversation.state.execution_status == ConversationExecutionStatus.FINISHED:
             report = _collect(agent, conversation)
+        elif _stopped_by_iteration_limit(conversation):
+            # Not FINISHED, even if the files already pass (ADR-F47): said explicitly, so the worker
+            # records FAILED/agent_iteration_limit rather than the generic agent_interrupted.
+            report["agent_stop"] = "iteration_limit"
     except Exception as exc:
         sys.stderr.write(f"agent_failed {type(exc).__name__}\n")
         return report

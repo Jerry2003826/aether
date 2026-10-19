@@ -1568,7 +1568,8 @@ def _coding_terminal(
     """FINISHED needs a completed agent, an agent change and a passing protocol.
 
     A budget rejection or a blank report (the agent raised before it finished)
-    is FAILED even when the files on disk already pass. A conversation that
+    is FAILED even when the files on disk already pass; a conversation the step
+    limit stopped is FAILED/agent_iteration_limit, likewise (ADR-F47). A conversation that
     finishes without changing any source file (empty or missing patch; grading
     files and caches are never in it) is FAILED/agent_no_change: candidate files that
     already pass do not make a job FINISHED. edit_calls is not consulted; a
@@ -1599,6 +1600,10 @@ def _coding_terminal(
     if admission_error:
         return "FAILED", admission_error
     if not _agent_completed(body):
+        if body.get("agent_stop") == "iteration_limit":
+            # Stopped at AETHER_CODING_MAX_ITERATIONS before its finish step: not FINISHED even when
+            # the files already pass (ADR-F47), and named, not folded into agent_interrupted.
+            return "FAILED", "agent_iteration_limit"
         return "FAILED", "agent_interrupted"
     if upstream_error:
         return "FAILED", upstream_error
