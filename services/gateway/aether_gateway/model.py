@@ -1170,12 +1170,15 @@ class ModelGateway:
                 "dispatch_holder": attempt_id,
                 "prompt_sha256": prompt_sha,
                 "output_cap": CODING_CALL_OUTPUT_CAP,
+                # The call is priced at its parent reservation's prices (ADR-F49): its row carries that
+                # pricing_version from the start, and every later update keeps it.
+                "pricing_version": detail.get("pricing_version"),
             }
             try:
                 conn.execute(
                     text(
-                        "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail) "
-                        "VALUES (:project_id, :task_id, :request_key, :digest, 'coding_call', :alias, 0, 'reserved', CAST(:detail AS jsonb))"
+                        "INSERT INTO model_requests (project_id, task_id, request_key, request_sha256, role, model_alias, reserved_micro_usd, usage_status, usage_detail, pricing_version) "
+                        "VALUES (:project_id, :task_id, :request_key, :digest, 'coding_call', :alias, 0, 'reserved', CAST(:detail AS jsonb), :pricing_version)"
                     ),
                     {
                         "project_id": project_id,
@@ -1184,6 +1187,7 @@ class ModelGateway:
                         "digest": prompt_sha,
                         "alias": alias,
                         "detail": json.dumps(child_detail),
+                        "pricing_version": child_detail["pricing_version"],
                     },
                 )
             except IntegrityError as exc:
@@ -1209,11 +1213,12 @@ class ModelGateway:
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = 0, input_tokens = 0, output_tokens = 0, "
-                    "usage_detail = CAST(:detail AS jsonb), completed_at = now() "
+                    "usage_detail = CAST(:detail AS jsonb), completed_at = now(), pricing_version = COALESCE(pricing_version, :pricing_version) "
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
                 ),
                 {
                     "detail": json.dumps(detail),
+                    "pricing_version": detail.get("pricing_version"),
                     "project_id": project_id,
                     "task_id": task_id,
                     "request_key": child_key,
@@ -1267,11 +1272,12 @@ class ModelGateway:
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = 0, input_tokens = 0, output_tokens = 0, "
-                    "usage_detail = CAST(:detail AS jsonb), completed_at = now() "
+                    "usage_detail = CAST(:detail AS jsonb), completed_at = now(), pricing_version = COALESCE(pricing_version, :pricing_version) "
                     "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
                 ),
                 {
                     "detail": json.dumps(child),
+                    "pricing_version": child.get("pricing_version"),
                     "project_id": project_id,
                     "task_id": task_id,
                     "request_key": child_key,
@@ -1461,11 +1467,13 @@ class ModelGateway:
                         child_detail["error_body_truncated"] = True
                     conn.execute(
                         text(
-                            "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb) "
+                            "UPDATE model_requests SET usage_detail = CAST(:detail AS jsonb), "
+                            "pricing_version = COALESCE(pricing_version, :pricing_version) "
                             "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
                         ),
                         {
                             "detail": json.dumps(child_detail),
+                            "pricing_version": child_detail.get("pricing_version"),
                             "project_id": project_id,
                             "task_id": task_id,
                             "request_key": self._coding_child_key,
@@ -1527,10 +1535,11 @@ class ModelGateway:
             text(
                 "UPDATE model_requests SET input_tokens = COALESCE(:incoming, input_tokens), "
                 "output_tokens = COALESCE(:outgoing, output_tokens), model_revision = COALESCE(:revision, model_revision), "
-                "usage_detail = CAST(:detail AS jsonb) "
+                "usage_detail = CAST(:detail AS jsonb), pricing_version = COALESCE(pricing_version, :pricing_version) "
                 "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
             ),
             {
+                "pricing_version": detail.get("pricing_version"),
                 "incoming": incoming,
                 "outgoing": outgoing,
                 "revision": revision,
