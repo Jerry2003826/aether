@@ -290,3 +290,36 @@ def test_prices_follow_the_request_alias_not_the_model_the_reply_names(monkeypat
     assert harness.db.account(_PROJECT, _TASK)["spent_micro_usd"] == 47
     # The version recorded on the reservation is the one written with the bill.
     assert detail["pricing_version"] == row["pricing_version"] == f"litellm-{version('litellm')}"
+
+
+def test_an_explicit_per_call_hold_below_the_priced_hold_is_raised_to_it(monkeypatch: pytest.MonkeyPatch) -> None:
+    from aether_worker.coding_jobs import coding_call_reserve_micro_usd
+
+    # Priced hold: 4096 tokens at the higher price (10 micro-USD per token) = 40960. A configured
+    # AETHER_CODING_CALL_RESERVE_MICRO_USD of 1000 would let one ordinary call overrun the hold 40 times.
+    output_dear = {"pricing_version": "v", "input_micro_usd_per_mtok": 280_000, "output_micro_usd_per_mtok": 10_000_000}
+    monkeypatch.setenv("AETHER_CODING_CALL_RESERVE_MICRO_USD", "1000")
+    assert coding_call_reserve_micro_usd(output_dear) == 4096 * 10
+    # A configured hold above the priced one is kept: the larger of the two.
+    monkeypatch.setenv("AETHER_CODING_CALL_RESERVE_MICRO_USD", "50000")
+    assert coding_call_reserve_micro_usd(output_dear) == 50_000
+
+
+def test_an_output_heavy_call_settles_within_the_hold_even_when_a_smaller_hold_is_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Same output-heavy call as above (10 in / 4000 out -> 40003), with AETHER_CODING_CALL_RESERVE_MICRO_USD=1000
+    # configured. The hold per call is max(1000, 4096 * 10) = 40960, so the call settles inside it.
+    monkeypatch.setenv(_IN, "280000")
+    monkeypatch.setenv(_OUT, "10000000")
+    monkeypatch.setenv("AETHER_CODING_CALL_RESERVE_MICRO_USD", "1000")
+    monkeypatch.setenv("AETHER_CODING_PROXY_DRAIN_SECONDS", "20")
+    harness = _Harness(monkeypatch, first_call=None, release_after=0.5)
+    _answer_with(harness, 10, 4000, "coder")
+    outcome = harness.run()
+    row = harness.db.request(_PROJECT, _TASK, _KEY)
+    detail = row["usage_detail"]
+    account = harness.db.account(_PROJECT, _TASK)
+    assert detail["call_reserve_micro_usd"] == 4096 * 10 == row["reserved_micro_usd"], outcome
+    assert account["spent_micro_usd"] == 40_003
+    assert account["spent_micro_usd"] <= row["reserved_micro_usd"]
+    assert detail["book_result"] == "settled"
+    assert "overrun_micro_usd" not in detail
