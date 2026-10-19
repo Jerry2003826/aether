@@ -2,7 +2,7 @@
   "spec_version": "1.4",
   "as_of": "2026-10-20",
   "artifact_type": "core_done_live_pending",
-  "current_task": "p1-codex10 coding iteration-limit boundary test and coding pricing by input/output unit prices ADR-F49",
+  "current_task": "p1-codex10 follow-up on 77259fd: restored cannot-grow admission test, per-call hold never below the priced hold, coding_call rows carry the parent pricing_version, ADR-F49 upgrade drain note",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -21,7 +21,7 @@
     "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
     "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "Local on 2026-10-20 for p1-codex10 code head 703d2e7 (docs head on top; based on 339c3f0), run with env -u AETHER_LIVE_MODEL_KEY. unit 1216 passed on the head; per commit: 95ef7f8 1192 passed, the red commit 176d420 fails only its 22 new pricing tests (1192 passed), 0673990 1213 passed, 703d2e7 1216 passed. Integration on a temporary Postgres and Temporal: 421 ran, 418 passed, 3 failed, 0 skipped; the failures are environment-only: two Hermes probes (hermes_cli_missing, no .hermes venv) and the Tor fixture timeout (it fails the same way on 339c3f0). test_round4_slow_call_does_not_block_another_temporal_task passed. verify_freeze passed. ruff: no new findings against 339c3f0. gitleaks 8.30.1 with .gitleaks.toml and .gitleaksignore: 0 in the tree and 0 in full history. Live key grep 0. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-20 for p1-codex10 follow-up code head 61b9dff (docs head on top; based on the pushed 77259fd, new commits only), run with env -u AETHER_LIVE_MODEL_KEY. unit 1226 passed on the head; per commit: 6b23a07 1217 passed (restored cannot-grow admission test passes as-is), the red commit aa20608 fails only its 2 new hold tests, 465a7b5 1219 passed, the red commit f25726f fails only its 7 new coding_call pricing_version tests, 61b9dff 1226 passed. Integration on a temporary Postgres and Temporal: 422 ran, 419 passed, 3 failed, 0 skipped; the failures are environment-only: two Hermes probes (hermes_cli_missing, no .hermes venv) and the Tor fixture timeout. test_round4_slow_call_does_not_block_another_temporal_task passed. verify_freeze passed. ruff: no new findings against 77259fd. gitleaks 8.30.1 with .gitleaks.toml and .gitleaksignore: 0 in the tree and 0 in full history. Live key grep 0. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -203,15 +203,15 @@
     "comparative_evidence": "not_run"
   },
   "latest_ci": {
-    "commit": "84c9e7739627465e1d42f1aec336d56ae61908b9",
+    "commit": "77259fd7276c1a091a71003633c85d4491f15a02",
     "workflow": "ci",
-    "push_run": "39251595737",
+    "push_run": "39281917344",
     "push_conclusion": "success",
-    "pull_request_run": "39251604404",
+    "pull_request_run": "39281924386",
     "pull_request_conclusion": "failure",
-    "pull_request_failure": "integration: test_audit_round4.py::test_round4_slow_call_does_not_block_another_temporal_task TimeoutError (1 failed, 418 passed); the push run on the same commit passed",
+    "pull_request_failure": "integration: test_sys01_entry.py::test_public_entry_reaches_a_terminal_state assert matched (watch-run artifact not found; 1 failed, 420 passed); the push run on the same commit passed and it passed locally",
     "pull_request": 31,
     "conclusion": "mixed",
-    "completed_at": "2026-10-19T12:47:39Z"
+    "completed_at": "2026-10-19T16:36:43Z"
   }
 }
