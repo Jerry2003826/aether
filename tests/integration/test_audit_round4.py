@@ -304,16 +304,21 @@ def slow_database():
     """Add 2 ms to every SQL statement run on an activity thread, like a slower CI runner.
 
     Activities hand blocking work to ``asyncio.to_thread``, whose threads are named
-    ``asyncio_<n>``; the test thread and the event loop are not delayed.
+    ``asyncio_<n>``; the test thread and the event loop are not delayed. The fixture
+    counts how often the delay fired so a test can prove it was not a no-op.
     """
+    fired = {"count": 0}
+    lock = threading.Lock()
 
     def delay(conn, cursor, statement, parameters, context, executemany):
         if threading.current_thread().name.startswith("asyncio_"):
+            with lock:
+                fired["count"] += 1
             time.sleep(SQL_DELAY_SECONDS)
 
     event.listen(Engine, "before_cursor_execute", delay)
     try:
-        yield SQL_DELAY_SECONDS
+        yield fired
     finally:
         event.remove(Engine, "before_cursor_execute", delay)
 
@@ -325,6 +330,7 @@ def test_round4_slow_call_does_not_block_another_temporal_task(client, role_urls
 def test_round4_slow_call_does_not_block_another_task_on_a_slow_database(client, role_urls, monkeypatch, slow_database) -> None:
     """The same property must hold when every database statement is a little slower."""
     _slow_and_fast_tasks(client, role_urls, monkeypatch)
+    assert slow_database["count"] > 0, "slow_database delay never fired; thread-name gate is stale"
 
 
 def test_round4_blocking_check_reports_a_worker_with_one_activity_slot(client, role_urls, monkeypatch) -> None:
@@ -443,9 +449,10 @@ def _slow_and_fast_tasks(client, role_urls, monkeypatch, *, max_concurrent_activ
                 await bounded(fast_handle.result(), "fast task did not finish after the slow call was released")
 
     asyncio.run(run())
-    assert "fast-done" in order and order.index("fast-done") < order.index("slow-call-end"), (
-        f"fast task blocked by slow call: deadlock/serialization (order={order})"
-    )
+    blocked = f"fast task blocked by slow call: deadlock/serialization (order={order})"
+    assert "fast-done" in order, blocked
+    assert "slow-call-end" in order, f"slow call never ended: it was not released or did not return (order={order})"
+    assert order.index("fast-done") < order.index("slow-call-end"), blocked
     assert state["calls"] >= 2
 
 
