@@ -333,9 +333,9 @@ _CANDIDATE_WROTE_FILES = "candidate_wrote_files"
 def _files_state(sandbox: dict[str, Any] | None) -> dict[str, tuple[int, ...]]:
     """Every entry under the candidate's src/ (bytecode caches aside), by lstat, never followed.
 
-    Not counted: tmp/, which the test process uses as its own TMPDIR (see _run_test_process), so both
-    sides see the same temporary files as in-process; and `__pycache__` directories anywhere under src/,
-    which Python itself writes on import.
+    Not counted: tmp/, the candidate's own TMPDIR, never shared with the test process (which has its own
+    test/, see _run_test_process); and `__pycache__` directories anywhere under src/, which Python itself
+    writes on import.
 
     A file the candidate created, removed, rewrote or renamed changes it; one it reads does not. A
     directory this side cannot read counts as a change.
@@ -753,6 +753,8 @@ class _Session:
         while len(done) < len(self._mirrors):
             for handle in [key for key in self._mirrors if key not in done]:
                 done.add(handle)
+                if isinstance(self._mirrors[handle], bytearray):
+                    _refuse_test_tmp_path(self._mirrors[handle])
                 state = _encode_data(self._mirrors[handle], 0, _encode_shared_item)
                 text = json.dumps(state)
                 # Every shared container is encoded on every request, changed or not: all of them count.
@@ -988,6 +990,30 @@ def _decode_data_handle(rest: list[object], session: _Session, depth: int) -> ob
     return session.remote(handle, lambda: _RemoteData(session, handle, kind, base, snapshot, hooks, rebuild, ancestry))
 
 
+_TEST_TMP_PATH = "test_tmp_path_passed_to_candidate"
+
+
+def _refuse_test_tmp_path(value: object) -> None:
+    """A path inside the test process's own temporary directory cannot reach candidate code: the
+    candidate cannot read or write that directory, so it would be a path that silently means nothing
+    there. Refused by name (ADR-F44). Only an absolute path is a path into it."""
+    session = _Current.session
+    sandbox = None if session is None else session._sandbox
+    if not sandbox or not sandbox.get("test_tmp"):
+        return
+    if isinstance(value, os.PathLike):
+        try:
+            value = os.fspath(value)
+        except Exception:  # noqa: BLE001 - not a path; the object itself is refused on its own terms
+            return
+    if isinstance(value, (bytes, bytearray)):
+        value = os.fsdecode(bytes(value))
+    if not isinstance(value, str) or not value or len(value) > 4096 or "\0" in value or not os.path.isabs(value):
+        return
+    if _within(os.path.realpath(value), os.path.realpath(str(sandbox["test_tmp"]))):
+        raise _unsupported(_TEST_TMP_PATH)
+
+
 def _encode_trusted(value: object, depth: int = 0) -> list[object]:
     """Encode an argument the grader passes to candidate code. Only data and candidate handles."""
     if depth > _MAX_DEPTH:
@@ -998,6 +1024,9 @@ def _encode_trusted(value: object, depth: int = 0) -> list[object]:
         return ["h", value._aether_id, ""]
     if isinstance(value, _RemoteModule):
         return ["h", _session().module_handle(value.__name__), ""]
+    # After the candidate handles (a _Remote answers fspath from the candidate): the test's own values.
+    if isinstance(value, (str, bytes, bytearray, os.PathLike)):
+        _refuse_test_tmp_path(value)
     if type(value) in _MIRRORED:
         return ["m", _session().mirror(value)]
     if type(value) not in _PASSED_EXACT and isinstance(value, _PASSED_BASES):
@@ -1704,16 +1733,19 @@ def _candidate_files(root: Path) -> tuple[dict[str, bytes], list[str]]:
 
 
 def _candidate_sandbox(files: dict[str, bytes], deny: list[str], shm: str) -> dict[str, Any]:
-    """A fresh directory for one test process's candidate process: src/ (its cwd, the candidate files) and tmp/."""
+    """A fresh directory for one test process and its candidate process: src/ (the candidate's cwd, the
+    candidate files), tmp/ (the candidate's TMPDIR) and test/ (the test process's own TMPDIR, outside the
+    candidate's Landlock domain: the candidate can neither read nor write it)."""
     top = Path(tempfile.mkdtemp(prefix="aether-candidate-"))
-    src, tmp = top / "src", top / "tmp"
+    src, tmp, test = top / "src", top / "tmp", top / "test"
     src.mkdir(mode=0o700)
     tmp.mkdir(mode=0o700)
+    test.mkdir(mode=0o700)
     for name, data in files.items():
         target = src / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
-    return {"top": str(top), "src": str(src), "tmp": str(tmp), "deny": deny, "shm": shm}
+    return {"top": str(top), "src": str(src), "tmp": str(tmp), "test_tmp": str(test), "deny": deny, "shm": shm}
 
 
 def _remove_tree(top: str) -> None:
@@ -1926,10 +1958,11 @@ def _run_test_process(
         env = _child_env()
         sandbox = request.get("sandbox")
         if isinstance(sandbox, dict):
-            # The candidate's TMPDIR as well: tempfile.gettempdir(), tmp_path and a scratch file are the
-            # same for the test and for candidate code, as in-process (ADR-F44).
+            # Its own private temporary directory, never the candidate's (code review, Critical): the
+            # candidate cannot read or write the test's tmp_path, gettempdir() or scratch files, and a
+            # path inside it passed to candidate code is refused (_refuse_test_tmp_path, ADR-F44).
             for name in ("TMPDIR", "TEMP", "TMP"):
-                env[name] = str(sandbox["tmp"])
+                env[name] = str(sandbox["test_tmp"])
         process = subprocess.Popen(  # this interpreter running this file
             [sys.executable, "-I", str(Path(__file__).resolve()), "--runner", str(request_read), str(reply_write), str(os.getpid())],
             cwd=root,
