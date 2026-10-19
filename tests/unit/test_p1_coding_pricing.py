@@ -323,3 +323,79 @@ def test_an_output_heavy_call_settles_within_the_hold_even_when_a_smaller_hold_i
     assert account["spent_micro_usd"] <= row["reserved_micro_usd"]
     assert detail["book_result"] == "settled"
     assert "overrun_micro_usd" not in detail
+
+
+
+_CALL_PARENT = "coding-job-1-7"
+
+
+def _ticket_gateway(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeLedgerDatabase, ModelGateway, dict[str, Any]]:
+    import aether_gateway.model as gateway_model
+    from ledger_sql_fake import prices_at
+
+    monkeypatch.setattr(gateway_model, "_coding_lease_held", lambda _conn, **_fence: True)
+    db = FakeLedgerDatabase()
+    db.add_account(_PROJECT, _TASK, held_micro_usd=4096, tokens_held=4096, requests_admitted=1)
+    detail = {"reserved_tokens": 4096, "call_reserve_tokens": 1000, "call_reserve_micro_usd": 1000, **prices_at(1000, 1000)}
+    db.add_request(_PROJECT, _TASK, _CALL_PARENT, reserved_micro_usd=4096, usage_detail=detail)
+    gateway = ModelGateway(cast(Database, db), upstream_base="http://127.0.0.1:9/v1", provider_key="unit-key")
+    return db, gateway, detail
+
+
+def _open_ticket(gateway: ModelGateway, index: int) -> str:
+    child_key = f"{_CALL_PARENT}:call:{index:064x}"
+    gateway._open_coding_ticket(
+        project_id=_PROJECT,
+        task_id=_TASK,
+        parent_key=_CALL_PARENT,
+        child_key=child_key,
+        attempt_id="7",
+        alias="coder",
+        prompt_sha=f"{index:064x}",
+        job_id="00000000-0000-0000-0000-000000000001",
+        operation_id="00000000-0000-0000-0000-000000000002",
+        fencing=7,
+        call_tokens=1000,
+    )
+    return child_key
+
+
+def test_every_coding_call_row_records_the_parent_reservations_pricing_version(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Live run3: the job's coding row carried pricing_version litellm-1.105.1, all 13 coding_call rows NULL
+    # (the INSERT of the child row never wrote the column).
+    db, gateway, detail = _ticket_gateway(monkeypatch)
+    keys = [_open_ticket(gateway, index) for index in range(1, 4)]
+    assert [db.request(_PROJECT, _TASK, key)["pricing_version"] for key in keys] == [detail["pricing_version"]] * 3
+
+
+@pytest.mark.parametrize("outcome", ["in_flight", "answered", "upstream_error", "unknown", "usage_missing", "aborted"])
+def test_a_coding_call_row_keeps_the_parent_pricing_version_whatever_the_call_ends_as(monkeypatch: pytest.MonkeyPatch, outcome: str) -> None:
+    # The child row is later set known (ticket closed, lease lost) and gets the observation or the
+    # upstream error written to it: none of those updates may leave its pricing_version empty.
+    from aether_gateway.model import GatewayDenied
+
+    db, gateway, detail = _ticket_gateway(monkeypatch)
+    child_key = _open_ticket(gateway, 1)
+    session = {"project_id": _PROJECT, "task_id": _TASK, "scope": {"request_key": _CALL_PARENT}}
+    if outcome == "aborted":
+        gateway._abort_coding_ticket(_PROJECT, _TASK, _CALL_PARENT, child_key)
+    else:
+        gateway._close_coding_ticket(_PROJECT, _TASK, child_key)
+        gateway._coding_child_key = child_key
+        gateway._coding_call_tokens = 1000
+        if outcome == "in_flight":
+            pass  # ticket closed and the call sent; no answer yet
+        elif outcome == "answered":
+            gateway._add_measured_usage(session, {"id": "c", "model": "coder", "choices": [], "usage": {"prompt_tokens": 120, "completion_tokens": 30}})
+        elif outcome == "usage_missing":
+            gateway._add_measured_usage(session, {"id": "c", "model": "coder", "choices": []})
+        elif outcome == "upstream_error":
+            gateway._note_upstream_failure(session, GatewayDenied("upstream_error", sent=True, upstream_status=500), release_pending=True)
+        else:
+            gateway._note_upstream_failure(session, GatewayDenied("upstream_timeout", sent=True), release_pending=True)
+    child = db.request(_PROJECT, _TASK, child_key)
+    parent = db.request(_PROJECT, _TASK, _CALL_PARENT)
+    assert child["usage_status"] == "known"
+    assert child["pricing_version"] == parent["usage_detail"]["pricing_version"] == detail["pricing_version"]
+    if outcome == "unknown":
+        assert parent["usage_detail"]["unknown_reserved_tokens"] == 1000

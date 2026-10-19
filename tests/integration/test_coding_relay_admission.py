@@ -745,3 +745,69 @@ def test_oversized_prompt_is_rejected_before_the_provider(client, role_urls) -> 
     assert row["usage_detail"]["pending_tokens"] == 0
     rows = [r for r in _all_requests(database, owner_id, project_id, parent["task_id"]) if r["role"] == "coding_call"]
     assert len(rows) == 1
+
+
+def test_every_coding_call_row_carries_the_parent_reservations_pricing_version(client, role_urls) -> None:
+    """Live run3 left pricing_version NULL on every coding_call row while the job's coding row had it.
+
+    Two answered calls and one upstream error: each child row, whatever it ends as, carries the
+    pricing_version recorded on the parent reservation.
+    """
+    owner_id, project_id, _headers = project(client)
+    database = Database(role_urls["aether_worker"])
+    parent = _reserve_parent(database, owner_id=owner_id, project_id=project_id, token_limit=100_000, money_limit=100_000)
+    served: list[int] = []
+
+    class AnswerThenFail(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("content-length") or "0")
+            self.rfile.read(length)
+            served.append(1)
+            if len(served) <= 2:
+                status = 200
+                body = {
+                    "id": "chatcmpl-priced",
+                    "model": "coder-upstream",
+                    "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+                    "usage": {"prompt_tokens": 30, "completion_tokens": 4, "total_tokens": 34},
+                }
+            else:
+                status = 500
+                body = {"error": {"message": "upstream exploded", "type": "server_error"}}
+            payload = json.dumps(body).encode()
+            self.send_response(status)
+            self.send_header("content-type", "application/json")
+            self.send_header("content-length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, _format: str, *_args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), AnswerThenFail)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    gateway = ModelGateway(database, upstream_base=f"http://127.0.0.1:{server.server_address[1]}/v1", provider_key=_KEY, timeout=5)
+    try:
+        for index in range(2):
+            gateway.relay_chat(parent["token"], {"model": "coder", "messages": [{"role": "user", "content": f"priced-{index}"}]})
+        with pytest.raises(GatewayDenied):
+            gateway.relay_chat(parent["token"], {"model": "coder", "messages": [{"role": "user", "content": "priced-fail"}]})
+    finally:
+        server.shutdown()
+        server.server_close()
+    assert len(served) == 3
+    with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        rows = conn.execute(
+            text(
+                "SELECT role, usage_status, pricing_version, usage_detail FROM model_requests "
+                "WHERE project_id = :project_id AND task_id = :task_id ORDER BY created_at"
+            ),
+            {"project_id": project_id, "task_id": parent["task_id"]},
+        ).mappings().all()
+    coding = [row for row in rows if row["role"] == "coding"]
+    calls = [row for row in rows if row["role"] == "coding_call"]
+    assert len(coding) == 1 and len(calls) == 3
+    expected = coding[0]["usage_detail"]["pricing_version"]
+    assert expected == _PRICES["pricing_version"]
+    assert [row["pricing_version"] for row in calls] == [expected] * 3
+    assert calls[-1]["usage_detail"]["upstream_error"]

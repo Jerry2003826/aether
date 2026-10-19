@@ -179,6 +179,8 @@ class FakeLedgerDatabase:
             reserved_micro_usd=params.get("amount", 0),
             usage_status="reserved",
             usage_detail=json.loads(params["detail"]),
+            # Only a statement that names the column writes it, as in Postgres.
+            pricing_version=params.get("pricing_version") if "pricing_version" in sql.split("VALUES")[0] else None,
         )
         return _Result([], rowcount=1)
 
@@ -235,6 +237,11 @@ def _assign(row: dict[str, Any], assignment: str, params: dict[str, Any]) -> Non
     if coalesce:
         if params[coalesce.group(1)] is not None:
             row[column] = params[coalesce.group(1)]
+        return
+    keep = re.fullmatch(rf"COALESCE\({column}, :(\w+)\)", expression)
+    if keep:
+        if row[column] is None:
+            row[column] = params[keep.group(1)]
         return
     cast = re.fullmatch(r"CAST\(:(\w+) AS jsonb\)", expression)
     if cast:
