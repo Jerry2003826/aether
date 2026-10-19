@@ -14,7 +14,7 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.coding_jobs import _settle
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -32,7 +32,7 @@ def _setup(*, rate_tokens: int, rate_micro: int, reserved_tokens: int | None = N
         _TASK,
         _PARENT,
         reserved_micro_usd=micro,
-        usage_detail={"reserved_tokens": tokens, "call_reserve_tokens": rate_tokens, "call_reserve_micro_usd": rate_micro},
+        usage_detail={"reserved_tokens": tokens, "call_reserve_tokens": rate_tokens, "call_reserve_micro_usd": rate_micro, **prices_at(rate_micro, rate_tokens)},
     )
     return db
 

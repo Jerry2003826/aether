@@ -20,7 +20,7 @@ from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker import coding_jobs
 from aether_worker.coding_model_proxy import CodingModelProxy
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -52,6 +52,10 @@ def _run_job(monkeypatch: pytest.MonkeyPatch, *, reserve_tokens: int, reserve_mi
     """One coding job through _run_one under the given reserve configuration; its one call reports 300 in / 200 out."""
     monkeypatch.setenv("AETHER_CODING_CALL_RESERVE_TOKENS", str(reserve_tokens))
     monkeypatch.setenv("AETHER_CODING_CALL_RESERVE_MICRO_USD", str(reserve_micro))
+    # Measured tokens are billed at the configured prices (ADR-F49); here they equal the reserve rate.
+    per_mtok = str(reserve_micro * 1_000_000 // reserve_tokens)
+    monkeypatch.setenv("AETHER_CODING_INPUT_MICRO_USD_PER_MTOK", per_mtok)
+    monkeypatch.setenv("AETHER_CODING_OUTPUT_MICRO_USD_PER_MTOK", per_mtok)
     monkeypatch.delenv("AETHER_GATEWAY_BASE", raising=False)
     db = FakeLedgerDatabase()
     db.add_account(_PROJECT, _TASK)
@@ -121,6 +125,7 @@ def _held_row(*, reserved_tokens: int, reserved_micro: int, rate_tokens: int, ra
             "reserved_tokens": reserved_tokens,
             "call_reserve_tokens": rate_tokens,
             "call_reserve_micro_usd": rate_micro,
+            **prices_at(rate_micro, rate_tokens),
             **detail,
         },
     )

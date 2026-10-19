@@ -8,7 +8,7 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.coding_jobs import _settle
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -29,6 +29,7 @@ def _setup(*, reserved: int, pending: int) -> FakeLedgerDatabase:
             "reserved_tokens": reserved,
             "call_reserve_tokens": 4096,
             "call_reserve_micro_usd": 4096,
+            **prices_at(4096, 4096),
             "pending_tokens": pending,
         },
     )

@@ -34,6 +34,9 @@ WORKSPACE = {
 _RESULT = {"exit_code": 0, "result": {"passed": 1, "failed": 0, "agent_completed": True, "patch": "--- a/x\n"}}
 
 
+# Coding reservations record their prices (ADR-F49): measured tokens at 1 micro-USD each, input and output alike.
+_PRICES = {"pricing_version": "test-1000000-1000000", "input_micro_usd_per_mtok": 1_000_000, "output_micro_usd_per_mtok": 1_000_000}
+
 class _Job:
     """One queued coding job created through the API, with its budget account open."""
 
@@ -145,7 +148,7 @@ class _Job:
             amount=self.reserve_micro,
             role="coding",
             tokens=self.reserve_tokens,
-            extra_detail={"call_reserve_tokens": self.reserve_tokens, "call_reserve_micro_usd": self.reserve_micro},
+            extra_detail={"call_reserve_tokens": self.reserve_tokens, "call_reserve_micro_usd": self.reserve_micro, **_PRICES},
         )
         if detail:
             self.record(key, **detail)
@@ -406,7 +409,7 @@ def test_tokens_still_pending_at_the_final_settlement_are_charged_at_their_reser
         amount=8192,
         role="coding",
         tokens=8192,
-        extra_detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096},
+        extra_detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096, **_PRICES},
     )
     job.record(key, measured_input_tokens=100, measured_output_tokens=50, pending_tokens=3000)
     coding_jobs._settle(BudgetLedger(job.db), owner_id=job.owner_id, project_id=job.project_id, task_id=job.task_id, request_key=key, reserved=True)

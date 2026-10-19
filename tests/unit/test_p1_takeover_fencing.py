@@ -22,7 +22,7 @@ from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker import coding_jobs
 from coding_sql_fake import CodingSqlFake, Store
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "project-1"
@@ -64,7 +64,7 @@ def _old_attempt(db: CodingSqlFake, **detail: Any) -> dict[str, Any]:
         amount=_RESERVE,
         role="coding",
         tokens=_RESERVE,
-        extra_detail={"call_reserve_tokens": _RESERVE, "call_reserve_micro_usd": _RESERVE},
+        extra_detail={"call_reserve_tokens": _RESERVE, "call_reserve_micro_usd": _RESERVE, **prices_at(_RESERVE, _RESERVE)},
     )
     row = db.request(_PROJECT, _TASK, _key(_OLD_FENCE))
     row["usage_detail"].update(detail)
@@ -318,6 +318,7 @@ def test_tokens_still_pending_at_the_final_settlement_are_charged_at_their_reser
             "reserved_tokens": 8192,
             "call_reserve_tokens": 4096,
             "call_reserve_micro_usd": 4096,
+            **prices_at(4096, 4096),
             "measured_input_tokens": 100,
             "measured_output_tokens": 50,
             # A call whose answer never reached the ledger (the gateway lost it) and no drain timed out.

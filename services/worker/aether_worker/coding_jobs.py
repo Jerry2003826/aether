@@ -16,9 +16,17 @@ from typing import Any
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError, NoResultFound
 
-from aether_gateway.model import ModelGateway
+from aether_gateway.model import ModelGateway, coding_prices
 from aether_storage.artifacts import ArtifactError, ArtifactStore
-from aether_storage.budget import BudgetError, BudgetLedger, coding_call_micro_usd, move_call_cost, priced_micro_usd
+from aether_storage.budget import (
+    MICRO_USD_PRICE_UNIT_TOKENS,
+    BudgetError,
+    BudgetLedger,
+    coding_prices_of,
+    coding_usage_micro_usd,
+    move_call_cost,
+    priced_micro_usd,
+)
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
 from aether_worker.coding_sandbox import (
@@ -46,11 +54,22 @@ def coding_call_reserve_tokens() -> int:
     return _positive_env("AETHER_CODING_CALL_RESERVE_TOKENS", CODING_CALL_RESERVE_TOKENS)
 
 
-def coding_call_reserve_micro_usd() -> int:
-    raw = os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", "").strip()
-    if not raw:
-        return coding_call_reserve_tokens()
-    return _positive_env("AETHER_CODING_CALL_RESERVE_MICRO_USD", coding_call_reserve_tokens())
+def coding_call_reserve_micro_usd(prices: dict[str, Any] | None = None) -> int:
+    """Money held per coding call: AETHER_CODING_CALL_RESERVE_MICRO_USD when set to a positive integer,
+    otherwise the per-call tokens at the higher of the two prices, rounded up.
+
+    A coding reservation always passes the prices it records (coding_prices()). Without them the
+    hold is the token count, a sizing unit only: measured usage is always priced by the prices.
+    """
+    explicit = _positive_value(os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", ""))
+    if explicit is not None:
+        return explicit
+    tokens = coding_call_reserve_tokens()
+    if prices is None:
+        return tokens
+    _version, per_input, per_output = coding_prices_of(prices)
+    held = tokens * max(per_input, per_output)
+    return max(1, (held + MICRO_USD_PRICE_UNIT_TOKENS - 1) // MICRO_USD_PRICE_UNIT_TOKENS)
 
 
 def _positive_env(name: str, default: int) -> int:
@@ -75,22 +94,27 @@ _LOG = logging.getLogger("aether.worker.coding")
 
 
 def warn_coding_rate_default() -> None:
-    """Say once, at worker startup, when the coding money rate is not taken from the environment.
+    """Say once, at worker startup, which prices coding calls will be billed at, or that none are usable.
 
-    Then the money per call defaults to the token count: 1 micro-USD per token, a bookkeeping unit
-    and not a price. It stays a supported setup, so this only warns. A rejected value is not echoed.
+    Logs coding_prices with the pricing_version, the input and output price (micro-USD per million
+    tokens) and the per-call hold. Without a usable price it warns coding_prices_missing: every coding
+    job then fails with pricing_missing before any model call, never billed 1 micro-USD per token.
+    Other jobs still run, so this does not stop the worker. A rejected value is not echoed.
     """
-    raw = os.environ.get("AETHER_CODING_CALL_RESERVE_MICRO_USD", "")
-    if _positive_value(raw) is not None:
+    try:
+        prices = coding_prices()
+    except BudgetError:
+        _LOG.warning(
+            "coding_prices_missing set AETHER_CODING_INPUT_MICRO_USD_PER_MTOK and AETHER_CODING_OUTPUT_MICRO_USD_PER_MTOK "
+            "or an AETHER_LIVE_MODEL_ALIAS the litellm price table prices; coding jobs fail with pricing_missing"
+        )
         return
-    reason = "unset" if not raw.strip() else "invalid"
-    tokens = coding_call_reserve_tokens()
-    _LOG.warning(
-        "coding_rate_default AETHER_CODING_CALL_RESERVE_MICRO_USD=%s default=%s micro_usd_per_call "
-        "(=AETHER_CODING_CALL_RESERVE_TOKENS=%s) rate=1 micro_usd_per_token accounting_unit_not_a_price",
-        reason,
-        tokens,
-        tokens,
+    _LOG.info(
+        "coding_prices pricing_version=%s input_micro_usd_per_mtok=%s output_micro_usd_per_mtok=%s call_reserve_micro_usd=%s",
+        prices["pricing_version"],
+        prices["input_micro_usd_per_mtok"],
+        prices["output_micro_usd_per_mtok"],
+        coding_call_reserve_micro_usd(prices),
     )
 _DEFAULT_BUDGET = {
     "max_cost_micro_usd": 2_000_000,
@@ -240,8 +264,10 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
         objective = _job_objective(row)
         workspace = _workspace(store, owner_id=owner_id, project_id=project_id, artifact_id=str(row["base_artifact_id"]))
         _ensure_account(database, owner_id=owner_id, project_id=project_id, task_id=task_id)
+        # Raises pricing_missing before anything is reserved or any model call is made.
+        prices = coding_prices()
         reserve_tokens = coding_call_reserve_tokens()
-        reserve_micro = coding_call_reserve_micro_usd()
+        reserve_micro = coding_call_reserve_micro_usd(prices)
         if not ledger.reserve(
             owner_id=owner_id,
             project_id=project_id,
@@ -250,7 +276,7 @@ def _run_one(database: Database, store: ArtifactStore, *, owner_id: str, project
             amount=reserve_micro,
             role="coding",
             tokens=reserve_tokens,
-            extra_detail={"call_reserve_tokens": reserve_tokens, "call_reserve_micro_usd": reserve_micro},
+            extra_detail={"call_reserve_tokens": reserve_tokens, "call_reserve_micro_usd": reserve_micro, **prices},
         ):
             raise CodingError("budget_exceeded")
         reserved = True
@@ -1827,12 +1853,13 @@ def _settle(
     usage = _measured_from_detail(detail)
     if usage is not None:
         # Money and tokens are booked apart: each measured call was priced at the reservation's
-        # rate, rounded up on its own, when its usage arrived; this is their sum.
+        # input and output prices, rounded up on its own, when its usage arrived; this is their sum.
+        coding_prices_of(detail)
         actual = priced_micro_usd(detail, "measured", usage[0] + usage[1])
     else:
         usage = _usage(result)
-        # Only the sandbox's total is known here, so it is priced as one call.
-        actual = 0 if usage is None else coding_call_micro_usd(usage[0] + usage[1], detail)
+        # Only the sandbox's total is known here: its input and output at their prices, as one call.
+        actual = 0 if usage is None else coding_usage_micro_usd(usage[0], usage[1], detail)
     unknown = _unknown_reserved_tokens(detail)
     pending = _count_detail(detail.get("pending_tokens"))
     try:

@@ -14,6 +14,17 @@ from contextlib import contextmanager
 from typing import Any, Iterator
 
 
+def prices_at(rate_micro: int, rate_tokens: int) -> dict[str, Any]:
+    """Coding prices that bill measured tokens at a reservation's per-call rate, input and output alike.
+
+    Coding usage is priced only from recorded prices (input and output micro-USD per million tokens
+    with a pricing_version); a test row that pins a rate records the matching prices. Rounded down, so a
+    call of t tokens still costs ceil(t * rate) for the call sizes these tests use (7/3: 2333333).
+    """
+    per_mtok = rate_micro * 1_000_000 // rate_tokens
+    return {"pricing_version": f"test-{per_mtok}-{per_mtok}", "input_micro_usd_per_mtok": per_mtok, "output_micro_usd_per_mtok": per_mtok}
+
+
 class _Result:
     def __init__(self, rows: list[dict[str, Any]], rowcount: int = 0) -> None:
         self._rows = rows

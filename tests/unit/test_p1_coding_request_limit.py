@@ -9,7 +9,7 @@ import pytest
 import aether_gateway.model as gateway_model
 from aether_gateway.model import CODING_MAX_MODEL_CALLS, GatewayDenied, ModelGateway
 from aether_storage.db import Database
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _PROJECT = "p"
 _TASK = "t"
@@ -20,7 +20,7 @@ def _setup(monkeypatch: pytest.MonkeyPatch, *, max_requests: int) -> tuple[FakeL
     monkeypatch.setattr(gateway_model, "_coding_lease_held", lambda _conn, **_fence: True)
     db = FakeLedgerDatabase()
     db.add_account(_PROJECT, _TASK, max_requests=max_requests, requests_admitted=1, held_micro_usd=40_000, tokens_held=40_000)
-    db.add_request(_PROJECT, _TASK, _PARENT, reserved_micro_usd=40_000, usage_detail={"reserved_tokens": 40_000})
+    db.add_request(_PROJECT, _TASK, _PARENT, reserved_micro_usd=40_000, usage_detail={"reserved_tokens": 40_000, "call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096, **prices_at(4096, 4096)})
     return db, ModelGateway(cast(Database, db), upstream_base="http://127.0.0.1:9/v1", provider_key="unit-key")
 
 

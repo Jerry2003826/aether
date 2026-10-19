@@ -14,7 +14,7 @@ import aether_gateway.model as gateway_model
 import pytest
 from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.db import Database
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _PROJECT = "p"
 _TASK = "t"
@@ -32,7 +32,7 @@ def _setup(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeLedgerDatabase, ModelGa
         _TASK,
         _PARENT,
         reserved_micro_usd=14000,
-        usage_detail={"reserved_tokens": 6000, "call_reserve_tokens": 3000, "call_reserve_micro_usd": 7000},
+        usage_detail={"reserved_tokens": 6000, "call_reserve_tokens": 3000, "call_reserve_micro_usd": 7000, **prices_at(7000, 3000)},
     )
     gateway = ModelGateway(cast(Database, db), upstream_base="http://127.0.0.1:9/v1", provider_key="unit-key")
     gateway._open_coding_ticket(

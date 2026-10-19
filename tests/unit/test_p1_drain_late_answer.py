@@ -10,7 +10,7 @@ from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.coding_jobs import _drain_proxy, _settle
 from aether_worker.coding_model_proxy import CodingModelProxy
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -36,6 +36,7 @@ def _setup() -> FakeLedgerDatabase:
             "reserved_tokens": 8192,
             "call_reserve_tokens": 4096,
             "call_reserve_micro_usd": 4096,
+            **prices_at(4096, 4096),
             "pending_tokens": 2 * _CALL,
         },
     )

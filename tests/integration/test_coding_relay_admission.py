@@ -51,6 +51,9 @@ class _Upstream(BaseHTTPRequestHandler):
         return
 
 
+# Coding reservations record their prices (ADR-F49): measured tokens at 1 micro-USD each, input and output alike.
+_PRICES = {"pricing_version": "test-1000000-1000000", "input_micro_usd_per_mtok": 1_000_000, "output_micro_usd_per_mtok": 1_000_000}
+
 def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client, role_urls) -> None:
     _Upstream.bodies = []
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Upstream)
@@ -68,14 +71,6 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
             {"project_id": project_id, "workflow": workflow},
         ).scalar_one()
     ledger = BudgetLedger(database)
-    ledger.open_account(
-        owner_id=owner_id,
-        project_id=project_id,
-        task_id=task_id,
-        limit_micro_usd=100_000,
-        token_limit=1_000,
-        max_requests=4,
-    )
     first = {
         "model": "openai/coder",
         "messages": [{"role": "user", "content": "one"}],
@@ -85,6 +80,17 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
         "max_tokens": 99999,
     }
     one_call = estimate_input_tokens(chat_prompt(first)) + CODING_CALL_OUTPUT_CAP
+    # The task may hold exactly one call (its token ceiling less the 20% verification reserve): the
+    # reservation, which records its per-call rate and prices (ADR-F49), cannot grow, so a second call is
+    # over budget and refused before the provider.
+    ledger.open_account(
+        owner_id=owner_id,
+        project_id=project_id,
+        task_id=task_id,
+        limit_micro_usd=100_000,
+        token_limit=-(-one_call * 5 // 4),
+        max_requests=4,
+    )
     request_key = f"coding-admit-{uuid.uuid4().hex}"
     fencing = 1
     binding = _leased_job(database, owner_id=owner_id, project_id=project_id, task_id=task_id, fencing=fencing)
@@ -97,6 +103,7 @@ def test_replayed_ticket_and_over_budget_are_rejected_before_the_provider(client
         role="coding",
         tokens=one_call,
         model_alias="coder",
+        extra_detail={"call_reserve_tokens": one_call, "call_reserve_micro_usd": 4096, **_PRICES},
     )
     assert reserved is True
     gateway = ModelGateway(
@@ -279,6 +286,7 @@ def _prepare_task(
         role="coding",
         tokens=_SMALL_CALL_TOKENS,
         model_alias="coder",
+        extra_detail={"call_reserve_tokens": _SMALL_CALL_TOKENS, "call_reserve_micro_usd": 4096, **_PRICES},
     )
     job = _leased_job(
         database,
@@ -621,7 +629,7 @@ def _reserve_parent(
         role="coding",
         tokens=4096,
         model_alias="coder",
-        extra_detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096},
+        extra_detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096, **_PRICES},
     )
     fencing = 1
     job = _leased_job(database, owner_id=owner_id, project_id=project_id, task_id=task_id, fencing=fencing)

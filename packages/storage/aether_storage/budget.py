@@ -65,19 +65,51 @@ def _count(value: object) -> int:
 
 
 def coding_call_micro_usd(tokens: int, detail: dict) -> int:
-    """Micro-USD for one coding call of `tokens` tokens, rounded up.
+    """Micro-USD held for one coding call of `tokens` tokens whose usage is not measured, rounded up.
 
-    The rate is the one recorded on the reservation when it was made:
-    call_reserve_micro_usd / call_reserve_tokens. A row without both (written before the rate
-    was recorded) is priced at 1 micro-USD per token, as it always was.
+    The rate is the per-call hold recorded on the reservation: call_reserve_micro_usd /
+    call_reserve_tokens. It sizes holds and charges calls whose usage never arrived; measured
+    usage is priced by coding_usage_micro_usd. A row without both is an error (coding_rate_missing),
+    never 1 micro-USD per token.
     """
     if tokens <= 0:
         return 0
     per_tokens = _count(detail.get("call_reserve_tokens"))
     per_micro = _count(detail.get("call_reserve_micro_usd"))
     if not per_tokens or not per_micro:
-        return tokens
+        raise BudgetError("coding_rate_missing")
     return (tokens * per_micro + per_tokens - 1) // per_tokens
+
+
+# Coding prices are integers in micro-USD per million tokens (0.28 USD/Mtok is 280000), recorded on
+# the reservation with the pricing_version they came from.
+MICRO_USD_PRICE_UNIT_TOKENS = 1_000_000
+
+
+def _price(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def coding_prices_of(detail: dict) -> tuple[str, int, int]:
+    """(pricing_version, input price, output price) recorded on a coding reservation.
+
+    An empty or missing pricing_version, or a missing, non-integer or negative price, raises
+    BudgetError("pricing_missing"): measured usage is never priced 1 micro-USD per token.
+    """
+    version = detail.get("pricing_version")
+    per_input = _price(detail.get("input_micro_usd_per_mtok"))
+    per_output = _price(detail.get("output_micro_usd_per_mtok"))
+    if not isinstance(version, str) or not version.strip() or per_input is None or per_output is None:
+        raise BudgetError("pricing_missing")
+    return version, per_input, per_output
+
+
+def coding_usage_micro_usd(input_tokens: int, output_tokens: int, detail: dict) -> int:
+    """Micro-USD for measured usage: input tokens at the input price plus output tokens at the
+    output price, the sum rounded up once. Prices come from the reservation (coding_prices_of)."""
+    _version, per_input, per_output = coding_prices_of(detail)
+    total = max(0, input_tokens) * per_input + max(0, output_tokens) * per_output
+    return (total + MICRO_USD_PRICE_UNIT_TOKENS - 1) // MICRO_USD_PRICE_UNIT_TOKENS
 
 
 # Per-call money is kept next to each token counter on a coding reservation: <kind>_micro_usd is
@@ -385,7 +417,8 @@ class BudgetLedger:
 
         actual is money (micro-USD) and input_tokens/output_tokens are tokens; they are booked
         apart and neither is derived from the other here. The caller prices the measured calls at
-        the configured rate, each call rounded up on its own, and passes their sum.
+        the reservation's input and output prices, each call rounded up on its own, and passes their
+        sum. The reservation's pricing_version is written to the row with the bill.
 
         unknown_tokens is what was reserved for calls of this attempt whose usage never
         arrived (a timeout after sending, an answer without usage), and unknown_micro_usd the sum
@@ -447,13 +480,14 @@ class BudgetLedger:
             conn.execute(
                 text(
                     "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = :actual, input_tokens = :input_tokens, "
-                    "output_tokens = :output_tokens, usage_detail = CAST(:detail AS jsonb), completed_at = now() "
-                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                    "output_tokens = :output_tokens, pricing_version = :pricing_version, usage_detail = CAST(:detail AS jsonb), "
+                    "completed_at = now() WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
                 ),
                 {
                     "actual": actual + unknown_charge_micro,
                     "input_tokens": input_tokens,
                     "output_tokens": output_tokens,
+                    "pricing_version": detail.get("pricing_version") or None,
                     "detail": json.dumps(detail),
                     "project_id": project_id,
                     "task_id": task_id,

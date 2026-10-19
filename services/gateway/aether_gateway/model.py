@@ -28,9 +28,13 @@ from sqlalchemy.exc import DataError, IntegrityError
 from aether_domain.coding_limits import CODING_MAX_ITERATIONS, coding_max_iterations
 from aether_domain.security import sha256_text
 from aether_storage.budget import (
+    MICRO_USD_PRICE_UNIT_TOKENS,
+    BudgetError,
     add_call_cost,
     apply_reservation_extension,
     coding_call_micro_usd,
+    coding_prices_of,
+    coding_usage_micro_usd,
     priced_micro_usd,
     remove_call_cost,
     reservation_can_grow,
@@ -360,6 +364,49 @@ def upstream_model_name(requested: str) -> str:
     """Send the configured provider model. Admission still uses the sandbox alias."""
     alias = os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip()
     return alias or requested
+
+
+CODING_INPUT_PRICE_ENV = "AETHER_CODING_INPUT_MICRO_USD_PER_MTOK"
+CODING_OUTPUT_PRICE_ENV = "AETHER_CODING_OUTPUT_MICRO_USD_PER_MTOK"
+_PRICE_DIGITS = re.compile(r"[0-9]+")
+
+
+def coding_prices() -> dict[str, Any]:
+    """The coding model's input and output price, recorded on each coding reservation.
+
+    Prices are integer micro-USD per million tokens. AETHER_CODING_INPUT_MICRO_USD_PER_MTOK and
+    AETHER_CODING_OUTPUT_MICRO_USD_PER_MTOK, set together, win (pricing_version config-<in>-<out>).
+    Otherwise the upstream model (AETHER_LIVE_MODEL_ALIAS) is looked up in LiteLLM's bundled price
+    table, the table /v1/complete estimates from (pricing_version litellm-<version>). Anything else
+    raises BudgetError("pricing_missing"): a half-set, non-integer or all-zero pair, a model the
+    table does not price. Coding usage is never priced 1 micro-USD per token.
+    """
+    raw_input = os.environ.get(CODING_INPUT_PRICE_ENV, "").strip()
+    raw_output = os.environ.get(CODING_OUTPUT_PRICE_ENV, "").strip()
+    model = upstream_model_name("")
+    if raw_input or raw_output:
+        if _PRICE_DIGITS.fullmatch(raw_input) is None or _PRICE_DIGITS.fullmatch(raw_output) is None:
+            raise BudgetError("pricing_missing")
+        per_input, per_output = int(raw_input), int(raw_output)
+        version_tag = f"config-{per_input}-{per_output}"
+    else:
+        entry = litellm.model_cost.get(model) if model else None
+        if not isinstance(entry, dict):
+            raise BudgetError("pricing_missing")
+        costs = (entry.get("input_cost_per_token"), entry.get("output_cost_per_token"))
+        if not all(isinstance(cost, (int, float)) and not isinstance(cost, bool) and cost >= 0 for cost in costs):
+            raise BudgetError("pricing_missing")
+        # USD per token to micro-USD per million tokens.
+        per_input, per_output = (round(float(cost) * 1_000_000 * MICRO_USD_PRICE_UNIT_TOKENS) for cost in costs)
+        version_tag = PRICING_VERSION
+    if per_input + per_output == 0:
+        raise BudgetError("pricing_missing")
+    return {
+        "pricing_version": version_tag,
+        "pricing_model": model or None,
+        "input_micro_usd_per_mtok": per_input,
+        "output_micro_usd_per_mtok": per_output,
+    }
 
 
 def upstream_chat_payload(body: dict[str, Any], *, max_tokens: int | None) -> dict[str, Any]:
@@ -803,7 +850,7 @@ class ModelGateway:
         try:
             max_tokens = self._spend_coding_ticket(grant, alias=alias, prompt=prompt)
         except GatewayDenied as exc:
-            if exc.code == "budget_exceeded":
+            if exc.code in {"budget_exceeded", "pricing_missing", "coding_rate_missing"}:
                 self._note_admission_block(grant, exc.code)
             self._log_relay(
                 project_id=str(grant["project_id"]),
@@ -1015,6 +1062,13 @@ class ModelGateway:
             if isinstance(detail, str):
                 detail = json.loads(detail)
             detail = dict(detail or {})
+            try:
+                # Every call is priced from the reservation (ADR-F49): a row without its prices and
+                # pricing_version, or without its per-call rate, is refused, never priced 1 micro-USD per token.
+                coding_prices_of(detail)
+                coding_call_micro_usd(1, detail)
+            except BudgetError as exc:
+                raise GatewayDenied(exc.code) from None
             reserved_tokens = _count(detail.get("reserved_tokens"))
             measured = _count(detail.get("measured_input_tokens")) + _count(detail.get("measured_output_tokens"))
             pending = _count(detail.get("pending_tokens"))
@@ -1233,7 +1287,8 @@ class ModelGateway:
             )
 
     def _note_admission_block(self, session: dict[str, Any], code: str) -> None:
-        """Remember a pre-upstream rejection (budget_exceeded, model_unavailable) on the parent reservation.
+        """Remember a pre-upstream rejection (budget_exceeded, pricing_missing, coding_rate_missing,
+        model_unavailable) on the parent reservation.
 
         The worker reads it as the job's error code. The hold stays until measured usage is settled.
         """
@@ -1298,8 +1353,8 @@ class ModelGateway:
                 incoming, outgoing = counted
                 detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
                 detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
-                # This call's money: its own measured tokens at the reservation's rate, rounded up.
-                add_call_cost(detail, "measured", incoming + outgoing)
+                # This call's money: its input and output tokens at the reservation's prices, rounded up.
+                add_call_cost(detail, "measured", incoming + outgoing, micro_usd=coding_usage_micro_usd(incoming, outgoing, detail))
                 detail.pop("usage_missing", None)
             conn.execute(
                 text(
@@ -1360,7 +1415,7 @@ class ModelGateway:
                     incoming, outgoing = exc.usage
                     detail["measured_input_tokens"] = _count(detail.get("measured_input_tokens")) + incoming
                     detail["measured_output_tokens"] = _count(detail.get("measured_output_tokens")) + outgoing
-                    add_call_cost(detail, "measured", incoming + outgoing)
+                    add_call_cost(detail, "measured", incoming + outgoing, micro_usd=coding_usage_micro_usd(incoming, outgoing, detail))
                 elif exc.sent and (exc.upstream_status is None or exc.error_body_truncated):
                     # Sent but no whole answer (a timeout, a cut body, an error reply cut short): the
                     # provider may bill it, so its hold is charged at settlement.

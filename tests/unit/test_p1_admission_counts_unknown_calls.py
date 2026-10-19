@@ -17,7 +17,7 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.coding_jobs import _settle
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -55,7 +55,7 @@ def _session() -> dict[str, Any]:
 
 
 def test_the_next_call_is_admitted_on_top_of_an_unknown_call_not_inside_its_hold(monkeypatch: pytest.MonkeyPatch) -> None:
-    db, gateway = _setup(monkeypatch, reserved=4096, detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096})
+    db, gateway = _setup(monkeypatch, reserved=4096, detail={"call_reserve_tokens": 4096, "call_reserve_micro_usd": 4096, **prices_at(4096, 4096)})
     _open(gateway, 1, 1000)
     gateway._note_upstream_failure(_session(), GatewayDenied("upstream_error", sent=True), release_pending=True)
     detail = db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]
@@ -85,28 +85,29 @@ def test_the_next_call_is_admitted_on_top_of_an_unknown_call_not_inside_its_hold
     assert account["tokens_held"] == 0
 
 
-def test_a_row_that_cannot_grow_refuses_a_call_that_fits_only_by_reusing_an_unknown_calls_hold(monkeypatch: pytest.MonkeyPatch) -> None:
-    # No call_reserve_tokens: the reservation never grows, so the next call must fit in what is left.
-    db, gateway = _setup(monkeypatch, reserved=2000, detail={})
-    _open(gateway, 1, 1000)
-    gateway._note_upstream_failure(_session(), GatewayDenied("upstream_error", sent=True), release_pending=True)
-
+def test_a_row_without_a_per_call_rate_or_prices_is_refused_not_priced_one_per_token(monkeypatch: pytest.MonkeyPatch) -> None:
+    # A row with no call_reserve_tokens/_micro_usd (or no prices) cannot price a call: refused explicitly (ADR-F49).
+    db, gateway = _setup(monkeypatch, reserved=2000, detail={"call_reserve_tokens": 1000, "call_reserve_micro_usd": 1000})
     with pytest.raises(GatewayDenied) as caught:
-        _open(gateway, 2, 1001)
-
-    assert caught.value.code == "budget_exceeded"
-    assert db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]["pending_tokens"] == 0
-    assert db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]["unknown_reserved_tokens"] == 1000
+        _open(gateway, 1, 1000)
+    assert caught.value.code == "pricing_missing"
+    db, gateway = _setup(monkeypatch, reserved=2000, detail=prices_at(1000, 1000))
+    with pytest.raises(GatewayDenied) as caught:
+        _open(gateway, 1, 1000)
+    assert caught.value.code == "coding_rate_missing"
+    assert int(db.request(_PROJECT, _TASK, _PARENT)["usage_detail"].get("pending_tokens") or 0) == 0
 
 
 def test_a_call_that_fits_beside_an_unknown_call_is_still_admitted(monkeypatch: pytest.MonkeyPatch) -> None:
-    db, gateway = _setup(monkeypatch, reserved=2000, detail={})
+    db, gateway = _setup(monkeypatch, reserved=2000, detail={"call_reserve_tokens": 1000, "call_reserve_micro_usd": 1000, **prices_at(1000, 1000)})
     _open(gateway, 1, 1000)
     gateway._note_upstream_failure(_session(), GatewayDenied("upstream_error", sent=True), release_pending=True)
 
     _open(gateway, 2, 1000)
 
     assert db.request(_PROJECT, _TASK, _PARENT)["usage_detail"]["pending_tokens"] == 1000
+    # Unknown 1000 + pending 1000 fit the 2000 held: nothing was added to the reservation.
+    assert db.request(_PROJECT, _TASK, _PARENT)["reserved_micro_usd"] == 2000
 
 
 def test_the_reservation_gap_counts_unknown_tokens_as_occupied() -> None:

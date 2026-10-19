@@ -16,7 +16,7 @@ from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.budget import BudgetLedger
 from aether_storage.db import Database
 from aether_worker.coding_jobs import _settle
-from ledger_sql_fake import FakeLedgerDatabase
+from ledger_sql_fake import FakeLedgerDatabase, prices_at
 
 _OWNER = "owner-1"
 _PROJECT = "p"
@@ -35,7 +35,7 @@ def _setup(monkeypatch: pytest.MonkeyPatch, **account: Any) -> tuple[FakeLedgerD
         _TASK,
         _PARENT,
         reserved_micro_usd=_MICRO,
-        usage_detail={"reserved_tokens": _TOKENS, "call_reserve_tokens": _TOKENS, "call_reserve_micro_usd": _MICRO},
+        usage_detail={"reserved_tokens": _TOKENS, "call_reserve_tokens": _TOKENS, "call_reserve_micro_usd": _MICRO, **prices_at(_MICRO, _TOKENS)},
     )
     return db, ModelGateway(cast(Database, db), upstream_base="http://127.0.0.1:9/v1", provider_key="unit-key")
 
