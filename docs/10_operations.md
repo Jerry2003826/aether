@@ -54,6 +54,8 @@ F00不需要购买任何新模型。优化router在完成同模型baseline后启
 
 编码作业的金额费率是 `AETHER_CODING_CALL_RESERVE_MICRO_USD / AETHER_CODING_CALL_RESERVE_TOKENS`（默认都是 4096），在预留时写到行上，结算按每次调用 token×费率向上取整后求和，放行下一次调用也按同样取整核对并追加冻结金额，每次调用收取的金额记在它自己的请求行上，token 另行记账（ADR-F46）。未设置或无效时费率是 1 micro-USD/token，这只是记账单位而非供应商价格，`spent_micro_usd` 不代表实际美元；worker 启动时会记一条 `coding_rate_default ... accounting_unit_not_a_price` 警告。需要按真实价格限额时，按供应商每 token 单价设置 micro 变量。
 
+编码智能体的步数上限是 `AETHER_CODING_MAX_ITERATIONS`（默认 30，只接受 1..200 的整数；非法值让 worker 与 gateway 启动即退出）。它由 `aether_domain.coding_limits` 单一给出：worker 把同一个值作为容器环境交给沙箱入口（入口没有自带默认值），网关把它当作单作业编码调用上限（`CODING_MAX_MODEL_CALLS`）。一次迭代一次模型调用，两者始终相等；花费仍由上面的金额、token 与请求预算约束。对话被该上限截停时，若智能体改动已通过评分则作业为 FINISHED，存档结果与 `coding_job` 日志带 `agent_stop=iteration_limit`；否则为 FAILED/`agent_iteration_limit`（ADR-F47）。
+
 预算是尽力约束，若provider返回超过估算的实际费用必须真实记账、阻断后续请求、告警。不能承诺分布式外部账单永远绝对不超出估计，但本地并发reservation决策必须原子且无竞争漏洞。
 
 ## 6. 观察与日志
