@@ -302,11 +302,11 @@ def trigger_watch(
     watch_id: str,
     watermark: str,
     trigger_key: str,
-    store: ArtifactStore | None = None,
+    store: ArtifactStore,
 ) -> dict[str, Any]:
     """Record one changed watch run.
 
-    With ``store``, the watch-run artifact row is inserted on the same connection, so
+    ``store`` is required: the watch-run artifact row is inserted on the same connection, so
     the notification, ``last_run_at`` and the artifact commit or roll back together.
     A failed write leaves no notification behind, and a retry with the same trigger
     key runs again instead of returning ``duplicate``.
@@ -344,18 +344,17 @@ def trigger_watch(
             ),
             {"watermark": json.dumps({"value": watermark}), "project_id": project_id, "id": watch_id},
         )
-        if store is not None:
-            # put() writes the blob to disk before inserting the row on this connection.
-            # If the transaction rolls back, the blob stays unreferenced; storage is
-            # content-addressed (project/sha256) and the journal records rolled_back,
-            # so the retry reuses the same blob and recovery does not resurrect it.
-            store.put(
-                owner_id=owner_id,
-                project_id=project_id,
-                data=f"watch-run\n{watch_id}\n".encode(),
-                media_type="text/plain",
-                conn=conn,
-            )
+        # put() writes the blob to disk before inserting the row on this connection.
+        # If the transaction rolls back, the blob stays unreferenced; storage is
+        # content-addressed (project/sha256) and the journal records rolled_back,
+        # so the retry reuses the same blob and recovery does not resurrect it.
+        store.put(
+            owner_id=owner_id,
+            project_id=project_id,
+            data=f"watch-run\n{watch_id}\n".encode(),
+            media_type="text/plain",
+            conn=conn,
+        )
     return {
         "dispatched": True,
         "summarized": True,

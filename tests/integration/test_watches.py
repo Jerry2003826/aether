@@ -7,6 +7,7 @@ from sqlalchemy import text
 from temporalio.client import Client
 from temporalio.service import RPCError
 
+from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.console_commands import _watch_patch
 from aether_worker.watches import WatchError, create_watch, enable_watch, ensure_watch_schedules, stop_watch, trigger_watch
@@ -45,6 +46,7 @@ def _count(database: Database, owner_id: str, project_id: str, watch_id: str) ->
 def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, role_urls) -> None:
     owner_id, project_id = _session(client, "watch-project")
     database = Database(role_urls["aether_worker"])
+    store = ArtifactStore(client.app.state.settings.artifact_root, database)
     temporal = _temporal()
     created = create_watch(
         database,
@@ -64,6 +66,7 @@ def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, r
         watch_id=created["id"],
         watermark="v1",
         trigger_key="tick-1",
+        store=store,
     )
     assert before["dispatched"] is False
     assert before["reason"] == "stopped"
@@ -105,6 +108,7 @@ def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, r
             watch_id=created["id"],
             watermark="v1",
             trigger_key="tick-1",
+            store=store,
         )
         assert changed["summarized"] is True
         assert changed["external_sent"] is False
@@ -115,6 +119,7 @@ def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, r
             watch_id=created["id"],
             watermark="v1",
             trigger_key="tick-2",
+            store=store,
         )
         assert unchanged["reason"] == "unchanged"
         assert unchanged["summarized"] is False
@@ -125,6 +130,7 @@ def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, r
             watch_id=created["id"],
             watermark="v2",
             trigger_key="tick-1",
+            store=store,
         )
         assert duplicate["reason"] == "duplicate"
         assert _count(database, owner_id, project_id, created["id"]) == 1
@@ -137,6 +143,7 @@ def test_watch_requires_approval_skips_unchanged_and_does_not_send_out(client, r
             watch_id=created["id"],
             watermark="v3",
             trigger_key="tick-3",
+            store=store,
         )
         assert later["reason"] == "stopped"
         assert later["dispatched"] is False
