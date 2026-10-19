@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from aether_domain.coding_limits import CODING_ITERATIONS_ENV, coding_max_iterations
 from aether_worker import grading_files
 from aether_worker.coding_sandbox import CODING_MEMORY_BYTES, container_arguments
 from aether_worker.openhands_image import OPENHANDS_VERSION, launch_image
@@ -40,6 +41,8 @@ def _sandbox_shared_memory(monkeypatch: pytest.MonkeyPatch):
     machine's /dev/shm is never emptied."""
     path = Path(tempfile.mkdtemp(prefix="aether-unit-shm-", dir="/dev/shm"))
     monkeypatch.setenv("AETHER_SANDBOX_SHM", str(path))
+    # Like container_arguments: the entry's step limit comes from the shared coding_limits config.
+    monkeypatch.setenv(CODING_ITERATIONS_ENV, str(coding_max_iterations()))
     yield path
     shutil.rmtree(path, ignore_errors=True)
 

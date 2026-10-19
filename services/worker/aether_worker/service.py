@@ -20,6 +20,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import aether_worker.goal_effect as goal_effect
+from aether_domain.coding_limits import require_coding_limits
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.coding_jobs import execute_queued_coding_jobs, warn_coding_rate_default
@@ -261,6 +262,7 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     warn_if_git_missing()
     # No Docker here: the runner role sweeps leftover coding containers when it starts (runner_process).
     warn_coding_rate_default()
+    require_coding_limits()
     try:
         if endpoints is None:
             endpoints, children = _endpoints_for_process()

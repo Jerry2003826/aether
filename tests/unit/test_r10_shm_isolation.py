@@ -21,6 +21,7 @@ from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from aether_domain.coding_limits import CODING_ITERATIONS_ENV, coding_max_iterations
 
 from tests.unit.test_openhands_coding import _ENTRY, _PYTHON, _SocketModel
 
@@ -95,6 +96,8 @@ def _run(tmp_path: Path, command: str, files: dict[str, str], **extra: str) -> t
             "AETHER_MODEL_ALIAS": "openai/coder",
             "PYTHONDONTWRITEBYTECODE": "1",
             "AETHER_OBJECTIVE": "Make value() return 42.",
+            # As container_arguments hands it to the entry, from the shared coding_limits config.
+            CODING_ITERATIONS_ENV: str(coding_max_iterations()),
             **extra,
         }
     )

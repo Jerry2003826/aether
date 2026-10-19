@@ -35,7 +35,7 @@ import openhands_sandbox_entry as entry
 from pathlib import Path
 job = Path({str(job)!r})
 
-def run_agent(_job, _objective):
+def run_agent(_job, _objective, _iterations):
     # The agent did change a source file.
     (job / "app.py").write_text("def value():\\n    return 2\\n", encoding="utf-8")
     report = entry._blank_report()
@@ -48,6 +48,7 @@ def graded():
 
 entry.become_subreaper = lambda: None
 entry.job_objective = lambda: "objective"
+entry.iteration_limit = lambda: 30
 entry.shared_memory_root = lambda: Path({str(shm)!r})
 entry.job_directory = lambda: job
 entry.copy_tree = lambda _src, _dst: None

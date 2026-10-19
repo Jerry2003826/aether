@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 import requests
+from aether_domain.coding_limits import CODING_ITERATIONS_ENV, coding_max_iterations
 from docker.errors import DockerException
 
 from aether_worker.container_runtime import LEFTOVER_INSPECT_TEMPLATE, container_logs
@@ -178,6 +179,11 @@ def container_arguments(
     The objective is one argv element, so no shell sees it; the entry sends it as the user message.
     """
     text = checked_objective(objective)
+    try:
+        # The entry's only source for its step limit, which is also the gateway's call cap.
+        iterations = coding_max_iterations()
+    except ValueError:
+        raise CodingSandboxError("coding_max_iterations_invalid") from None
     labels: list[str] = []
     if job_id is not None:
         labels = ["--label", f"aether.coding={job_id}", "--label", "aether.role=coding", "--label", deployment_label(), "--label", instance_label()]
@@ -233,6 +239,8 @@ def container_arguments(
         "OPENHANDS_SUPPRESS_BANNER=1",
         "-e",
         f"AETHER_OBJECTIVE={text}",
+        "-e",
+        f"{CODING_ITERATIONS_ENV}={iterations}",
         *proxy,
         "-v",
         f"{workspace.resolve()}:/work:ro",

@@ -44,6 +44,8 @@ PROTOCOL = Path(os.environ.get("AETHER_SANDBOX_PROTOCOL", "/opt/aether/coding_pr
 # The sandbox's shared memory (the launcher sets /dev/shm). Required: the entry empties it after the
 # agent stopped, so it never guesses one (and never empties a directory nobody named).
 _SHM_ENV = "AETHER_SANDBOX_SHM"
+# The worker names the step limit (aether_domain.coding_limits, also the gateway's per-job call cap).
+_ITERATIONS_ENV = "AETHER_CODING_MAX_ITERATIONS"
 # Seconds past the protocol's own budget before the entry kills it (the protocol stops 3 s before it).
 _PROTOCOL_KILL_MARGIN_SECONDS = 5
 EXECUTOR = "openhands.sdk.Agent"
@@ -513,6 +515,21 @@ class ObjectiveMissing(RuntimeError):
     pass
 
 
+class IterationLimitInvalid(RuntimeError):
+    """The worker did not name a usable step limit: the agent is not started."""
+
+
+def iteration_limit() -> int:
+    """The agent's step limit, exactly as the worker named it. This file cannot import aether_domain and
+    keeps no default of its own, so the limit and the gateway's call cap never silently differ."""
+    raw = os.environ.get(_ITERATIONS_ENV, "")
+    if not raw:
+        raise IterationLimitInvalid("iteration_limit_missing")
+    if not (raw.isascii() and raw.isdigit()) or int(raw) < 1:
+        raise IterationLimitInvalid("iteration_limit_invalid")
+    return int(raw)
+
+
 def job_objective() -> str:
     """The job objective from the environment, unchanged. A missing or blank one is a runner failure."""
     objective = os.environ.get(_OBJECTIVE, "")
@@ -532,7 +549,7 @@ def system_prompt(job: Path) -> str:
     )
 
 
-def _run_agent(job: Path, objective: str) -> dict[str, object]:
+def _run_agent(job: Path, objective: str, iterations: int) -> dict[str, object]:
     report = _blank_report()
     socket_path = os.environ.get("AETHER_MODEL_SOCKET", "")
     token = os.environ.get("AETHER_JOB_TOKEN", "")
@@ -567,7 +584,7 @@ def _run_agent(job: Path, objective: str) -> dict[str, object]:
         conversation = Conversation(
             agent=agent,
             workspace=job,
-            max_iteration_per_run=4,
+            max_iteration_per_run=iterations,
             stuck_detection=False,
             visualizer=None,
             persistence_dir=state,
@@ -857,11 +874,12 @@ def main() -> None:
     try:
         become_subreaper()
         objective = job_objective()
+        iterations = iteration_limit()
         shared_memory = shared_memory_root()
         job = job_directory()
         copy_tree(WORK, job)
         before = _snapshot(job)
-        agent_report = _run_agent(job, objective)
+        agent_report = _run_agent(job, objective, iterations)
         stop_agent_processes()
         # No agent process is left to write it again: from here the candidate's shared memory is empty.
         clear_shared_memory(shared_memory)
@@ -896,6 +914,8 @@ def main() -> None:
         raise
     except ObjectiveMissing:
         emit(_failure("objective_missing"), 2)
+    except IterationLimitInvalid as exc:
+        emit(_failure(str(exc)), 2)
     except SharedMemoryUnavailable as exc:
         emit(_failure(str(exc)), 2)
     except PatchUnavailable as exc:

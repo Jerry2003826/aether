@@ -6,6 +6,7 @@ import json
 import os
 import sys
 
+from aether_domain.coding_limits import require_coding_limits
 from aether_gateway.model import GatewayDenied, ModelGateway
 from aether_storage.db import Database
 from aether_worker.role_http import serve_role
@@ -14,6 +15,7 @@ GATEWAY_CHAT_TIMEOUT_SECONDS = 30.0
 
 
 def main() -> None:
+    require_coding_limits()
     handed = _handoff()
     key = str(handed.get("provider_key") or "")
     worker_url = str(handed.get("worker_url") or "")

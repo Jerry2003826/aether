@@ -25,6 +25,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import DataError, IntegrityError
 
+from aether_domain.coding_limits import CODING_MAX_ITERATIONS, coding_max_iterations
 from aether_domain.security import sha256_text
 from aether_storage.budget import (
     add_call_cost,
@@ -43,7 +44,9 @@ litellm.suppress_debug_info = True
 COST_SOURCE = "local_price_estimate"
 PRICING_VERSION = f"litellm-{version('litellm')}"
 CODING_CALL_OUTPUT_CAP = 256
-CODING_MAX_MODEL_CALLS = 4
+# One agent iteration is one model call: the per-job call cap is the sandbox entry's iteration limit,
+# from the same config (aether_domain.coding_limits), so the two never silently differ.
+CODING_MAX_MODEL_CALLS = CODING_MAX_ITERATIONS
 # One upstream answer is read under one overall deadline and one byte cap. The per-read
 # socket timeout alone lets a slow drip (a byte now and then) hold a thread and its buffer.
 UPSTREAM_DEADLINE_SECONDS = 120.0
@@ -53,6 +56,11 @@ _UPSTREAM_READ_CHUNK = 65_536
 # more than two bytes per token for English and code, so this over-reserves; the
 # measured usage settles the difference after the call.
 INPUT_BYTES_PER_TOKEN = 2
+
+
+def coding_max_model_calls() -> int:
+    """The per-job coding-call cap: AETHER_CODING_MAX_ITERATIONS (default 30), the entry's iteration limit."""
+    return coding_max_iterations()
 
 
 def upstream_deadline_seconds() -> float:
@@ -1086,7 +1094,7 @@ class ModelGateway:
                 ),
                 {"project_id": project_id, "task_id": task_id, "prefix": parent_key + ":call:%"},
             ).scalar()
-            if int(used or 0) >= CODING_MAX_MODEL_CALLS:
+            if int(used or 0) >= coding_max_model_calls():
                 raise GatewayDenied("budget_exceeded")
             if int(used or 0) >= 1:
                 # The job's own reservation admitted one request, which covers its first call.
