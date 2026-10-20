@@ -675,3 +675,11 @@ def test_gateway_process_receives_the_live_alias_and_not_the_provider_key(monkey
     monkeypatch.delenv("AETHER_LIVE_MODEL_ALIAS")
     bare = _gateway_env("loop-token")
     assert "AETHER_LIVE_MODEL_ALIAS" not in bare
+
+
+_LIVE_ENV = ("AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_ALIAS", "AETHER_LIVE_MODEL_BASE")
+
+
+def test_relay_tests_do_not_see_host_live_key() -> None:
+    leaked = [name for name in _LIVE_ENV if os.environ.get(name)]
+    assert leaked == []
