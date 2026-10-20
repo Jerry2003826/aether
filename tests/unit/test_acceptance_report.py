@@ -264,3 +264,241 @@ def test_repository_status_cannot_promote_a_failed_junit(tmp_path: Path) -> None
     report = build_report(junit, ROOT / "STATUS.json")
     assert report["passed"] is False
     assert report["live_ready"] is False
+
+
+_SECTIONS = ("protocol", "coding", "research", "linux_isolation")
+_CONFIG = "b" * 64
+
+
+def _git(repo: Path, *args: str) -> str:
+    env = {
+        "GIT_AUTHOR_NAME": "t",
+        "GIT_AUTHOR_EMAIL": "t@example.invalid",
+        "GIT_COMMITTER_NAME": "t",
+        "GIT_COMMITTER_EMAIL": "t@example.invalid",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "PATH": "/usr/bin:/bin:/usr/local/bin",
+    }
+    done = subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True, text=True, env=env)
+    return done.stdout.strip()
+
+
+def _commit_all(repo: Path, message: str) -> str:
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-q", "-m", message)
+    return _git(repo, "rev-parse", "HEAD")
+
+
+def _sha(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+class _Chain:
+    """A git repo holding run evidence, an acceptance verdict and an owner approval.
+
+    Evidence is produced at commit ``evidence_commit``; the verdict and approval
+    are separate files committed afterwards. Only ``reports/f26_acceptance_result*.json``
+    and ``reports/HANDOFF.md`` are evidence-only paths; STATUS.json is not.
+    """
+
+    def __init__(
+        self,
+        tmp_path: Path,
+        *,
+        evidence: dict[str, object] | None = None,
+        verdict: dict[str, object] | None = None,
+        approval: dict[str, object] | None = None,
+        with_verdict: bool = True,
+        with_approval: bool = True,
+        status: dict[str, object] | None = None,
+    ) -> None:
+        self.tmp = tmp_path
+        self.repo = tmp_path / "repo"
+        (self.repo / "reports").mkdir(parents=True)
+        (self.repo / "src").mkdir()
+        _git(self.repo, "init", "-q")
+        self.status = self.repo / "STATUS.json"
+        body = status or {
+            "readiness": {"live_ready": "pending", "comparative_evidence": "not_run"},
+            "f15": {"status": "done", "product_enabled": False},
+            "f26": {"status": "done", "live_ready": False},
+        }
+        self.status.write_text(json.dumps(body), encoding="utf-8")
+        (self.repo / "src" / "app.py").write_text("VALUE = 1\n", encoding="utf-8")
+        (self.repo / "reports" / "HANDOFF.md").write_text("# handoff\n", encoding="utf-8")
+        self.evidence_commit = _commit_all(self.repo, "code")
+        short = self.evidence_commit[:7]
+        evidence_body: dict[str, object] = {
+            "status": "probed",
+            "live_ready": False,
+            "scripted_substitute": False,
+            "git_commit": self.evidence_commit,
+            **{name: {"status": "pass"} for name in _SECTIONS},
+        }
+        evidence_body.update(evidence or {})
+        self.evidence = self.repo / "reports" / f"f26_acceptance_result_{short}.json"
+        self.evidence.write_text(json.dumps(evidence_body), encoding="utf-8")
+        self.evidence_sha = _sha(self.evidence)
+        rel_evidence = f"reports/{self.evidence.name}"
+        verdict_body: dict[str, object] = {
+            "kind": "f26_acceptance_verdict",
+            "evidence": rel_evidence,
+            "evidence_sha256": self.evidence_sha,
+            "evidence_git_commit": self.evidence_commit,
+            "verdict": "passed",
+            "checks": {name: "pass" for name in _SECTIONS},
+        }
+        verdict_body.update(verdict or {})
+        self.verdict = self.repo / "reports" / f"f26_acceptance_result_{short}.verdict.json"
+        if with_verdict:
+            self.verdict.write_text(json.dumps(verdict_body), encoding="utf-8")
+            approval_body: dict[str, object] = {
+                "kind": "f26_owner_approval",
+                "verdict": f"reports/{self.verdict.name}",
+                "verdict_sha256": _sha(self.verdict),
+                "evidence_sha256": self.evidence_sha,
+                "approved": True,
+                "owner": "Jerry2003826",
+                "release_state": "approved",
+            }
+            approval_body.update(approval or {})
+            if with_approval:
+                approval_path = self.repo / "reports" / f"f26_acceptance_result_{short}.approval.json"
+                approval_path.write_text(json.dumps(approval_body), encoding="utf-8")
+        _commit_all(self.repo, "evidence")
+
+    def commit(self, message: str = "change") -> None:
+        _commit_all(self.repo, message)
+
+    def report(self, *, commit: str | None = None) -> dict[str, object]:
+        head = commit or _git(self.repo, "rev-parse", "HEAD")
+        junit = self.tmp / "junit.xml"
+        junit.write_text(
+            '<testsuite tests="1" failures="0" errors="0" skipped="0">'
+            "<properties>"
+            f'<property name="aether.git_commit" value="{head}"/>'
+            '<property name="aether.environment" value="synthetic"/>'
+            '<property name="aether.mode" value="live"/>'
+            f'<property name="aether.config_sha256" value="{_CONFIG}"/>'
+            f'<property name="aether.artifact.acceptance" value="{self.evidence_sha}"/>'
+            '<property name="aether.required_cases" value="mod::ok"/>'
+            "</properties>"
+            '<testcase classname="mod" name="ok"/>'
+            "</testsuite>",
+            encoding="utf-8",
+        )
+        binding = {
+            "git_commit": head,
+            "environment": "synthetic",
+            "mode": "live",
+            "config_sha256": _CONFIG,
+            "artifact_hashes": {"junit": _sha(junit), "acceptance": self.evidence_sha},
+        }
+        return build_report(junit, self.status, binding=binding)
+
+
+def test_evidence_verdict_and_owner_approval_bound_to_current_commit_is_live_ready(tmp_path: Path) -> None:
+    report = _Chain(tmp_path).report()
+    assert report["passed"] is True
+    assert report["binding_consistent"] is True
+    assert report["live_ready"] is True
+    assert report["live_ready_state"] == "passed"
+
+
+def test_change_outside_evidence_whitelist_resets_live_ready_to_pending(tmp_path: Path) -> None:
+    outside = {
+        "status_json": ("STATUS.json", '{"readiness": {}, "f26": {"status": "done"}}'),
+        "source": ("src/app.py", "VALUE = 2\n"),
+        "other_report": ("reports/f27_result.json", "{}"),
+        "nested_lookalike": ("reports/f26_acceptance_result_x/inner.json", "{}"),
+        "root_lookalike": ("f26_acceptance_result_x.json", "{}"),
+    }
+    for name, (relative, text) in outside.items():
+        chain = _Chain(tmp_path / name)
+        assert chain.report()["live_ready_state"] == "passed", name
+        target = chain.repo / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        uncommitted = chain.report(commit=_git(chain.repo, "rev-parse", "HEAD"))
+        assert uncommitted["live_ready"] is False, name
+        assert uncommitted["live_ready_state"] == "pending", name
+        chain.commit(name)
+        report = chain.report()
+        assert report["live_ready"] is False, name
+        assert report["live_ready_state"] == "pending", name
+
+
+def test_change_inside_evidence_whitelist_keeps_evidence(tmp_path: Path) -> None:
+    chain = _Chain(tmp_path)
+    (chain.repo / "reports" / "HANDOFF.md").write_text("# handoff\n\nupdated\n", encoding="utf-8")
+    (chain.repo / "reports" / "f26_acceptance_result_old.json").write_text("{}", encoding="utf-8")
+    chain.commit("record")
+    report = chain.report()
+    assert report["live_ready"] is True
+    assert report["live_ready_state"] == "passed"
+
+
+def test_hand_edited_status_live_ready_true_fails_acceptance(tmp_path: Path) -> None:
+    claimed = {
+        "readiness": {"live_ready": "passed", "comparative_evidence": "not_run"},
+        "f15": {"status": "done", "product_enabled": False},
+        "f26": {"status": "done", "live_ready": True, "acceptance_head": "x"},
+    }
+    self_certified = _Chain(tmp_path / "self_certified", evidence={"live_ready": True}, with_verdict=False)
+    pointed = dict(claimed)
+    pointed["f26"] = {
+        "status": "done",
+        "live_ready": True,
+        "acceptance_head": self_certified.evidence_commit[:7],
+        "acceptance_result": f"reports/{self_certified.evidence.name}",
+    }
+    self_certified.status.write_text(json.dumps(pointed), encoding="utf-8")
+    report = self_certified.report(commit=self_certified.evidence_commit)
+    assert report["live_ready"] is False
+    assert report["live_ready_state"] == "pending"
+
+    no_chain = _Chain(tmp_path / "no_chain", status=claimed, with_verdict=False)
+    report = no_chain.report()
+    assert report["passed"] is True
+    assert report["live_ready"] is False
+    assert report["live_ready_state"] == "pending"
+
+    edited = _Chain(tmp_path / "edited")
+    edited.status.write_text(json.dumps(claimed), encoding="utf-8")
+    edited.commit("hand edit")
+    report = edited.report()
+    assert report["live_ready"] is False
+    assert report["live_ready_state"] == "pending"
+
+
+def test_chain_rejects_any_broken_link(tmp_path: Path) -> None:
+    cases: dict[str, dict[str, object]] = {
+        "no_approval": {"with_approval": False},
+        "no_verdict": {"with_verdict": False},
+        "evidence_not_probed": {"evidence": {"status": "failed"}},
+        "evidence_scripted": {"evidence": {"scripted_substitute": True}},
+        "evidence_section_failed": {"evidence": {"research": {"status": "fail"}}},
+        "evidence_short_commit": {"evidence": {"git_commit": "abc1234"}},
+        "verdict_wrong_evidence_hash": {"verdict": {"evidence_sha256": "e" * 64}},
+        "verdict_wrong_commit": {"verdict": {"evidence_git_commit": "c" * 40}},
+        "verdict_wrong_path": {"verdict": {"evidence": "reports/f26_acceptance_result.json"}},
+        "verdict_not_passed": {"verdict": {"verdict": "failed"}},
+        "verdict_checks_disagree": {"verdict": {"checks": {"protocol": "pass", "coding": "pass", "research": "pass"}}},
+        "approval_wrong_verdict_hash": {"approval": {"verdict_sha256": "e" * 64}},
+        "approval_wrong_evidence_hash": {"approval": {"evidence_sha256": "e" * 64}},
+        "approval_not_approved": {"approval": {"approved": False}},
+        "approval_release_pending": {"approval": {"release_state": "pending"}},
+        "approval_no_owner": {"approval": {"owner": ""}},
+    }
+    for name, overrides in cases.items():
+        report = _Chain(tmp_path / name, **overrides).report()  # type: ignore[arg-type]
+        assert report["live_ready"] is False, name
+        assert report["live_ready_state"] == "pending", name
+
+
+def test_chain_still_checks_binding_commit_and_ancestry(tmp_path: Path) -> None:
+    chain = _Chain(tmp_path)
+    assert chain.report(commit="c" * 40)["live_ready"] is False
+    before = _Chain(tmp_path / "before")
+    assert before.report(commit=before.evidence_commit)["live_ready"] is False
