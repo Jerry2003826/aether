@@ -1,5 +1,26 @@
 # 交接
 
+## F26 正式验收重跑（head `27cfc9f`，PR #31）
+
+2026-10-20 14:44（墨尔本时间，UTC 03:44），监督者在 `27cfc9fe0e2281941864120de9feea3409ceb19e` 上用真实 key 运行：
+
+```sh
+cd environments/openhands && uv sync --locked --no-build
+cd ../ml && uv sync --frozen
+docker pull python:3.12-alpine
+cd ../..
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+# AETHER_LIVE_MODEL_KEY 只在进程环境里，不写入任何文件
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
+
+退出码 0，`status=probed`，`scripted_substitute=false`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁（baseline 退出码 1，打补丁后 0）和 Linux 隔离四项都是 pass，`error` 为 null。3 次调用，合计 1137 token（输入 801，输出 336），上限是 8 次、20000 token。`cost_status` 是 unknown。比较报告 sha256 是 `ff2f43a69f1f2c81c5d21c128bcad4c7e53c36487352022fe021a9223a446649`，completion 263 token。`checker_sha256` 与 `snapshot_sha256` 和 `27cfc9f` 上现算的值一致。结果、日志和仓库 `reports/`、`secrets/` 的 key grep 计数为 0。
+
+脚本原样生成的结果逐字节保存为 `reports/f26_acceptance_result_27cfc9f.json`，sha256 是 `68c5394a0331e4a389d3caef4544c00ddb8d11e657f03923d16b5c7658a3a428`。`reports/f26_acceptance_result.json` 保持 `d694f89` 的历史版本，`STATUS.json` 不改。
+
+`live_ready` 由所有者决定保持 pending。`acceptance_report` 的判定要求结果文件自身 `live_ready` 为 true（脚本不自证，永远写 false），并且结果的 `git_commit` 等于当前提交，这与所有者写回提交冲突。判定代码留到下一轮修。`semantic_support` 仍是 not_judged，`comparative_evidence` 仍是 not_run。
+
 ## R8-B 开源库替换（分支 `cursor/r8-b-open-source-replacements-68cf`）
 
 基线已变基到 `origin/main` 的 `ab1ebef`。采集解析是已合并的 ADR-F41，威胁情报浏览器是已合并的 ADR-F43，本决定记为 ADR-F42。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 或 `f27.live_ready` 改成 passed。`f27.codegraph_enabled` 改为 true：锁文件 `product_enabled` 已是 true，`readiness.codegraph_enabled` 已是 passed，证据是 `reports/f15_product_result.json`。
