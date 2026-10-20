@@ -208,7 +208,7 @@ export AETHER_LIVE_MODEL_KEY='只放在本机环境里'
 uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
 ```
 
-`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 为 0，`failed` 为 1，`blocked` 为 2，`incomplete` 为 3。硬上限是 8 次补全、累计 20000 token、单次输出最多 512 token。供应商没有返回费用时 `cost_status` 为 `unknown`。验收步骤、引用规则和已记录结果见 [`reports/f26_criteria.md`](reports/f26_criteria.md)。
+`--out` 只接受相对路径 `reports/f26_acceptance_result.json`，或当前 HEAD 前缀命名的证据文件 `reports/f26_acceptance_result_<HEAD 前缀>.json`（ADR-F50）。退出码：`probed` 为 0，`failed` 为 1，`blocked` 为 2，`incomplete` 为 3。硬上限是 8 次补全、累计 20000 token、单次输出最多 512 token。供应商没有返回费用时 `cost_status` 为 `unknown`。验收步骤、引用规则和已记录结果见 [`reports/f26_criteria.md`](reports/f26_criteria.md)。
 
 ### `scripts/run_live_task_check.py`
 

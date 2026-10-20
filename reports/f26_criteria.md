@@ -32,7 +32,7 @@ export AETHER_LIVE_MODEL_KEY=...
 uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
 ```
 
-`--out` 只接受相对路径 `reports/f26_acceptance_result.json`。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。
+`--out` 只接受相对路径 `reports/f26_acceptance_result.json`，或当前 HEAD 前缀命名的证据文件 `reports/f26_acceptance_result_<HEAD 前缀>.json`（ADR-F50）。退出码：`probed` 是 0，`failed` 是 1，`blocked` 是 2，`incomplete` 是 3。
 
 硬上限是 8 次 chat completion、累计 20000 token。编码和协议调用单次输出最多 512 token。研究报告单次输出最多 2048 token（ADR-F28）：512 会在写完两条 sha256 引用之前被截断。20000 token 即使按每百万 token 10 美元计也是 0.20 美元，低于 1 美元。8 次研究上限也是 16384 token，仍低于累计上限。供应商没有返回费用时 `cost_status` 是 `unknown`，不估一个账单。到顶就停，不能记成通过。key 只留在监督者机器上，不进虚拟机，不进 GitHub secrets，不进日志，也不进 OpenHands 进程。job 只拿本机网关的 token。
 
