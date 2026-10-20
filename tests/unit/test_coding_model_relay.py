@@ -11,6 +11,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import cast
 
+import pytest
+
 from aether_gateway.__main__ import GATEWAY_CHAT_TIMEOUT_SECONDS, gateway_timeout
 from aether_gateway.model import (
     CODING_CALL_OUTPUT_CAP,
@@ -25,6 +27,14 @@ from aether_gateway.model import (
 from aether_worker.role_launch import _gateway_env
 from aether_storage.db import Database
 from aether_worker.coding_model_proxy import CodingModelProxy
+
+_LIVE_ENV = ("AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_ALIAS", "AETHER_LIVE_MODEL_BASE")
+
+
+@pytest.fixture(autouse=True)
+def _no_host_live_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in _LIVE_ENV:
+        monkeypatch.delenv(name, raising=False)
 
 def test_per_call_reserve_grows_by_the_shortfall_and_legacy_rows_do_not() -> None:
     assert coding_reservation_gap(reserved_tokens=256, measured_tokens=5, pending_tokens=0, call_reserve_tokens=None) is None
@@ -675,9 +685,6 @@ def test_gateway_process_receives_the_live_alias_and_not_the_provider_key(monkey
     monkeypatch.delenv("AETHER_LIVE_MODEL_ALIAS")
     bare = _gateway_env("loop-token")
     assert "AETHER_LIVE_MODEL_ALIAS" not in bare
-
-
-_LIVE_ENV = ("AETHER_LIVE_MODEL_KEY", "AETHER_LIVE_MODEL_ALIAS", "AETHER_LIVE_MODEL_BASE")
 
 
 def test_relay_tests_do_not_see_host_live_key() -> None:
