@@ -529,6 +529,7 @@ _BASELINE_ENV = "AETHER_PROTOCOL_BASELINE_DIR"
 _SHM_ENV = "AETHER_PROTOCOL_SHM_DIR"
 _SHM_UNCONFIGURED = "shared_memory_unconfigured"
 _TEST_TIMEOUT_ENV = "AETHER_PROTOCOL_TEST_TIMEOUT_SECONDS"
+_COLLECT_TIMEOUT_ENV = "AETHER_PROTOCOL_COLLECT_TIMEOUT_SECONDS"
 # The whole run's limit, set by the sandbox entry from the same formula (grading_files.protocol_timeout_seconds).
 _BUDGET_ENV = "AETHER_PROTOCOL_BUDGET_SECONDS"
 _RESULT_MARGIN_SECONDS = 3.0
@@ -1690,6 +1691,11 @@ def _test_timeout() -> float:
     return _seconds(_TEST_TIMEOUT_ENV, grading_files.PROTOCOL_TEST_TIMEOUT_SECONDS, grading_files.PROTOCOL_TEST_TIMEOUT_SECONDS)
 
 
+def _collect_timeout() -> float:
+    ceiling = grading_files.PROTOCOL_COLLECT_TIMEOUT_SECONDS
+    return _seconds(_COLLECT_TIMEOUT_ENV, ceiling, ceiling)
+
+
 def _call_timeout(test_timeout: float) -> float:
     """One call into candidate code ends before its test process does, so a hang is reported as such."""
     configured = _seconds(_CALL_TIMEOUT_ENV, grading_files.PROTOCOL_CALL_TIMEOUT_SECONDS, grading_files.PROTOCOL_CALL_TIMEOUT_SECONDS)
@@ -1966,12 +1972,13 @@ def _run_in_child(
     step_timeout: float,
     deadline: float,
     candidate: tuple[dict[str, bytes], list[str], str],
+    collect_timeout: float,
 ) -> tuple[list[dict[str, object]], str]:
     """Run one step (a pytest session over one test module) in a fresh test process.
 
     Returns the replies it sent, in order, and how it ended: "done", "restart" (its candidate process
     died; the remaining tests need a fresh one), "timeout" (no reply within `step_timeout` of the last,
-    or the run's deadline passed) or "no_result" (a crash, an early exit, a malformed message).
+    or the run's deadline passed; the first reply has `collect_timeout` from the start instead) or "no_result" (a crash, an early exit, a malformed message).
 
     Replies arrive on a pipe only that process holds, never on stdout. The test process runs trusted
     test code only; candidate code runs in its own process behind it, in a fresh candidate directory
@@ -1982,13 +1989,13 @@ def _run_in_child(
     except OSError:
         return [], "no_result"
     try:
-        return _run_test_process(root, {**request, "sandbox": sandbox}, step_timeout, deadline)
+        return _run_test_process(root, {**request, "sandbox": sandbox}, step_timeout, deadline, collect_timeout)
     finally:
         _remove_tree(sandbox["top"])
 
 
 def _run_test_process(
-    root: Path, request: dict[str, object], step_timeout: float, deadline: float
+    root: Path, request: dict[str, object], step_timeout: float, deadline: float, collect_timeout: float
 ) -> tuple[list[dict[str, object]], str]:
     request_read, request_write = os.pipe()
     reply_read, reply_write = os.pipe()
@@ -2027,7 +2034,9 @@ def _run_test_process(
         request_write = -1
         while len(replies) < _MAX_REPLIES:
             # Every test gets its own limit, counted from the previous reply; the run's deadline caps it.
-            reply = _receive(reply_read, min(time.monotonic() + step_timeout, deadline))
+            # The first reply (start-up and collection) has its own limit, not one test's (ADR-F52).
+            limit = step_timeout if replies else collect_timeout
+            reply = _receive(reply_read, min(time.monotonic() + limit, deadline))
             if not isinstance(reply, dict):
                 break
             kind = reply.get("kind")
@@ -2097,6 +2106,7 @@ def _grade_module(
     deadline: float,
     candidate: tuple[dict[str, bytes], list[str], str],
     tampered,
+    collect_timeout: float,
 ) -> list[tuple[str, str, str]] | None:
     """(test name, verdict, detail) for one test module, or None when grading files were tampered with.
 
@@ -2119,6 +2129,7 @@ def _grade_module(
             test_timeout,
             deadline,
             candidate,
+            collect_timeout,
         )
         progressed = False
         for reply in replies:
@@ -2139,6 +2150,10 @@ def _grade_module(
                     progressed = True
         if order is None:
             # The module never got as far as its tests.
+            if module_failure is None and ending == "timeout" and (declared or unsupported):
+                # Collection ran out of time: the tests the baseline declares are timed-out failures,
+                # listed one by one, never dropped from the result (ADR-F52).
+                return [(name, "FAIL", "timeout") for name in sorted({*declared, *unsupported})]
             if module_failure is None:
                 module_failure = ("FAIL", "import:" + ("timeout" if ending == "timeout" else "no_result"))
             break
@@ -2210,6 +2225,7 @@ def run_suite(root: Path) -> dict[str, Any]:
     declared_by_module = {relative: grading_files.declared_tests(sources[relative]) or ([], {}) for relative, _, _ in tests}
     deadline = _deadline(sum(1 + len(ids) for ids, _ in declared_by_module.values()))
     test_timeout = _test_timeout()
+    collect_timeout = _collect_timeout()
     call_timeout = _call_timeout(test_timeout)
     tampered = False
 
@@ -2241,7 +2257,7 @@ def run_suite(root: Path) -> dict[str, Any]:
             # The baseline conftests this module's tests run with (see _trusted_conftests).
             "conftests": [[name, base64.b64encode(data).decode("ascii")] for name, data in conftests[relative]],
         }
-        outcome = _grade_module(root, request, declared, unsupported, test_timeout, deadline, candidate, lambda: _tampered(root, baseline))
+        outcome = _grade_module(root, request, declared, unsupported, test_timeout, deadline, candidate, lambda: _tampered(root, baseline), collect_timeout)
         if outcome is None:
             tampered = True
             break
