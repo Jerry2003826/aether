@@ -1056,6 +1056,14 @@ skills先加载name/description，再读取被选中的指令，再按需读取�
 | ADR-F50 | F26 live_ready 由运行证据、验收结论、所有者批准三条记录算出，证据白名单之外的改动让它回到 pending | 2026-10-21：r11 GPT 审核第 1 条，白名单由所有者拍板。`build_report` 不再读 STATUS.json 的 `readiness.live_ready`、`f26.live_ready`、`f26.acceptance_head`、`f26.acceptance_result`；手改 STATUS 不能让 live_ready 成立。三条记录都放在 `reports/f26_acceptance_result*.json`：运行证据（`status=probed`、`scripted_substitute=false`、四项 `pass`、完整 40 位 `git_commit`；自己的 `live_ready` 不起作用）→ 验收结论（`kind=f26_acceptance_verdict`，写明证据路径、sha256、完整 commit、`verdict=passed`，`checks` 与证据四项一致）→ 所有者批准（`kind=f26_owner_approval`，写明结论路径与 sha256、证据 sha256、`approved=true`、`release_state=approved`、非空 `owner`）。结论、批准各只能有一条匹配。证据白名单只有 `reports/f26_acceptance_result*.json`（`reports/` 下一层）和 `reports/HANDOFF.md`，不含 STATUS.json。证据 commit 必须是当前 commit 的祖先，`git diff` 与未跟踪文件里出现任何白名单外的路径，`live_ready_state` 都回到 `pending`。保留的校验：JUnit 计数与必需用例、绑定的 commit/环境/模式/配置哈希/产物哈希与 JUnit 属性一致、证据文件 sha256 等于绑定的 `acceptance` 哈希；新增：工作区 HEAD 必须等于绑定 commit、证据 commit 必须是祖先。去掉的只有对 STATUS 字段的读取，以及“结果文件 `live_ready: true` 就自证”的路径（`test_live_ready_requires_matching_current_binding` 的正向断言随之改为 false）。没有改 F26 验收条件，没有新增结论或批准文件，`STATUS.json` 仍是 pending |
 | ADR-F51 | 技能提升量按同一组任务前后配对比较：McNemar 精确检验加固定种子的配对 bootstrap，保留逐任务结果 | 2026-10-21：r11 GPT 审核第 2 条（skill_metrics Wilson），配对方案由所有者拍板。原先 `ci_lower` 是候选通过率的 Wilson 下界减去基线点估计，既不是提升的区间，也没有用到配对信息。现在 `metrics_from_grades` 按 family 把基线和候选结果配成一对：`success_delta` 是两边通过率之差；显著性用 statsmodels `mcnemar(exact=True)`，只看不一致的两格（`discordant.baseline_only` / `candidate_only`），写入 `p_value`；`ci_lower`/`ci_upper` 是 SciPy `bootstrap(paired=True, method="BCa")` 对逐任务差值均值的 95% 区间，种子 `20261021`、重采样 9999 次，所有差值相同时区间退化为该值。结果里保留 `paired`（每个 family 的 index、名字、基线、候选）。安全失败的 family 按候选失败计。数据集每个 case 可写 `baseline_pass`，要么全写要么都不写，和 `baseline_passes` 计数不一致时 `dataset_invalid`；只给计数时只有 0 或全部通过能配对，其余是 `baseline_unpaired`。依赖照现有方式钉在 `pyproject.toml`：`scipy==1.18.1`（原已在锁里，作为间接依赖）、`statsmodels==0.15.0`，`uv.lock` 只有新增。晋升门槛 `THRESHOLDS` 和 `judge` 没改。不改变 `live_ready` |
 
+## 取代关系
+
+上表各行保留原文，不回改。下面只登记被取代的决定。
+
+| 被取代 | 取代者 | 范围 |
+|---|---|---|
+| ADR-F32 | ADR-F50 | F32 中 `live_ready` 的判定方式（要求结果文件自身 `live_ready` 为 true、并读取 STATUS 引用的验收结果与 `acceptance_head`）已被 F50 的“运行证据→验收结论→所有者批准”三条记录与证据白名单取代。F32 的 JUnit 计数与绑定哈希校验、候选快照不跟随符号链接等其余内容仍然有效 |
+
 
 ---
 
