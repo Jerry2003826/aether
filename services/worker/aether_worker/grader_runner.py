@@ -110,6 +110,7 @@ _GRADER_TEMPLATE = r"""
 import ast, json, os, signal, stat, subprocess, sys
 import xml.etree.ElementTree as ElementTree
 from pathlib import Path
+from xml.parsers import expat
 
 NOBODY = 65534
 REPORT_LIMIT = 4 * 1024 * 1024
@@ -291,9 +292,28 @@ def grade_pytest():
     data = read_report(report)
     if data is None:
         return {"ok": False, "reason": "report_missing", "exit_code": exit_code, "tests": 0}
+    return judge_report(data, required, exit_code)
+
+
+def parse_report(data):
+    # pytest never writes a DOCTYPE. Refuse any DTD or entity declaration in an expat pass
+    # before ElementTree sees the bytes, so no entity is expanded and nothing external is read.
+    def refuse(*_args):
+        raise ValueError("junit_dtd_refused")
+
+    guard = expat.ParserCreate()
+    guard.StartDoctypeDeclHandler = refuse
+    guard.EntityDeclHandler = refuse
+    guard.UnparsedEntityDeclHandler = refuse
+    guard.ExternalEntityRefHandler = refuse
+    guard.Parse(data, True)
+    return ElementTree.fromstring(data)
+
+
+def judge_report(data, required, exit_code):
     try:
-        root = ElementTree.fromstring(data)
-    except ElementTree.ParseError:
+        root = parse_report(data)
+    except (ValueError, expat.ExpatError, ElementTree.ParseError):
         return {"ok": False, "reason": "report_unreadable", "exit_code": exit_code, "tests": 0}
     total = 0
     passed = set()
