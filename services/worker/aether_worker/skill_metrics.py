@@ -141,16 +141,19 @@ def _paired_bootstrap(baseline: list[bool], candidate: list[bool]) -> tuple[floa
         return value, value
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        result = bootstrap(
-            (np.asarray(baseline, dtype=float), np.asarray(candidate, dtype=float)),
-            lambda base, cand, axis=-1: np.mean(cand - base, axis=axis),
-            paired=True,
-            vectorized=True,
-            n_resamples=BOOTSTRAP_RESAMPLES,
-            confidence_level=CONFIDENCE_LEVEL,
-            method="BCa",
-            rng=np.random.default_rng(BOOTSTRAP_SEED),
-        )
+        try:
+            result = bootstrap(
+                (np.asarray(baseline, dtype=float), np.asarray(candidate, dtype=float)),
+                lambda base, cand, axis=-1: np.mean(cand - base, axis=axis),
+                paired=True,
+                vectorized=True,
+                n_resamples=BOOTSTRAP_RESAMPLES,
+                confidence_level=CONFIDENCE_LEVEL,
+                method="BCa",
+                rng=np.random.default_rng(BOOTSTRAP_SEED),
+            )
+        except (Warning, ValueError, FloatingPointError) as exc:
+            raise SkillEvalError("non_finite") from exc
     low = float(result.confidence_interval.low)
     high = float(result.confidence_interval.high)
     if not (math.isfinite(low) and math.isfinite(high)):
