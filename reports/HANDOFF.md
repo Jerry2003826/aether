@@ -19,6 +19,8 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 
 脚本原样生成的结果逐字节保存为 `reports/f26_acceptance_result_27cfc9f.json`，sha256 是 `68c5394a0331e4a389d3caef4544c00ddb8d11e657f03923d16b5c7658a3a428`。`reports/f26_acceptance_result.json` 保持 `d694f89` 的历史版本，`STATUS.json` 不改。
 
+F26 输出路径（ADR-F50）：`scripts/run_f26_acceptance.py --out` 仍只接受 `reports/f26_acceptance_result.json`，脚本只写这一个路径。要入库作为证据时，把脚本原样生成的文件逐字节另存为 `reports/f26_acceptance_result_<短 commit>.json`（例如上面的 `reports/f26_acceptance_result_27cfc9f.json`），并把 `reports/f26_acceptance_result.json` 恢复成原来的历史版本。验收结论写成同目录的 `f26_acceptance_result_<短 commit>.verdict.json`，所有者批准写成 `f26_acceptance_result_<短 commit>.approval.json`。证据白名单只有 `reports/f26_acceptance_result*.json` 和本文件；证据之后改了白名单以外的任何文件（包括 `STATUS.json`），`live_ready` 都回到 pending，需要在新 commit 上重跑。
+
 `live_ready` 由所有者决定保持 pending。`acceptance_report` 的判定要求结果文件自身 `live_ready` 为 true（脚本不自证，永远写 false），并且结果的 `git_commit` 等于当前提交，这与所有者写回提交冲突。判定代码留到下一轮修。`semantic_support` 仍是 not_judged，`comparative_evidence` 仍是 not_run。
 
 ## R8-B 开源库替换（分支 `cursor/r8-b-open-source-replacements-68cf`）

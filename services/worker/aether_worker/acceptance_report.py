@@ -5,14 +5,26 @@ and no failures, errors, or missing required cases. ``live_ready`` additionally
 requires a binding that matches this JUnit, the referenced acceptance result,
 and the current commit, environment, mode, config, and artifact hashes.
 A stale ``live_ready: passed`` in STATUS cannot fill in missing or failed evidence.
+
+F26 readiness is computed from three separate records, never read from STATUS:
+run evidence (``reports/f26_acceptance_result*.json``, which never certifies
+itself), an acceptance verdict that names the evidence by path, sha256 and full
+commit, and an owner approval that names the verdict and evidence by sha256.
+The evidence commit must be an ancestor of the current commit, and the only
+paths allowed to differ between them are the evidence whitelist
+(``reports/f26_acceptance_result*.json`` and ``reports/HANDOFF.md``). Any other
+change, STATUS.json included, sends ``live_ready_state`` back to ``pending``.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
+import subprocess
 from collections.abc import Mapping, Sequence
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any
 
@@ -23,6 +35,11 @@ from aether_worker.snapshot import SnapshotRejected, read_regular
 
 _HEX64 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{7,40}$")
+_FULL_COMMIT = re.compile(r"^[0-9a-f]{40}$")
+_EVIDENCE_DIR = "reports"
+_EVIDENCE_GLOB = "f26_acceptance_result*.json"
+_EVIDENCE_FILES = frozenset({"reports/HANDOFF.md"})
+_SECTIONS = ("protocol", "coding", "research", "linux_isolation")
 
 
 def _local(tag: str) -> str:
@@ -179,27 +196,110 @@ def _load_status(status_path: Path) -> dict[str, Any]:
     return status
 
 
-def _load_result(status: Mapping[str, Any], status_path: Path) -> tuple[dict[str, Any] | None, bytes | None]:
-    f26 = status.get("f26")
-    if not isinstance(f26, dict):
-        return None, None
-    relative = f26.get("acceptance_result")
-    if not isinstance(relative, str) or not relative:
-        return None, None
-    path = Path(relative)
-    if path.is_absolute():
-        return None, None
+def is_evidence_path(relative: str) -> bool:
+    """True only for the F26 evidence whitelist; STATUS.json is not on it."""
+    if relative in _EVIDENCE_FILES:
+        return True
+    parts = relative.split("/")
+    return len(parts) == 2 and parts[0] == _EVIDENCE_DIR and fnmatchcase(parts[1], _EVIDENCE_GLOB)
+
+
+def _evidence_records(root: Path) -> list[tuple[str, dict[str, Any], str]]:
+    """Every regular ``reports/f26_acceptance_result*.json`` as (path, body, sha256)."""
+    folder = root / _EVIDENCE_DIR
     try:
-        data = read_regular(status_path.parent, path.parts)
-    except SnapshotRejected:
-        return None, None
+        names = sorted(entry.name for entry in os.scandir(folder) if fnmatchcase(entry.name, _EVIDENCE_GLOB))
+    except OSError:
+        return []
+    records: list[tuple[str, dict[str, Any], str]] = []
+    for name in names:
+        try:
+            data = read_regular(root, (_EVIDENCE_DIR, name))
+            body = json.loads(data)
+        except (SnapshotRejected, ValueError, OSError):
+            continue
+        if isinstance(body, dict):
+            records.append((f"{_EVIDENCE_DIR}/{name}", body, hashlib.sha256(data).hexdigest()))
+    return records
+
+
+def _git(root: Path, *args: str) -> subprocess.CompletedProcess[bytes] | None:
+    env = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}
     try:
-        body = json.loads(data)
-    except ValueError:
-        return None, None
-    if not isinstance(body, dict):
-        return None, None
-    return body, data
+        return subprocess.run(["git", "-C", str(root), *args], capture_output=True, env=env, timeout=60, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+
+
+def _only_evidence_changed(root: Path, evidence_commit: str, current_commit: str) -> bool:
+    head = _git(root, "rev-parse", "--verify", "HEAD^{commit}")
+    if head is None or head.returncode != 0 or head.stdout.decode().strip() != current_commit:
+        return False
+    ancestor = _git(root, "merge-base", "--is-ancestor", evidence_commit, current_commit)
+    if ancestor is None or ancestor.returncode != 0:
+        return False
+    changed = _git(root, "diff", "--no-renames", "--name-only", "-z", evidence_commit, "--")
+    untracked = _git(root, "ls-files", "--others", "--exclude-standard", "-z")
+    if changed is None or untracked is None or changed.returncode != 0 or untracked.returncode != 0:
+        return False
+    paths = [item for item in (changed.stdout + untracked.stdout).decode("utf-8", "surrogateescape").split("\0") if item]
+    return all(is_evidence_path(path) for path in paths)
+
+
+def _evidence_passed(evidence: Mapping[str, Any]) -> dict[str, str] | None:
+    if evidence.get("status") != "probed" or evidence.get("scripted_substitute") is not False:
+        return None
+    commit = evidence.get("git_commit")
+    if not isinstance(commit, str) or _FULL_COMMIT.fullmatch(commit) is None:
+        return None
+    sections: dict[str, str] = {}
+    for name in _SECTIONS:
+        section = evidence.get(name)
+        if not isinstance(section, Mapping) or section.get("status") != "pass":
+            return None
+        sections[name] = "pass"
+    return sections
+
+
+def _chain_matches(root: Path, acceptance_sha256: str, current_commit: str) -> bool:
+    """Run evidence -> acceptance verdict -> owner approval, each bound by sha256."""
+    records = _evidence_records(root)
+    evidence = [record for record in records if record[2] == acceptance_sha256 and record[1].get("kind") is None]
+    if len(evidence) != 1:
+        return False
+    evidence_path, evidence_body, evidence_sha256 = evidence[0]
+    sections = _evidence_passed(evidence_body)
+    if sections is None:
+        return False
+    evidence_commit = evidence_body["git_commit"]
+    verdicts = [
+        record
+        for record in records
+        if record[1].get("kind") == "f26_acceptance_verdict"
+        and record[1].get("evidence") == evidence_path
+        and record[1].get("evidence_sha256") == evidence_sha256
+        and record[1].get("evidence_git_commit") == evidence_commit
+        and record[1].get("verdict") == "passed"
+        and record[1].get("checks") == sections
+    ]
+    if len(verdicts) != 1:
+        return False
+    verdict_path, _, verdict_sha256 = verdicts[0]
+    approvals = [
+        record
+        for record in records
+        if record[1].get("kind") == "f26_owner_approval"
+        and record[1].get("verdict") == verdict_path
+        and record[1].get("verdict_sha256") == verdict_sha256
+        and record[1].get("evidence_sha256") == evidence_sha256
+        and record[1].get("approved") is True
+        and record[1].get("release_state") == "approved"
+        and isinstance(record[1].get("owner"), str)
+        and bool(record[1]["owner"].strip())
+    ]
+    if len(approvals) != 1:
+        return False
+    return _only_evidence_changed(root, evidence_commit, current_commit)
 
 
 def _text(binding: Mapping[str, Any], key: str) -> str | None:
@@ -251,36 +351,22 @@ def _properties_match(properties: Mapping[str, str], identity: tuple[str, str, s
     return all(properties.get(f"aether.artifact.{key}") == digest for key, digest in artifacts.items() if key != "junit")
 
 
-def _result_matches(status: Mapping[str, Any], result_body: Mapping[str, Any], result_bytes: bytes, identity: tuple[str, str, str, str, dict[str, str]]) -> bool:
-    commit = identity[0]
-    acceptance = identity[4].get("acceptance")
-    if acceptance is None or hashlib.sha256(result_bytes).hexdigest() != acceptance:
-        return False
-    readiness = status.get("readiness") if isinstance(status.get("readiness"), dict) else {}
-    f26 = status.get("f26") if isinstance(status.get("f26"), dict) else {}
-    head = f26.get("acceptance_head")
-    if readiness.get("live_ready") != "passed" or f26.get("live_ready") is not True:
-        return False
-    if not isinstance(head, str) or not commit.startswith(head):
-        return False
-    return result_body.get("git_commit") == commit and result_body.get("live_ready") is True
-
-
 def _binding_consistent(
     binding: Mapping[str, Any] | None,
     *,
     properties: Mapping[str, str],
     junit: bytes,
-    status: Mapping[str, Any],
-    result_body: Mapping[str, Any] | None,
-    result_bytes: bytes | None,
+    root: Path,
 ) -> bool:
-    if binding is None or result_body is None or result_bytes is None:
+    if binding is None:
         return False
     identity = _identity(binding)
     if identity is None or not _properties_match(properties, identity, junit):
         return False
-    return _result_matches(status, result_body, result_bytes, identity)
+    acceptance = identity[4].get("acceptance")
+    if acceptance is None:
+        return False
+    return _chain_matches(root, acceptance, identity[0])
 
 
 def _status_fields(status: Mapping[str, Any]) -> tuple[list[str], list[str], bool, str]:
@@ -315,14 +401,11 @@ def build_report(
         parsed = _empty_parse()
     else:
         parsed = _counts(root, required_cases)
-    result_body, result_bytes = (None, None) if binding is None else _load_result(status, status_path)
     consistent_binding = _binding_consistent(
         binding,
         properties=parsed["properties"],
         junit=junit,
-        status=status,
-        result_body=result_body,
-        result_bytes=result_bytes,
+        root=status_path.parent,
     )
     incomplete, not_run, codegraph, comparative = _status_fields(status)
     artifacts = _artifacts(binding) if isinstance(binding, Mapping) else None
@@ -337,6 +420,7 @@ def build_report(
         "kernel_engineering": "see_status",
         "product_engineering": "incomplete" if incomplete else "status_done",
         "live_ready": verdict == "pass" and consistent_binding,
+        "live_ready_state": "passed" if verdict == "pass" and consistent_binding else "pending",
         "binding_consistent": consistent_binding,
         "git_commit": _text(binding, "git_commit") if isinstance(binding, Mapping) else None,
         "environment": _text(binding, "environment") if isinstance(binding, Mapping) else None,

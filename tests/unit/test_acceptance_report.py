@@ -219,13 +219,19 @@ def _binding_fixture(tmp_path: Path, *, result_live: bool, commit: str = "a" * 4
 
 
 def test_live_ready_requires_matching_current_binding(tmp_path: Path) -> None:
+    """A self-certified result plus a STATUS claim is not readiness (ADR-F50).
+
+    The positive path now needs evidence, verdict and owner approval bound to the
+    current commit; see test_evidence_verdict_and_owner_approval_bound_to_current_commit_is_live_ready.
+    """
     junit, status, binding = _binding_fixture(tmp_path, result_live=True)
     report = build_report(junit, status, binding=binding)
     assert report["passed"] is True
     assert report["status"] == "pass"
     assert report["missing_required"] == []
-    assert report["binding_consistent"] is True
-    assert report["live_ready"] is True
+    assert report["binding_consistent"] is False
+    assert report["live_ready"] is False
+    assert report["live_ready_state"] == "pending"
     assert report["not_run"] == ["Hermes comparison", "CodeGraph product enablement"]
 
     stale = dict(binding)
