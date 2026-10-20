@@ -37,7 +37,7 @@ class _Handler(BaseHTTPRequestHandler):
                 {
                     "id": "up-2",
                     "model": "deepseek-chat-v3",
-                    "choices": [{"message": {"content": ANSWER}}],
+                    "choices": [{"message": {"content": ANSWER}, "finish_reason": "stop"}],
                     "usage": {"prompt_tokens": 8, "completion_tokens": 4, "total_tokens": 12},
                 }
             ).encode()

@@ -5,17 +5,18 @@ from __future__ import annotations
 import fcntl
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
 import subprocess
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
 import bm25s
+import ir_measures
 import numpy as np
 from sqlalchemy import text
 
@@ -276,31 +277,37 @@ def rrf(rank_lists: list[list[str]], *, k: int = RRF_K) -> list[str]:
     return sorted(scores, key=lambda chunk_id: (-scores[chunk_id], chunk_id))
 
 
-def group_metrics(groups: dict[str, list[str]], relevant: set[str], *, k: int = 10) -> dict[str, dict[str, float]]:
-    """Recall, MRR, and nDCG for each channel. This does not claim one channel wins."""
+def group_metrics(
+    groups: dict[str, list[str]], relevant: set[str] | Mapping[str, int], *, k: int = 10
+) -> dict[str, dict[str, float]]:
+    """Recall, MRR, and nDCG at cutoff k for each channel. This does not claim one channel wins.
 
-    def recall(ids: list[str]) -> float:
-        if not relevant:
-            return 0.0
-        return len(set(ids[:k]) & relevant) / len(relevant)
-
-    def mrr(ids: list[str]) -> float:
-        for index, chunk_id in enumerate(ids[:k], start=1):
-            if chunk_id in relevant:
-                return 1.0 / index
-        return 0.0
-
-    def ndcg(ids: list[str]) -> float:
-        flags = [1.0 if chunk_id in relevant else 0.0 for chunk_id in ids[:k]]
-        ideal = sorted(flags, reverse=True)
-
-        def dcg(values: list[float]) -> float:
-            return sum(value / math.log2(index + 2) for index, value in enumerate(values))
-
-        denom = dcg(ideal)
-        return 0.0 if denom == 0 else dcg(flags) / denom
-
-    return {name: {"recall_at_10": recall(ids), "mrr_at_10": mrr(ids), "ndcg_at_10": ndcg(ids)} for name, ids in groups.items()}
+    Computed by ir_measures (trec_eval semantics) against qrels holding EVERY relevant document, so a
+    relevant document that was not retrieved still counts in recall and in the ideal ranking (IDCG).
+    `relevant` is a set (grade 1 each) or {id: grade}; a grade of 0 or less is not relevant, and nDCG
+    uses the grades as linear gains. A repeated id in a ranking counts once, at its first rank, and the
+    cutoff counts distinct ids. The keys keep their historical `_at_10` names whatever k is.
+    """
+    grades = {chunk_id: 1 for chunk_id in relevant} if isinstance(relevant, (set, frozenset)) else dict(relevant)
+    for chunk_id, grade in grades.items():
+        if isinstance(grade, bool) or not isinstance(grade, int):
+            raise TypeError(f"relevance grade for {chunk_id!r} must be an int")
+    measures = {"recall_at_10": ir_measures.R @ k, "mrr_at_10": ir_measures.RR @ k, "ndcg_at_10": ir_measures.nDCG @ k}
+    zero = dict.fromkeys(measures, 0.0)
+    judged = [(chunk_id, grade) for chunk_id, grade in sorted(grades.items()) if grade > 0]
+    found: dict[str, dict[str, float]] = {name: dict(zero) for name in groups}
+    if not judged:
+        return found
+    qrels = [ir_measures.Qrel(name, chunk_id, grade) for name in groups for chunk_id, grade in judged]
+    run = []
+    for name, ids in groups.items():
+        distinct = list(dict.fromkeys(ids))
+        # Strictly decreasing scores: the ranking is the list order, no score ties for trec_eval to break.
+        run.extend(ir_measures.ScoredDoc(name, chunk_id, float(len(distinct) - rank)) for rank, chunk_id in enumerate(distinct))
+    keys = {measure: key for key, measure in measures.items()}
+    for metric in ir_measures.iter_calc(list(measures.values()), qrels, run):
+        found[metric.query_id][keys[metric.measure]] = float(metric.value)
+    return found
 
 
 def generation_is_fresh(conn: Any, project_id: str, seen_epoch: int, chunk_ids: list[str]) -> bool:

@@ -1,8 +1,8 @@
 {
   "spec_version": "1.4",
-  "as_of": "2026-10-16",
+  "as_of": "2026-10-20",
   "artifact_type": "core_done_live_pending",
-  "current_task": "R8-C threat browser ADR-F43",
+  "current_task": "p1-codex10 follow-up on 77259fd: restored cannot-grow admission test, per-call hold never below the priced hold, coding_call rows carry the parent pricing_version, ADR-F49 upgrade drain note",
   "product_implementation": "done",
   "readiness": {
     "kernel_engineering": "passed",
@@ -14,13 +14,14 @@
   "not_run": [
     "comparative_evidence"
   ],
-  "next_action": "readiness.live_ready stays pending. The referenced F26 result is commit d694f89 and reports/f26_acceptance_result.json has live_ready false. The owner must rerun live before this can be passed. comparative_evidence stays not_run. Ingest parsing stays ADR-F41. The threat browser is ADR-F43. SOCKS binds only the internal /28 address. Commit 6a44eb5 writes measured vectors and skips live encode only for unmeasured text on the worker path. Push run 38971544094 and PR run 38971552108 both passed integration with 392 passed, 4 warnings. Sonar new_security_rating is 1. Approval Agent did not approve. Do not merge.",
+  "next_action": "readiness.live_ready stays pending. f27.live_ready stays false. f27.codegraph_enabled is true. Rebased onto origin/main ab1ebef. Ingest parsing stays ADR-F41. The threat browser stays ADR-F43. R8-B stays ADR-F42. Coding calls append a configurable per-call reservation up to the task budget, settle measured overruns, and fail a job whose agent did not finish. CI for this reservation fix is not recorded yet. Do not merge.",
   "last_executed_commands": [
-    "uv run --locked --no-build python scripts/rebuild_spec.py",
+    "python3 scripts/rebuild_spec.py",
     "uv run --locked --no-build python scripts/verify_freeze.py",
-    "uv run --locked --no-build pytest -q tests/unit/test_retrieval.py"
+    "uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'",
+    "uv run --locked --no-build pytest -q tests/unit"
   ],
-  "last_test_result": "6a44eb5 push run 38971544094 integration: 392 passed, 4 warnings in 708.88s. PR run 38971552108 integration: 392 passed, 4 warnings in 762.14s. Both pack-and-unit jobs passed. Sonar quality gate OK, new_security_rating actualValue 1. Local before that commit: verify_freeze passed, tests/unit/test_retrieval.py 17 passed. live_ready stays pending.",
+  "last_test_result": "Local on 2026-10-20 for p1-codex10 follow-up code head 61b9dff (docs head on top; based on the pushed 77259fd, new commits only), run with env -u AETHER_LIVE_MODEL_KEY. unit 1226 passed on the head; per commit: 6b23a07 1217 passed (restored cannot-grow admission test passes as-is), the red commit aa20608 fails only its 2 new hold tests, 465a7b5 1219 passed, the red commit f25726f fails only its 7 new coding_call pricing_version tests, 61b9dff 1226 passed. Integration on a temporary Postgres and Temporal: 422 ran, 419 passed, 3 failed, 0 skipped; the failures are environment-only: two Hermes probes (hermes_cli_missing, no .hermes venv) and the Tor fixture timeout. test_round4_slow_call_does_not_block_another_temporal_task passed. verify_freeze passed. ruff: no new findings against 77259fd. gitleaks 8.30.1 with .gitleaks.toml and .gitleaksignore: 0 in the tree and 0 in full history. Live key grep 0. live_ready stays pending.",
   "pack_validation": {
     "result": "passed",
     "scope": "reference_and_specification_only",
@@ -198,7 +199,19 @@
     "status": "done",
     "ci_run": "38694676859",
     "live_ready": false,
-    "codegraph_enabled": false,
+    "codegraph_enabled": true,
     "comparative_evidence": "not_run"
+  },
+  "latest_ci": {
+    "commit": "77259fd7276c1a091a71003633c85d4491f15a02",
+    "workflow": "ci",
+    "push_run": "39281917344",
+    "push_conclusion": "success",
+    "pull_request_run": "39281924386",
+    "pull_request_conclusion": "failure",
+    "pull_request_failure": "integration: test_sys01_entry.py::test_public_entry_reaches_a_terminal_state assert matched (watch-run artifact not found; 1 failed, 420 passed); the push run on the same commit passed and it passed locally",
+    "pull_request": 31,
+    "conclusion": "mixed",
+    "completed_at": "2026-10-19T16:36:43Z"
   }
 }

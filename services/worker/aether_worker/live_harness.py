@@ -12,7 +12,6 @@ import hashlib
 import json
 import math
 import os
-import shutil
 import subprocess
 import sys
 import tempfile
@@ -23,7 +22,9 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
+from aether_worker.openhands_image import RUN_IMAGE_REASONS
 from aether_worker.retrieval import EMBEDDING_REVISION, RetrievalError, _index_bm25, _lexical_ids, encode_texts, rrf
+from aether_worker.runner import _docker, probe_docker_daemon
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
 LIVE_KEY = "AETHER_LIVE_MODEL_KEY"
@@ -44,7 +45,7 @@ CORPUS = (
     {"id": "chunk-code", "text": "assert left != right && flag == true"},
 )
 ISOLATION_IMAGE = SANDBOX_IMAGE
-ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--pids-limit", "32")
+ISOLATION_FLAGS = ("--network", "none", "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges", "--pids-limit", "32")
 ISOLATION_SCRIPT = (
     "import os,socket\n"
     "print('key', 'AETHER_LIVE_MODEL_KEY' in os.environ)\n"
@@ -293,16 +294,18 @@ def _network_errno(stdout: str) -> int | None:
 def _linux_isolation(secret: str) -> dict[str, Any]:
     if sys.platform != "linux":
         return {"status": NOT_RUN, "reason": "not_linux"}
-    if shutil.which("docker") is None:
+    # The same detection that enables the runner: the check runs through the SDK, so a host with the SDK
+    # and a reachable daemon but no docker CLI still runs it. docker_missing only when neither is there.
+    runtime = probe_docker_daemon()
+    if runtime.get("reason") == "cli_missing":
         return {"status": NOT_RUN, "reason": "docker_missing"}
-    info = subprocess.run(["docker", "info"], capture_output=True, text=True, check=False)
-    if info.returncode != 0:
+    if "server_version" not in runtime:
         return {"status": NOT_RUN, "reason": "docker_unavailable"}
     command = _isolation_command()
     if secret and any(secret in part for part in command):
         return {"status": "fail", "reason": "secret_in_command"}
     try:
-        completed = subprocess.run(command, capture_output=True, text=True, timeout=90, check=False)
+        completed = _docker(command[1:], timeout=90)
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"status": NOT_RUN, "reason": redact_secret(type(exc).__name__, secret)}
     output = redact_secret((completed.stdout or "") + (completed.stderr or ""), secret)
@@ -314,8 +317,15 @@ def _linux_isolation(secret: str) -> dict[str, Any]:
         "secret_present": "key True" in (completed.stdout or ""),
     }
     if completed.returncode != 0:
-        reason = "image_unavailable" if "Unable to find image" in output or "pull access denied" in output else "container_failed"
-        evidence["status"] = NOT_RUN if reason == "image_unavailable" else "fail"
+        stderr = (completed.stderr or "").strip()
+        if stderr in RUN_IMAGE_REASONS:
+            # ensure_image ran before the container: ImageUnavailable.reason is the not_run reason.
+            reason = stderr
+        elif "Unable to find image" in output or "pull access denied" in output:
+            reason = "image_unavailable"
+        else:
+            reason = "container_failed"
+        evidence["status"] = NOT_RUN if reason in RUN_IMAGE_REASONS else "fail"
         evidence["reason"] = reason
         return evidence
     secret_absent = "key False" in (completed.stdout or "")

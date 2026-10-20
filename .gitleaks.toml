@@ -1,0 +1,14 @@
+title = "AETHER"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Named fixtures, one recorded CodeGraph result, and the published Tor archive signing fingerprint. Product source stays scanned."
+paths = [
+  '''tests/integration/test_round1_p1_09_backup_restore.py''',
+  '''reports/f15_product_result.json''',
+]
+regexes = [
+  '''A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89''',
+]

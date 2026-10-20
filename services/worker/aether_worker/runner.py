@@ -15,6 +15,7 @@ from typing import Any
 
 from reference.models import CodingJobRequest, CodingJobResult
 
+from aether_worker.container_runtime import execute_docker
 from aether_worker.loopback import LoopbackError, get_json
 from aether_worker.sandbox_image import SANDBOX_IMAGE
 
@@ -111,9 +112,9 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
     env["AETHER_HIDE_PATH"] = str(hide_path)
     env["PATH"] = f"{Path(sys.executable).resolve().parent}:{env['PATH']}"
     docker = "not_supported"
-    if os.environ.get(_PROCESS_ROLE) != _WORKER_ROLE and shutil.which("docker"):
-        info = _docker(["info"])
-        docker = "present" if info.returncode == 0 else "not_supported"
+    # Through the SDK like every runner Docker call: no docker CLI is needed to see the daemon.
+    if os.environ.get(_PROCESS_ROLE) != _WORKER_ROLE and probe_docker_daemon()[_RUNTIME] == _ENABLED:
+        docker = "present"
     try:
         completed = subprocess.run(
             [
@@ -154,20 +155,28 @@ def probe_linux_isolation(hide_path: Path) -> dict[str, Any]:
 def _docker(args: list[str], *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
     if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
         raise RunnerError("docker_forbidden")
-    return subprocess.run(["docker", *args], capture_output=True, text=True, check=False, timeout=timeout)
+    return execute_docker(args, timeout=timeout)
 
 
 def probe_docker_daemon() -> dict[str, str]:
-    """Enable the runner only when the daemon reports a server version."""
+    """Enable the runner only when the daemon reports a server version.
+
+    Every runner Docker call goes through the SDK (container_runtime), so the SDK reaching the daemon
+    is enough; an image with the SDK and a mounted socket but no docker CLI is enabled. `cli_missing`
+    is reported only when the SDK cannot reach a daemon and there is no CLI either.
+    """
     if os.environ.get(_PROCESS_ROLE) == _WORKER_ROLE:
         return _runtime(_UNSUPPORTED, "docker_forbidden")
+    try:
+        completed = _docker(["info", "--format", "{{.ServerVersion}}"])
+    except OSError:
+        completed = subprocess.CompletedProcess(["docker", "info"], 1, "", "sdk_unreachable")
+    version = completed.stdout.strip()
+    if completed.returncode == 0 and version:
+        return {_RUNTIME: _ENABLED, "server_version": version}
     if shutil.which("docker") is None:
         return _runtime(_UNSUPPORTED, "cli_missing")
-    completed = _docker(["info", "--format", "{{.ServerVersion}}"])
-    version = completed.stdout.strip()
-    if completed.returncode != 0 or not version:
-        return _runtime(_UNSUPPORTED, "daemon_unreachable")
-    return {_RUNTIME: _ENABLED, "server_version": version}
+    return _runtime(_UNSUPPORTED, "daemon_unreachable")
 
 
 def _runtime(state: str, reason: str) -> dict[str, str]:
@@ -258,8 +267,13 @@ def _launch_container(key: str, *, token: str, provider_key: str) -> str:
                 gateway_name,
                 "--network",
                 "none",
+                # Only NET_ADMIN, to bring up the shared loopback; nothing else, and no setuid gains.
+                "--cap-drop",
+                "ALL",
                 "--cap-add",
                 "NET_ADMIN",
+                "--security-opt",
+                "no-new-privileges",
                 "--label",
                 f"aether.job={label}",
                 "--label",
@@ -287,6 +301,8 @@ def _launch_container(key: str, *, token: str, provider_key: str) -> str:
         "--label",
         "aether.role=job",
         "--read-only",
+        "--cap-drop",
+        "ALL",
         "--security-opt",
         "no-new-privileges",
         "--pids-limit",

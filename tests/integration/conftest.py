@@ -18,6 +18,16 @@ from aether_storage.bootstrap import ensure_database
 from aether_storage.db import Database
 
 
+@pytest.fixture(autouse=True)
+def _configured_coding_prices(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    # Coding calls are billed only at configured prices (ADR-F49); without one a coding job fails with
+    # pricing_missing. Integration runs bill 1 micro-USD per token for input and output alike, set
+    # explicitly here, unless a test sets its own.
+    monkeypatch.setenv("AETHER_CODING_INPUT_MICRO_USD_PER_MTOK", "1000000")
+    monkeypatch.setenv("AETHER_CODING_OUTPUT_MICRO_USD_PER_MTOK", "1000000")
+    yield
+
+
 def _admin_url() -> str:
     url = os.environ.get("AETHER_ADMIN_DATABASE_URL")
     if url:

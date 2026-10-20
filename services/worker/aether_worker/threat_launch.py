@@ -1,4 +1,10 @@
-"""One-shot browser container. Docker runs in the runner process, not the worker."""
+"""One-shot browser container. Docker runs in the runner process, not the worker.
+
+The launch is written as docker CLI argument lists (setup_commands, browser_command, cleanup_commands)
+and run through the Docker SDK (docker_runner / docker_cleanup), like every other runner Docker call:
+a runner with the SDK and a socket but no docker CLI can run it. Each flag maps 1:1 onto the Engine
+API field it stands for (see _sdk_run); a flag or command outside that set is refused, never guessed.
+"""
 
 from __future__ import annotations
 
@@ -7,13 +13,25 @@ import ipaddress
 import json
 import os
 import re
-import subprocess
+import socket
+import struct
 import time
 import uuid
 from collections.abc import Callable
+from typing import Any
 
+import requests
+from docker.errors import DockerException, NotFound
+
+from aether_worker import container_runtime
 from aether_worker.loopback import LoopbackError, post_json
-from aether_worker.threat_pins import APPROVED_TOR_PROXY, ENTRYPOINT, TOR_ALIAS, TOR_SOCKS_PORT
+from aether_worker.output_bounds import RESULT_CAPTURE_LIMIT
+from aether_worker.threat_pins import (
+    APPROVED_TOR_PROXY,
+    ENTRYPOINT,
+    TOR_ALIAS,
+    TOR_SOCKS_PORT,
+)
 
 Runner = Callable[[list[str], bytes], bytes]
 _MEMORY_TOR = "268435456"
@@ -211,17 +229,274 @@ def remote_execute(
 
 
 def docker_runner(args: list[str], stdin: bytes) -> bytes:
+    """Run one launch command through the Docker SDK; its stdout, or ThreatLaunchError.
+
+    docker_unavailable: the SDK cannot reach a daemon. A failed command is the error code its
+    stdout reports (the browser's JSON), else container_unavailable, as with the CLI before.
+    """
     _reject_worker_docker()
-    completed = subprocess.run(["docker", *args], input=stdin, capture_output=True, check=False)
-    if completed.returncode != 0:
-        raise ThreatLaunchError(_error_code(completed.stdout))
-    return completed.stdout
+    return _sdk(args, stdin)
 
 
 def docker_cleanup(args: list[str], stdin: bytes) -> bytes:
+    """Best effort, like `docker ... || true`: what is already gone, or any failure, is ignored."""
     _reject_worker_docker()
-    completed = subprocess.run(["docker", *args], input=stdin, capture_output=True, check=False)
-    return completed.stdout
+    try:
+        return _sdk(args, stdin)
+    except ThreatLaunchError:
+        return b""
+
+
+# Seconds a browser run may take before it is killed; the worker's request to the runner allows 180.
+_BROWSER_RUN_SECONDS = 170.0
+_STOP_GRACE_SECONDS = 10  # `docker stop` default
+
+
+def _sdk(args: list[str], stdin: bytes) -> bytes:
+    try:
+        api = container_runtime.docker_client().api
+    except (DockerException, requests.exceptions.RequestException) as exc:
+        raise ThreatLaunchError("docker_unavailable") from exc
+    try:
+        if args[:2] == ["network", "create"]:
+            return _sdk_network_create(api, args[2:])
+        if args[:2] == ["network", "connect"] and len(args) == 4:
+            api.connect_container_to_network(args[3], args[2])
+            return b""
+        if args[:2] == ["network", "rm"] and len(args) == 3:
+            api.remove_network(args[2])
+            return b""
+        if args[:1] == ["stop"] and len(args) == 2:
+            api.stop(args[1], timeout=_STOP_GRACE_SECONDS)
+            return b""
+        if args[:1] == ["exec"] and len(args) >= 3 and not args[1].startswith("-"):
+            return _sdk_exec(api, args[1], args[2:])
+        if args[:1] == ["run"]:
+            return _sdk_run(api, args[1:], stdin)
+    except ThreatLaunchError:
+        raise
+    except NotFound as exc:
+        raise ThreatLaunchError("container_unavailable") from exc
+    except requests.exceptions.ConnectionError as exc:
+        raise ThreatLaunchError("docker_unavailable") from exc
+    except (DockerException, requests.exceptions.RequestException, OSError) as exc:
+        raise ThreatLaunchError("container_unavailable") from exc
+    raise ThreatLaunchError("docker_args_unsupported")
+
+
+def _sdk_network_create(api: Any, args: list[str]) -> bytes:
+    """`network create [--internal] [--subnet S --gateway G] NAME` -> a bridge network, as the CLI makes."""
+    internal = False
+    subnet = gateway = None
+    index = 0
+    while index < len(args) - 1:
+        token = args[index]
+        if token == "--internal":
+            internal = True
+        elif token in {"--subnet", "--gateway"}:
+            index += 1
+            if token == "--subnet":
+                subnet = args[index]
+            else:
+                gateway = args[index]
+        else:
+            raise ThreatLaunchError("docker_args_unsupported")
+        index += 1
+    if index != len(args) - 1 or args[-1].startswith("-") or (gateway is not None and subnet is None):
+        raise ThreatLaunchError("docker_args_unsupported")
+    kwargs: dict[str, Any] = {"driver": "bridge", "internal": internal, "check_duplicate": True}
+    if subnet is not None:
+        pool = {"Subnet": subnet} if gateway is None else {"Subnet": subnet, "Gateway": gateway}
+        kwargs["ipam"] = {"Driver": "default", "Config": [pool], "Options": {}}
+    api.create_network(args[-1], **kwargs)
+    return b""
+
+
+def _sdk_exec(api: Any, name: str, command: list[str]) -> bytes:
+    """`exec NAME CMD...`: stdout only (as the runner reads it); a non-zero exit is a failure."""
+    created = api.exec_create(name, command, stdout=True, stderr=False)
+    output = api.exec_start(created["Id"])
+    output = output if isinstance(output, bytes) else b""
+    if int(api.exec_inspect(created["Id"]).get("ExitCode") or 0) != 0:
+        raise ThreatLaunchError(_error_code(output))
+    return output
+
+
+_RUN_VALUE_FLAGS = {
+    "--name",
+    "--network",
+    "--ip",
+    "--network-alias",
+    "--cap-drop",
+    "--security-opt",
+    "--pids-limit",
+    "--memory",
+    "--memory-swap",
+    "--shm-size",
+    "--tmpfs",
+    "--user",
+    "-e",
+    "--label",
+}
+
+
+def _sdk_run(api: Any, args: list[str], stdin: bytes) -> bytes:
+    """`docker run` for the flags threat_launch writes, each onto its Engine API field:
+
+    -d -> detached (returns the id); --rm -> AutoRemove when detached, else removed (force) once its
+    output is read; -i -> stdin_open (+ StdinOnce) with `stdin` written and closed; --name; --network
+    -> NetworkMode; --ip / --network-alias -> that network's endpoint IPv4Address / Aliases;
+    --read-only -> ReadonlyRootfs; --cap-drop -> CapDrop; --security-opt -> SecurityOpt;
+    --pids-limit / --memory / --memory-swap / --shm-size -> PidsLimit / Memory / MemorySwap / ShmSize;
+    --tmpfs PATH:OPTS -> Tmpfs; --user; -e K=V -> Env (in order); --label K=V -> Labels.
+    """
+    detach = remove = interactive = read_only = False
+    values: dict[str, list[str]] = {flag: [] for flag in _RUN_VALUE_FLAGS}
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        token = args[index]
+        if token == "-d":
+            detach = True
+        elif token == "--rm":
+            remove = True
+        elif token == "-i":
+            interactive = True
+        elif token == "--read-only":
+            read_only = True
+        elif token in _RUN_VALUE_FLAGS and index + 1 < len(args):
+            index += 1
+            values[token].append(args[index])
+        else:
+            raise ThreatLaunchError("docker_args_unsupported")
+        index += 1
+    if index >= len(args) or detach == interactive:
+        # One image, and exactly one of -d (Tor) or -i (the browser): the two forms this module writes.
+        raise ThreatLaunchError("docker_args_unsupported")
+    image, command = args[index], args[index + 1 :]
+    single = {flag: (items[-1] if items else None) for flag, items in values.items()}
+    network = single["--network"]
+    if network is None or single["--name"] is None:
+        raise ThreatLaunchError("docker_args_unsupported")
+    tmpfs: dict[str, str] = {}
+    for spec in values["--tmpfs"]:
+        path, _, options = spec.partition(":")
+        tmpfs[path] = options
+    labels: dict[str, str] = {}
+    for spec in values["--label"]:
+        key, _, value = spec.partition("=")
+        labels[key] = value
+    if any("=" not in item for item in values["-e"]):
+        raise ThreatLaunchError("docker_args_unsupported")
+    host_config = api.create_host_config(
+        network_mode=network,
+        auto_remove=remove and detach,
+        read_only=read_only or None,
+        cap_drop=values["--cap-drop"] or None,
+        security_opt=values["--security-opt"] or None,
+        pids_limit=None if single["--pids-limit"] is None else int(single["--pids-limit"]),
+        mem_limit=None if single["--memory"] is None else int(single["--memory"]),
+        memswap_limit=None if single["--memory-swap"] is None else int(single["--memory-swap"]),
+        shm_size=None if single["--shm-size"] is None else int(single["--shm-size"]),
+        tmpfs=tmpfs or None,
+    )
+    networking_config = None
+    if single["--ip"] is not None or values["--network-alias"]:
+        endpoint = api.create_endpoint_config(ipv4_address=single["--ip"], aliases=values["--network-alias"] or None)
+        networking_config = api.create_networking_config({network: endpoint})
+    _sdk_image(api, image)
+    created = api.create_container(
+        image,
+        command or None,
+        name=single["--name"],
+        user=single["--user"],
+        environment=values["-e"] or None,
+        labels=labels or None,
+        host_config=host_config,
+        networking_config=networking_config,
+        detach=detach,
+        stdin_open=interactive,
+        tty=False,
+    )
+    container = created["Id"]
+    if detach:
+        try:
+            api.start(container)
+        except BaseException:
+            _sdk_remove(api, container)
+            raise
+        return (str(container) + "\n").encode()
+    try:
+        return _sdk_attached(api, container, stdin)
+    finally:
+        if remove:
+            _sdk_remove(api, container)
+
+
+def _sdk_image(api: Any, image: str) -> None:
+    """A missing image is pulled (as `docker run` would) only when it names a registry digest."""
+    try:
+        api.inspect_image(image)
+        return
+    except NotFound:
+        # Any 404 on the lookup: docker-py makes it ImageNotFound only for some daemon wordings.
+        if "@sha256:" not in image:
+            raise ThreatLaunchError("image_unavailable") from None
+    api.pull(image)
+
+
+def _sdk_remove(api: Any, container: str) -> None:
+    try:
+        api.remove_container(container, force=True)
+    except (DockerException, requests.exceptions.RequestException):
+        pass
+
+
+def _sdk_attached(api: Any, container: str, stdin: bytes) -> bytes:
+    """`run -i` without -d: attach first, start, write stdin and close it, read stdout to the end."""
+    attached = api.attach_socket(container, params={"stdin": 1, "stdout": 1, "stderr": 1, "stream": 1})
+    raw = getattr(attached, "_sock", attached)
+    try:
+        raw.settimeout(_BROWSER_RUN_SECONDS)
+        api.start(container)
+        raw.sendall(stdin)
+        raw.shutdown(socket.SHUT_WR)
+        stdout = _read_frames(raw)
+    except TimeoutError as exc:
+        raise ThreatLaunchError("container_unavailable") from exc
+    finally:
+        try:
+            raw.close()
+        except OSError:
+            pass
+    status = api.wait(container, timeout=_BROWSER_RUN_SECONDS)
+    if int((status or {}).get("StatusCode", 1)) != 0:
+        raise ThreatLaunchError(_error_code(stdout))
+    return stdout
+
+
+def _read_frames(raw: Any) -> bytes:
+    """Demultiplex a non-tty attach stream (8-byte header: stream, 0, 0, 0, big-endian length).
+
+    stdout is the result and is bounded like any runner result; stderr (the browser's log, which
+    the CLI path never read either) is discarded. A result over its bound is refused rather than cut.
+    """
+    stdout = bytearray()
+    buffer = b""
+    while True:
+        chunk = raw.recv(65536)
+        if not chunk:
+            break
+        buffer += chunk
+        while len(buffer) >= 8:
+            stream, size = struct.unpack(">BxxxL", buffer[:8])
+            if len(buffer) < 8 + size:
+                break
+            data, buffer = buffer[8 : 8 + size], buffer[8 + size :]
+            if stream == 1:
+                stdout += data
+                if len(stdout) > RESULT_CAPTURE_LIMIT:
+                    raise ThreatLaunchError("container_unavailable")
+    return bytes(stdout)
 
 
 def _reject_worker_docker() -> None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from aether_worker.loopback import LoopbackError, post_json
@@ -17,6 +18,9 @@ _JOB = re.compile(r"[A-Za-z0-9-]{1,80}")
 _NAME = re.compile(r"aether-code-[A-Za-z0-9]{1,32}|[0-9a-f]{12,64}")
 _WORK = re.compile(r"/[A-Za-z0-9_./-]{1,240}")
 _GRACE = re.compile(r"[0-9]{1,3}")
+_TOKEN = re.compile(r"[A-Za-z0-9_-]{8,128}")
+# Matches the console body limit. The text goes into one docker -e value, never into a shell.
+OBJECTIVE_MAX_CHARS = 4000
 _CODING_PREFIX = "label=aether.coding="
 _ROLE_FILTER = "label=aether.role=coding"
 
@@ -46,6 +50,27 @@ def accepted_grace(value: object) -> str:
     return text
 
 
+def accepted_token(value: object) -> str:
+    return _exact(value, _TOKEN)
+
+
+def accepted_objective(value: object) -> str:
+    """Return the objective unchanged. It must be non-blank text without NUL, within the console limit."""
+    if not isinstance(value, str) or not value.strip() or "\x00" in value or len(value) > OBJECTIVE_MAX_CHARS:
+        raise SandboxDelegateError("rejected")
+    return value
+
+
+def accepted_proxy(value: object) -> Path:
+    resolved = Path(str(value)).resolve()
+    root = Path(tempfile.gettempdir()).resolve()
+    if not resolved.is_dir() or not resolved.name.startswith("aether-model-"):
+        raise SandboxDelegateError("rejected")
+    if resolved != root and root not in resolved.parents:
+        raise SandboxDelegateError("rejected")
+    return Path(_exact(resolved, _WORK))
+
+
 def accepted_workspace(value: object) -> Path:
     resolved = Path(str(value)).resolve()
     if not resolved.is_dir() or not resolved.name.startswith("aether-code-"):
@@ -60,8 +85,31 @@ def remote_completed(args: list[str], *, timeout: float | None = None) -> subpro
     return _completed(_ask(str(fields.pop("op")), fields, timeout=timeout))
 
 
-def remote_run(workspace: Path, job_id: str, *, timeout: float | None = None) -> subprocess.CompletedProcess[str]:
-    return _completed(_ask("run", {"workspace": str(workspace.resolve()), "job_id": job_id}, timeout=timeout))
+def remote_run(
+    workspace: Path,
+    job_id: str,
+    *,
+    proxy_dir: Path | None,
+    job_token: str,
+    objective: str,
+    timeout: float | None = None,
+) -> subprocess.CompletedProcess[str]:
+    proxy = accepted_proxy(proxy_dir)
+    token = accepted_token(job_token)
+    text = accepted_objective(objective)
+    return _completed(
+        _ask(
+            "run",
+            {
+                "workspace": str(workspace.resolve()),
+                "job_id": job_id,
+                "proxy_dir": str(proxy),
+                "job_token": token,
+                "objective": text,
+            },
+            timeout=timeout,
+        )
+    )
 
 
 def remote_logs(name: str, limit: int, *, timeout: float | None = None) -> dict[str, str]:

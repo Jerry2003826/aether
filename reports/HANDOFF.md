@@ -1,35 +1,51 @@
 # 交接
 
-## R8-C 变基到 13bc096，威胁情报浏览器记为 ADR-F43
+## F26 正式验收重跑（head `27cfc9f`，PR #31）
 
-PR #30 已把采集解析记为 ADR-F41。未合并的 PR #31 已使用 ADR-F42。本分支的威胁情报浏览器改记为 ADR-F43。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 改成 passed，没有合并 PR。
+2026-10-20 14:44（墨尔本时间，UTC 03:44），监督者在 `27cfc9fe0e2281941864120de9feea3409ceb19e` 上用真实 key 运行：
 
-采集侧的 `assert_public_target` 改从 `net_guard` 再导出，多个公网地址时仍优先 IPv4。`playwright` 仍钉在 `1.64.0`。
+```sh
+cd environments/openhands && uv sync --locked --no-build
+cd ../ml && uv sync --frozen
+docker pull python:3.12-alpine
+cd ../..
+export AETHER_LIVE_MODEL_BASE=https://api.deepseek.com/v1
+export AETHER_LIVE_MODEL_ALIAS=deepseek-chat
+# AETHER_LIVE_MODEL_KEY 只在进程环境里，不写入任何文件
+uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f26_acceptance_result.json
+```
 
-这次补上三条原先延后的审查：
+退出码 0，`status=probed`，`scripted_substitute=false`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁（baseline 退出码 1，打补丁后 0）和 Linux 隔离四项都是 pass，`error` 为 null。3 次调用，合计 1137 token（输入 801，输出 336），上限是 8 次、20000 token。`cost_status` 是 unknown。比较报告 sha256 是 `ff2f43a69f1f2c81c5d21c128bcad4c7e53c36487352022fe021a9223a446649`，completion 263 token。`checker_sha256` 与 `snapshot_sha256` 和 `27cfc9f` 上现算的值一致。结果、日志和仓库 `reports/`、`secrets/` 的 key grep 计数为 0。
 
-- 访问记录写入 `audit_events`，按项目 sequence 接哈希链。调用方清空内存列表后行还在。证明：`test_visit_audit_remains_after_the_caller_drops_the_list`。本机没有 PostgreSQL，这条没有在这里执行。
-- 子 frame 的 document 请求直接中止，不抓取。证明：`test_child_frame_documents_are_not_fetched`、`test_child_frame_document_is_not_fetched`。
-- Tor 打开后，浏览器容器启动前在内部链路地址上探测 9050 的 SOCKS 握手；夹具模式探测同一地址的 8080。明文访问不探测、也不启动 Tor。证明：`test_browser_waits_until_the_tor_proxy_accepts`、`test_container_plan_is_digest_pinned_and_does_not_fall_back`。
+脚本原样生成的结果逐字节保存为 `reports/f26_acceptance_result_27cfc9f.json`，sha256 是 `68c5394a0331e4a389d3caef4544c00ddb8d11e657f03923d16b5c7658a3a428`。`reports/f26_acceptance_result.json` 保持 `d694f89` 的历史版本，`STATUS.json` 不改。
 
-Security Reviewer 在文档提交 `1e2abdd` 上指出：Tor 把 SOCKS 绑在所有接口，策略接受任意来源，容器同时又接入出口网。现在 SOCKS 只绑定这次访问的内部 /28 地址，策略拒绝其他来源；夹具页也只听这个地址。证明：`test_socks_binds_only_on_the_internal_address`。容器测试还会核对生成的 torrc、`/proc/net/tcp` 里没有通配地址上的 8080/9050，并且出口网上的诱饵连不上 Tor 容器的出口地址。
+`live_ready` 由所有者决定保持 pending。`acceptance_report` 的判定要求结果文件自身 `live_ready` 为 true（脚本不自证，永远写 false），并且结果的 `git_commit` 等于当前提交，这与所有者写回提交冲突。判定代码留到下一轮修。`semantic_support` 仍是 not_judged，`comparative_evidence` 仍是 not_run。
 
-本机没有 Docker daemon。`AETHER_REQUIRE_SERVICES=1` 时 `test_one_shot_containers_only_reach_tor_and_are_removed` 失败，失败信息是 Docker is required，不是 skip。
+## R8-B 开源库替换（分支 `cursor/r8-b-open-source-replacements-68cf`）
 
-`0c19274` 的 push integration（https://github.com/Jerry2003826/aether/actions/runs/38964656426）在 `test_text_pdf_is_indexed_as_extracted_text` 上失败：90 秒时作业仍是 `RUNNING`，`source_version_id` 已经写上，`error_code` 为空，worker 进程还在，日志只有 `aether-worker-ready`。本机对 `tests/fixtures/r8a/bake.pdf` 的抽取结果是 `苹果派烘烤说明`，不在测量表里。版本写入发生在 `_publish_index` 之前，所以卡点不是 docling，也不是未领任务，没有吞掉的异常。卡在未测量正文调用 `encode_texts.py`：它会 `HfApi().model_info` 再加载 BGE-M3，子进程超时 900 秒，测试只等 90 秒。
+基线已变基到 `origin/main` 的 `ab1ebef`。采集解析是已合并的 ADR-F41，威胁情报浏览器是已合并的 ADR-F43，本决定记为 ADR-F42。没有改 `contracts/`、`reference/`，没有把 `readiness.live_ready` 或 `f27.live_ready` 改成 passed。`f27.codegraph_enabled` 改为 true：锁文件 `product_enabled` 已是 true，`readiness.codegraph_enabled` 已是 passed，证据是 `reports/f15_product_result.json`。
 
-`6cdfa0e` 把整批向量都跳过，并且让编码进程强制离线。push run https://github.com/Jerry2003826/aether/actions/runs/38968650893 和 PR run https://github.com/Jerry2003826/aether/actions/runs/38968658047 的 integration 都失败：`test_measured_revision_and_grouped_channels`、`test_github_and_arxiv_are_fetched_indexed_and_searchable`、`test_source_filter_keeps_chunks_outside_the_global_window`。日志是 `aether-embedding-skipped reason=weights_absent`，已测量的苹果派和铁路短语也被丢掉。
+编码作业：控制面不安装 OpenHands。四个包仍钉在 `environments/openhands` 的 1.54.0。沙箱标志仍由 `container_arguments` 手写：`--network none`、只读、丢掉全部 capabilities、用户 `65534:65534`。内存和 swap 上限改为 805306368 字节。一次入口采样的父进程 VmRSS 峰值是 283888 KiB，进程树是 306484 KiB，都超过原来的 256 MiB。`JOB_IMAGE` 仍是 Alpine digest。runner 使用在 `python@sha256:70729b46c69b4f1e97c4822c1af3df53a1476cf5ddc6c087c0c10bc3a5678c2f` 上构建的镜像。入口用 `openhands.sdk.Agent` 和 `Conversation`，工具是 `file_editor` 与 `terminal`（subprocess），由模型返回的编辑生成补丁，然后再用 `LocalWorkspace.execute_command` 跑测试协议。容器没有出网。模型请求只走挂载的 Unix socket。目录和套接字先收成属主权限（0700 / 0600），再用 POSIX ACL 把目录遍历和套接字读写交给 uid 65534；ACL 写不进去就拒绝启动，不退回 0777 或 0666。容器工作目录沿用镜像的 `/opt/openhands`，不再设到公开可写目录。宿主机代理核对作业令牌后调用 `ModelGateway.relay_chat`。每次调用新开一张 `coding_call` 子预留，并用编码作业自己的 fencing 和 operation 租约做一次一票：作业须处于 `STARTING`、`ACTIVE` 或 `EXPORTING`，令牌里的 `attempt_id` 等于 `fencing_token`，租约未到期。对不上是 `token_rejected`。已测 token 加在途上限再加 256 超过父预留是 `budget_exceeded`。这两类都在上游之前拒绝。子授权作废，会话令牌不作废。任务状态不读也不写。研究调用的 `_admit` 仍只接受 `RUNNING` 与 `VERIFYING`。结算优先用网关记下的 token。`/v1/chat/completions` 忽略请求体 timeout，超时固定 30 秒，只转发 `model`、`messages`、`tools`、`tool_choice`，`max_tokens` 由服务端写成 256。协议判定前用只读基线覆盖 `test_*.py` 并核对 sha256。供应商 key 只在网关进程，经 stdin 交接。没有上游时网关返回一次 finish，8 个输入 token 加 4 个输出 token，不改文件。有用量时按 token 数结算 micro-USD；没有用量（含已确认取消）`mark_unknown`。`_bounded_logs` 删除的 `assert process.stdout is not None and process.stderr is not None` 是旧 `Popen` 管道收窄；Docker SDK 的 `container_logs` 直接返回两段字节，空日志是 `b""`。`logs(follow=False)` 避免 docker-py 把 `follow` 默认成 `stream` 后取消作业卡住。证明：`test_entry_source_calls_the_agent_and_launch_keeps_other_images`、`test_agent_calls_the_model_socket_edits_the_file_and_strips_the_secret`、`test_a_finish_call_leaves_the_candidate_file_unchanged`、`test_rewritten_tests_cannot_pass`、`test_empty_upstream_returns_a_finish_call_with_token_usage`、`test_relay_posts_the_provider_key_and_ignores_http_proxy`、`test_relay_rejects_the_wrong_capability_alias_and_a_leaked_key`、`test_chat_body_keeps_only_the_allowlist_and_the_server_timeout`、`test_socket_proxy_checks_the_job_token_and_forwards_to_the_gateway`。重放和超预算的证明是 `test_replayed_ticket_and_over_budget_are_rejected_before_the_provider`，需要 Postgres，本机没有跑。容器、网关和预算扣减的证明是 `test_openhands_agent_edits_through_the_gateway_and_settles_tokens`，缺 Docker 时失败，不跳过。本机没有 Docker，这条集成测试没有跑。
 
-`6a44eb5` 只在采集作业里对未测量正文跳过实时编码（`allow_download=False`，且本机没有该修订快照或不能离线导入）。测量表里的向量照常写入。显式 `build_generation` 仍默认允许编码进程访问 Hub。90 秒轮询没有加长。失败时测试仍打印 worker 的全部输出、子进程命令，以及 `ingestion_jobs`、`command_outbox`、`chunks`、`index_generations`。
+技能评测：`Dataset.evaluate_sync` 调度用例，`grade` 仍写分。证明：`test_dataset_evaluate_sync_schedules_each_case`、`test_expired_deadline_raises_before_a_second_grade`。
 
-`6a44eb5` 的 push 与 pull_request 都通过。两次 integration 都是 `392 passed, 4 warnings`，没有 skipped，也没有 xfail：
+请求体：Pydantic 模型保留原错误码。证明：`test_command_and_project_validation_call_pydantic`、`test_budget_bool_is_rejected_and_contract_bool_version_stays_an_int`、`test_patch_and_search_keep_only_supplied_fields`。
 
-- push https://github.com/Jerry2003826/aether/actions/runs/38971544094 ：`392 passed, 4 warnings in 708.88s (0:11:48)`
-- pull_request https://github.com/Jerry2003826/aether/actions/runs/38971552108 ：`392 passed, 4 warnings in 762.14s (0:12:42)`
+配置：pydantic-settings，布尔只认 `"1"`。凭证仍直接读环境变量。证明：`test_only_the_digit_one_enables_settings`、`test_bind_still_requires_the_digit_one`、`test_runtime_settings_keep_pause_and_provider_rules`。
 
-SonarCloud 质量门通过，`new_security_rating` 的 actualValue 是 1。Security Reviewer（https://cursor.com/agents/bc-f764c355-fe6e-434b-9dcd-7f0b3c0f2b83）对这个 head 没有新的 MEDIUM 及以上问题。Approval Agent 仍是未批准。`live_ready` 仍是 pending。没有合并。
+密钥：detect-secrets 1.5.0，CI 增加 Gitleaks 8.30.1。证明：`test_trace_replaces_the_whole_secret_token`、`test_trace_tokens_and_builtin_aws_key_come_from_detect_secrets`。
 
-本地：`verify_freeze` 通过（`api_operations` 50，`parsed_structured_files` 57）。SOCKS 收紧后的定向单元测试 3 passed。全套 integration 没有在本机跑。
+容器和进程：docker 7.2.0 与 psutil 7.2.2。worker 仍是 `docker_forbidden`。`exec` 和 `kill` 走 Docker SDK。日志按流只保留尾部。`--rm` 的前台容器在超时后仍会删除。证明：`test_run_and_pull_use_the_sdk_and_not_subprocess`、`test_exec_kill_and_log_tail_use_the_sdk`、`test_recorded_role_reads_psutil_cmdline`。
+
+安装：`environments/openhands` 使用 `uv sync --locked --no-build`。`func-timeout==4.3.5` 没有 wheel，锁文件指向仓库内由官方 sdist 构建、uv 记下哈希的 wheel。runner 在 Docker 可用且标签镜像不存在时构建；命令也写在 README。证明：`test_ci_workflow`、`test_runner_builds_the_openhands_image_when_docker_is_enabled`、`test_runner_stays_up_when_the_openhands_image_build_fails`。沙箱作业目录不再使用固定的公开路径，改由 `tempfile.mkdtemp` 创建。
+
+2026-10-16 改为作业租约准入之后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.375s），单元 321 passed、1 warning（40.74s）。这次本地没有跑 Gitleaks。`test_replayed_ticket_and_over_budget_are_rejected_before_the_provider`、`test_coding_lease_does_not_rewrite_task_status` 和 `test_openhands_agent_edits_through_the_gateway_and_settles_tokens` 没有在本机跑。本机没有 Docker、Postgres 和 Temporal，web typecheck 和 doctor 没有在本机跑。`live_ready` 仍是 pending。`8d0bd11` 从 `WAITING_APPROVAL`、`DRAFT`、`NEEDS_REVIEW`、`FAILED`、`SUCCEEDED` 借用 `RUNNING` 的做法已撤掉。编码准入只看作业租约和 fencing，不改任务状态机。`9dbe90b` 的 CI 已通过：pack-and-unit、integration（385 passed，747.82s）、SonarCloud。pull request workflow `38969500944`，push workflow `38969494717`。SonarCloud：https://sonarcloud.io/dashboard?id=Jerry2003826_aether&pullRequest=31 。没有合并。
+
+2026-10-16 修正真实 DeepSeek 编码中继。`99411ce` 在有 key 时公开编码作业停在 `held_micro_usd=8192`，作业却是 FINISHED，结果 `model_requests=0`。沙箱别名 `coder` 被原样发给 `deepseek-chat` 的上游；4xx 没有记状态，没有 usage 时预留保持 unknown，候选文件仍判完成。现在 `AETHER_LIVE_MODEL_ALIAS` 才是上游模型名，准入仍核对 `coder`。`stream=true` 时强制 `stream_options.include_usage=true`。JSON 和 SSE（含只在末块带 usage 的 DeepSeek 形状）都计量 `prompt_tokens`/`completion_tokens`。4xx/5xx 记下 `upstream_http_<status>`，不保存错误正文，作业不能 FINISHED。没有成功的模型调用（`model_requests<1` 且没有网关用量，或响应没有可用 usage）也不能 FINISHED。`edit_calls>0` 的补丁来自 Agent，事件 `patch_source` 为 `agent_edit`，否则是 `candidate_files`。没有上游时脚本化 finish 仍是 8/4，候选文件仍可决定通过。日志不含密钥和正文。本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.408s），单元 327 passed、1 warning（46.06s）。本机没有 Docker、Postgres 和 Temporal，integration 没有跑。这次提交的 CI 还没有记入。`live_ready` 仍是 pending。没有合并。
+
+2026-10-16 再变基到 `origin/main` 的 `ab1ebef`（PR #29，ADR-F43）。ADR-F42 没有改号。`playwright` 改为 `==1.64.0`，pydantic-evals、pydantic-settings、detect-secrets、docker、psutil 仍在控制面依赖里。威胁情报浏览器的 SOCKS 绑定、审计和默认关闭没有撤掉。编码准入仍不改任务状态。这次变基后本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.299s），单元 360 passed、1 warning（44.23s）。本机没有 Docker、Postgres 和 Temporal，integration 没有跑。`72af935` 的 pack-and-unit 失败：Gitleaks 把 Tor 官方签名指纹 `A3C4F0F979CAA22CDBA8F512EE8CBC9E886DDD89` 当成 generic-api-key，出现在 `config/threat_browser.yaml`、`infra/images.lock.json` 和 `services/worker/aether_worker/threat_pins.py`。这是公开指纹，不是密钥。`.gitleaks.toml` 只放行这一串。`310eddc` 的 CI 已绿：pack-and-unit、integration（397 passed）、SonarCloud。
+
+2026-10-16 修正 `310eddc` 的真实 DeepSeek 预留。两次调用约 2751/75 与 2875/168 之后，4096 的父预留拒绝第三次调用；空白报告让 `model_requests=0`、`edit_calls=0`，作业仍 FINISHED，父预留 `unknown`，held 4096、spent 0。现在单轮预留默认 4096 token（`AETHER_CODING_CALL_RESERVE_TOKENS`，金额未设时与 token 相同），不够时在任务非验收上限内按次追加。实测量超过预留时 `settle_measured` 按实际 token 结成 `known` 并释放冻结，超支记 `book_result=overrun`。没有用量仍 `mark_unknown`。发布的 `model_requests` 取网关成功的 `coding_call` 行数。`agent_completed` 不是 true，或父预留有 `admission_error`，作业是 FAILED，即使磁盘上的测试已经通过。脚本化 finish 仍不编辑：损坏候选是 FAILED，候选已经返回 42 时是 FINISHED。`test_openhands_agent_gateway.py` 会清掉 `AETHER_LIVE_MODEL_ALIAS` 以及相关外部变量。大用量证明是 `test_large_token_rounds_extend_the_reservation_and_settle_actual_usage`（每轮约 3000 输入，view、编辑、finish）。本地：冻结检查通过（`api_operations` 50），参考套件 76 OK（1.290s），单元 361 passed、1 warning（42.67s）。本机没有 Docker、Postgres 和 Temporal，integration 没有跑。这次提交的 CI 还没有记入。`live_ready` 仍是 pending。没有合并。
 
 ## R8-A 审查收紧（同一分支，ADR-F41 未新开编号）
 

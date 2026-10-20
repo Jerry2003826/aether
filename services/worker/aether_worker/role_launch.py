@@ -15,6 +15,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+import psutil
+
 from aether_worker.loopback import LoopbackError, get_json
 
 _PROCESS_ROLE = "AETHER_PROCESS_ROLE"
@@ -27,6 +29,9 @@ _VERIFIER_ROLE = "verifier"
 _ENCODING = "utf-8"
 PRIVILEGED_ENV = (_VERIFIER_DATABASE_URL, "AETHER_LIVE_MODEL_KEY")
 _READY_TIMEOUT = 60.0
+# A first OpenHands image build on a clean host. It runs before any role starts, so it is
+# not part of the 60 s readiness wait.
+_PREPARE_TIMEOUT = 3600.0
 _ROLE_COMMANDS = ("aether_worker.verifier_process", "aether_gateway", "aether_worker.runner_process")
 
 
@@ -78,6 +83,13 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
     provider_key = os.environ.get("AETHER_LIVE_MODEL_KEY", "")
     token = secrets.token_urlsafe(32)
     secrets_to_hide = [verifier_url, provider_key, token, _password(verifier_url)]
+    _prepare_runner_image(secrets_to_hide)
+    # No provider key, no gateway: an empty AETHER_GATEWAY_BASE is how the worker learns that live
+    # research has no model (_missing_live_settings -> live_provider_unconfigured, before any
+    # reservation). A keyless gateway would admit research and turn the provider's 401 into a sent call.
+    start_gateway = bool(provider_key.strip())
+    if not start_gateway:
+        sys.stderr.write("AETHER_LIVE_MODEL_KEY 未配置：不启动模型网关，live 研究以 live_provider_unconfigured 进入待审，配置后重启 worker 再恢复\n")
     children: list[subprocess.Popen[str]] = []
     try:
         verifier_proc, verifier_errors = _open(
@@ -87,20 +99,19 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
             {"verifier_url": verifier_url},
         )
         children.append(verifier_proc)
-        gateway_proc: subprocess.Popen[str] | None = None
-        gateway_errors: list[str] = []
-        if provider_key:
-            gateway_proc, gateway_errors = _open(
+        gateway: tuple[subprocess.Popen[str], list[str]] | None = None
+        if start_gateway:
+            gateway = _open(
                 "aether_gateway",
                 _gateway_env(token),
                 secrets_to_hide,
                 {"provider_key": provider_key, "worker_url": os.environ["AETHER_WORKER_DATABASE_URL"]},
             )
-            children.append(gateway_proc)
+            children.append(gateway[0])
         runner_proc, runner_errors = _open("aether_worker.runner_process", _runner_env(token), secrets_to_hide, None)
         children.append(runner_proc)
         verifier_base = _await_role(verifier_proc, verifier_errors, secrets_to_hide)
-        gateway_base = _await_role(gateway_proc, gateway_errors, secrets_to_hide) if gateway_proc is not None else ""
+        gateway_base = "" if gateway is None else _await_role(gateway[0], gateway[1], secrets_to_hide)
         runner_base = _await_role(runner_proc, runner_errors, secrets_to_hide)
         scrub_privileged_env()
         os.environ["AETHER_VERIFIER_BASE"] = verifier_base
@@ -149,14 +160,48 @@ def _gateway_env(token: str) -> dict[str, str]:
             _LOOPBACK_TOKEN: token,
         }
     )
+    alias = os.environ.get("AETHER_LIVE_MODEL_ALIAS", "").strip()
+    if alias:
+        env["AETHER_LIVE_MODEL_ALIAS"] = alias
     return env
+
+
+# What the runner labels coding containers with and what its startup sweep selects by
+# (coding_sandbox.worker_instance_id / deployment_label): the worker's own values, so both match it.
+_RUNNER_IDENTITY_ENV = ("AETHER_WORKER_INSTANCE_ID", "AETHER_WORKER_STATE_DIR", "AETHER_DEPLOYMENT_ID")
 
 
 def _runner_env(token: str) -> dict[str, str]:
     env = _base_env()
+    env.update({name: os.environ[name] for name in _RUNNER_IDENTITY_ENV if os.environ.get(name)})
     env[_PROCESS_ROLE] = "runner"
     env[_LOOPBACK_TOKEN] = token
     return env
+
+
+def _prepare_runner_image(secrets_to_hide: list[str]) -> None:
+    """Ensure the OpenHands image in a one-shot runner-role process before any role starts.
+
+    Docker stays out of the worker process. A failure or timeout is reported and the roles
+    still start; a coding job then fails as image_unavailable instead of the runner timing out.
+    """
+    env = _base_env()
+    env[_PROCESS_ROLE] = "runner"
+    try:
+        completed = subprocess.run(
+            [sys.executable, "-m", "aether_worker.runner_process", "--prepare-image"],
+            env=env,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_PREPARE_TIMEOUT,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        sys.stderr.write("runner image prepare timed out\n")
+        return
+    if completed.returncode != 0:
+        sys.stderr.write(_redact(f"runner image prepare failed {completed.returncode}: {(completed.stderr or '')[-800:]}", secrets_to_hide) + "\n")
 
 
 def _open(
@@ -314,10 +359,9 @@ def _role_pid(item: object, skip: set[int]) -> int | None:
 
 
 def _is_recorded_role(pid: int) -> bool:
-    command = Path(f"/proc/{pid}/cmdline")
     try:
-        text = command.read_bytes().replace(b"\x00", b" ").decode(_ENCODING, "replace")
-    except OSError:
+        text = " ".join(psutil.Process(pid).cmdline())
+    except (psutil.Error, OSError):
         return False
     return any(name in text for name in _ROLE_COMMANDS)
 

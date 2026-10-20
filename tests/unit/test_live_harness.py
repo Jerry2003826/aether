@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import subprocess
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -131,7 +132,12 @@ def test_hybrid_context_uses_bm25_and_measured_vectors() -> None:
 
 
 def test_missing_docker_is_not_run(monkeypatch) -> None:
-    monkeypatch.setattr("aether_worker.live_harness.shutil.which", lambda _name: None)
+    monkeypatch.setattr("shutil.which", lambda _name, *args, **kwargs: None)
+    # No CLI and no daemon the SDK can reach either: the SDK alone is enough to run the check.
+    monkeypatch.setattr(
+        "aether_worker.runner.execute_docker",
+        lambda args, timeout=None: subprocess.CompletedProcess(["docker", *args], 1, "", "sdk_unreachable"),
+    )
     found = _linux_isolation("sk-live-SUPERSECRET")
     assert found["status"] == "not_run"
     assert found["reason"] == "docker_missing"

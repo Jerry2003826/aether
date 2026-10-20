@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
+from typing import Any
 
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
@@ -12,6 +14,14 @@ from aether_storage.db import Database
 
 
 UNSENT_DISPATCH_STATES = frozenset({"dispatched", "permitted"})
+# Run first inside a settling transaction, before any ledger row is locked: False means the caller
+# no longer holds what it is settling for (a coding attempt whose fencing token moved on).
+SettleGuard = Callable[[Any], bool]
+
+
+def _require_guard(conn, guard: SettleGuard | None) -> None:
+    if guard is not None and not guard(conn):
+        raise BudgetError("fence_lost")
 
 
 def _detail(value: object) -> dict:
@@ -20,6 +30,16 @@ def _detail(value: object) -> dict:
     if isinstance(value, dict):
         return dict(value)
     return {}
+
+
+def _reservation_detail(tokens: int, extra: dict | None) -> dict:
+    detail = {"reserved_tokens": tokens}
+    if not extra:
+        return detail
+    for key, value in extra.items():
+        if key != "reserved_tokens":
+            detail[key] = value
+    return detail
 
 
 def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_id: str, request_key: str, amount: int, detail: dict) -> None:
@@ -40,10 +60,204 @@ def _cancel_before_dispatch(conn, *, account_id: object, project_id: str, task_i
     )
 
 
+def _count(value: object) -> int:
+    return value if type(value) is int and value > 0 else 0
+
+
+def coding_call_micro_usd(tokens: int, detail: dict) -> int:
+    """Micro-USD held for one coding call of `tokens` tokens whose usage is not measured, rounded up.
+
+    The rate is the per-call hold recorded on the reservation: call_reserve_micro_usd /
+    call_reserve_tokens. It sizes holds and charges calls whose usage never arrived; measured
+    usage is priced by coding_usage_micro_usd. A row without both is an error (coding_rate_missing),
+    never 1 micro-USD per token.
+    """
+    if tokens <= 0:
+        return 0
+    per_tokens = _count(detail.get("call_reserve_tokens"))
+    per_micro = _count(detail.get("call_reserve_micro_usd"))
+    if not per_tokens or not per_micro:
+        raise BudgetError("coding_rate_missing")
+    return (tokens * per_micro + per_tokens - 1) // per_tokens
+
+
+# Coding prices are integers in micro-USD per million tokens (0.28 USD/Mtok is 280000), recorded on
+# the reservation with the pricing_version they came from.
+MICRO_USD_PRICE_UNIT_TOKENS = 1_000_000
+
+
+def _price(value: object) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def coding_prices_of(detail: dict) -> tuple[str, int, int]:
+    """(pricing_version, input price, output price) recorded on a coding reservation.
+
+    An empty or missing pricing_version, or a missing, non-integer or negative price, raises
+    BudgetError("pricing_missing"): measured usage is never priced 1 micro-USD per token.
+    """
+    version = detail.get("pricing_version")
+    per_input = _price(detail.get("input_micro_usd_per_mtok"))
+    per_output = _price(detail.get("output_micro_usd_per_mtok"))
+    if not isinstance(version, str) or not version.strip() or per_input is None or per_output is None:
+        raise BudgetError("pricing_missing")
+    return version, per_input, per_output
+
+
+def coding_usage_micro_usd(input_tokens: int, output_tokens: int, detail: dict) -> int:
+    """Micro-USD for measured usage: input tokens at the input price plus output tokens at the
+    output price, the sum rounded up once. Prices come from the reservation (coding_prices_of)."""
+    _version, per_input, per_output = coding_prices_of(detail)
+    total = max(0, input_tokens) * per_input + max(0, output_tokens) * per_output
+    return (total + MICRO_USD_PRICE_UNIT_TOKENS - 1) // MICRO_USD_PRICE_UNIT_TOKENS
+
+
+# Per-call money is kept next to each token counter on a coding reservation: <kind>_micro_usd is
+# the sum of the calls' rounded-up amounts, <kind>_priced_tokens the tokens those amounts cover.
+COST_KINDS = ("measured", "unknown_reserved", "pending")
+
+
+def add_call_cost(detail: dict, kind: str, tokens: int, micro_usd: int | None = None) -> None:
+    """Add one call of `tokens` to `kind`: at `micro_usd` when that call's amount was already
+    recorded, otherwise priced on its own now."""
+    if tokens <= 0:
+        return
+    amount = coding_call_micro_usd(tokens, detail) if micro_usd is None else max(0, micro_usd)
+    detail[f"{kind}_micro_usd"] = _count(detail.get(f"{kind}_micro_usd")) + amount
+    detail[f"{kind}_priced_tokens"] = _count(detail.get(f"{kind}_priced_tokens")) + tokens
+
+
+def remove_call_cost(detail: dict, kind: str, tokens: int, micro_usd: int | None = None) -> None:
+    """Take one call of `tokens` back out of `kind` (a pending call that finished either way).
+
+    micro_usd is the amount admission recorded for that call; it is subtracted exactly. Only a
+    call admitted before amounts were recorded (micro_usd None) is priced again.
+    """
+    if tokens <= 0:
+        return
+    priced = _count(detail.get(f"{kind}_priced_tokens"))
+    if not priced:
+        return
+    amount = coding_call_micro_usd(tokens, detail) if micro_usd is None else max(0, micro_usd)
+    detail[f"{kind}_priced_tokens"] = max(0, priced - tokens)
+    detail[f"{kind}_micro_usd"] = max(0, _count(detail.get(f"{kind}_micro_usd")) - amount)
+
+
+def move_call_cost(detail: dict, source: str, target: str) -> None:
+    """Move every call priced under `source` to `target`, keeping each call's own rounding."""
+    detail[f"{target}_micro_usd"] = _count(detail.get(f"{target}_micro_usd")) + _count(detail.get(f"{source}_micro_usd"))
+    detail[f"{target}_priced_tokens"] = _count(detail.get(f"{target}_priced_tokens")) + _count(detail.get(f"{source}_priced_tokens"))
+    detail[f"{source}_micro_usd"] = 0
+    detail[f"{source}_priced_tokens"] = 0
+
+
+def priced_micro_usd(detail: dict, kind: str, tokens: int) -> int:
+    """Micro-USD for `tokens` of `kind`: the per-call amounts recorded for them, and for any tokens
+    no call priced (a row written before calls were priced one by one) one rounded-up amount."""
+    if tokens <= 0:
+        return 0
+    covered = min(_count(detail.get(f"{kind}_priced_tokens")), tokens)
+    priced = _count(detail.get(f"{kind}_micro_usd")) if covered else 0
+    return priced + coding_call_micro_usd(tokens - covered, detail)
+
+
+def _unknown_charge(
+    unknown_tokens: int, unknown_micro: int, *, measured_tokens: int, measured_micro: int, reserved_tokens: int, reserved_cost: int
+) -> tuple[int, int]:
+    """Tokens and micro-USD to book for calls whose usage is unknown.
+
+    Each unknown call is charged what was reserved for it, priced at the configured rate one call at
+    a time (the caller sums those amounts into unknown_micro). Each unit is capped on its own by what
+    is still held after the measured usage: tokens by tokens, money by money.
+    """
+    if unknown_tokens <= 0:
+        return 0, 0
+    tokens = min(unknown_tokens, max(0, reserved_tokens - measured_tokens))
+    micro = min(unknown_micro, max(0, reserved_cost - measured_micro))
+    return tokens, micro
+
+
+def _replay_matches(existing, amount: int) -> bool:
+    """True when amount is what this row was first reserved with, before any top-up.
+
+    A replay (another worker re-running the same request_key) compares against that,
+    so a top-up does not turn the replay into idempotency_mismatch and strand the
+    enlarged hold. A row topped up before extended_micro_usd was recorded has no
+    exact figure; the request digest, which covers the original amount, decides it
+    as long as the row still holds at least that much.
+    """
+    reserved = int(existing["reserved_micro_usd"])
+    detail = _detail(existing["usage_detail"])
+    if not int(detail.get("reservation_extensions") or 0):
+        return reserved == amount
+    if "extended_micro_usd" in detail:
+        return reserved - int(detail.get("extended_micro_usd") or 0) == amount
+    return reserved >= amount
+
+
 class BudgetError(Exception):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+def reservation_can_grow(account: dict, *, amount: int, tokens: int) -> bool:
+    """True when this task can hold another non-verification reservation.
+
+    The ceiling matches reserve(): verification keeps its fraction, and a coding
+    top-up uses the remainder. Growing does not admit another request.
+    """
+    if amount < 0 or tokens < 0:
+        raise BudgetError("invalid_amount")
+    fraction = float(account["verification_reserve_fraction"])
+    money_ceiling = int(account["limit_micro_usd"] * (1 - fraction))
+    token_ceiling = int(account["token_limit"] * (1 - fraction))
+    spent = int(account["spent_micro_usd"]) + int(account["held_micro_usd"]) + amount
+    held_tokens = int(account["tokens_used"]) + int(account["tokens_held"]) + tokens
+    return spent <= money_ceiling and held_tokens <= token_ceiling
+
+
+def apply_reservation_extension(
+    conn,
+    *,
+    account_id: object,
+    project_id: str,
+    task_id: str,
+    request_key: str,
+    amount: int,
+    tokens: int,
+    detail: dict,
+) -> None:
+    """Add to a reserved row already locked by the caller. The account row is locked too.
+
+    tokens may be 0 when only money is short (calls rounded up one by one, ADR-F46 R7).
+    """
+    if amount < 0 or tokens < 0 or amount + tokens < 1:
+        raise BudgetError("invalid_amount")
+    detail["reserved_tokens"] = int(detail.get("reserved_tokens") or 0) + tokens
+    detail["reservation_extensions"] = int(detail.get("reservation_extensions") or 0) + 1
+    detail["extended_micro_usd"] = int(detail.get("extended_micro_usd") or 0) + amount
+    detail["extended_tokens"] = int(detail.get("extended_tokens") or 0) + tokens
+    conn.execute(
+        text(
+            "UPDATE model_requests SET reserved_micro_usd = reserved_micro_usd + :amount, usage_detail = CAST(:detail AS jsonb) "
+            "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved'"
+        ),
+        {
+            "amount": amount,
+            "detail": json.dumps(detail),
+            "project_id": project_id,
+            "task_id": task_id,
+            "request_key": request_key,
+        },
+    )
+    conn.execute(
+        text(
+            "UPDATE budget_accounts SET held_micro_usd = held_micro_usd + :amount, tokens_held = tokens_held + :tokens, "
+            "version = version + 1 WHERE id = :id"
+        ),
+        {"amount": amount, "tokens": tokens, "id": account_id},
+    )
 
 
 class BudgetLedger:
@@ -70,7 +284,7 @@ class BudgetLedger:
                 },
             )
 
-    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None, model_alias: str | None = None) -> bool:
+    def reserve(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, amount: int, role: str, tokens: int = 1, verification: bool = False, request: dict | None = None, model_alias: str | None = None, extra_detail: dict | None = None) -> bool:
         if amount < 0 or tokens < 0:
             raise BudgetError("invalid_amount")
         digest = sha256_text(json.dumps({
@@ -98,7 +312,7 @@ class BudgetLedger:
                 {"project_id": project_id, "task_id": task_id, "request_key": request_key},
             ).mappings().first()
             if existing is not None:
-                if existing["reserved_micro_usd"] != amount or existing["request_sha256"] != digest:
+                if existing["request_sha256"] != digest or not _replay_matches(existing, amount):
                     raise BudgetError("idempotency_mismatch")
                 return True
             fraction = float(account["verification_reserve_fraction"])
@@ -122,7 +336,7 @@ class BudgetLedger:
                         "role": role,
                         "model_alias": model_alias or role,
                         "amount": amount,
-                        "detail": json.dumps({"reserved_tokens": tokens}),
+                        "detail": json.dumps(_reservation_detail(tokens, extra_detail)),
                     },
                 )
             except IntegrityError as exc:
@@ -181,8 +395,123 @@ class BudgetLedger:
                 },
             )
 
-    def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str) -> None:
+    def settle_measured(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        actual: int,
+        input_tokens: int,
+        output_tokens: int,
+        unknown_tokens: int = 0,
+        unknown_micro_usd: int | None = None,
+        guard: SettleGuard | None = None,
+    ) -> str:
+        """Book known token usage and release the hold, including a measured overrun.
+
+        A row with no measured usage at all does not belong here: that stays mark_unknown
+        and keeps the hold. settle() still rejects a bill above its reservation. This path
+        is for a measured coding attempt whose tokens are already known.
+
+        actual is money (micro-USD) and input_tokens/output_tokens are tokens; they are booked
+        apart and neither is derived from the other here. The caller prices the measured calls at
+        the reservation's input and output prices, each call rounded up on its own, and passes their
+        sum. The reservation's pricing_version is written to the row with the bill.
+
+        unknown_tokens is what was reserved for calls of this attempt whose usage never
+        arrived (a timeout after sending, an answer without usage), and unknown_micro_usd the sum
+        of those calls' own amounts at the configured rate (None: the row's rate, one amount).
+        That part is charged rather than released, and only out of what is still held after the
+        measured usage, each unit on its own: the estimate never pushes the bill past the hold.
+        An overrun is measured money above the money held or measured tokens above the tokens held.
+
+        guard, if given, must hold before anything is booked; otherwise fence_lost and no change.
+        """
+        if actual < 0 or input_tokens < 0 or output_tokens < 0 or unknown_tokens < 0 or (unknown_micro_usd is not None and unknown_micro_usd < 0):
+            raise BudgetError("invalid_amount")
+        measured_tokens = input_tokens + output_tokens
         with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_status, actual_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().one()
+            detail = _detail(request["usage_detail"])
+            if request["usage_status"] == "known":
+                if request["actual_micro_usd"] != actual + int(detail.get("unknown_charged_micro_usd") or 0):
+                    raise BudgetError("conflicting_settlement")
+                return str(detail.get("book_result") or "settled")
+            if request["usage_status"] == "unknown":
+                raise BudgetError("unknown_not_zero")
+            if request["usage_status"] != "reserved":
+                raise BudgetError("not_reserved")
+            reserved_cost = int(request["reserved_micro_usd"])
+            reserved_tokens = int(detail.get("reserved_tokens") or 0)
+            unknown_micro = coding_call_micro_usd(unknown_tokens, detail) if unknown_micro_usd is None else unknown_micro_usd
+            unknown_charge_tokens, unknown_charge_micro = _unknown_charge(
+                unknown_tokens,
+                unknown_micro,
+                measured_tokens=measured_tokens,
+                measured_micro=actual,
+                reserved_tokens=reserved_tokens,
+                reserved_cost=reserved_cost,
+            )
+            overrun_micro = max(0, actual - reserved_cost)
+            overrun_tokens = max(0, measured_tokens - reserved_tokens)
+            book_result = "overrun" if overrun_micro or overrun_tokens else "settled"
+            detail["book_result"] = book_result
+            detail["pending_tokens"] = 0
+            detail["reconciliation"] = "recorded" if book_result == "overrun" else "booked"
+            if book_result == "overrun":
+                detail["overrun_micro_usd"] = overrun_micro
+                detail["overrun_tokens"] = overrun_tokens
+            if unknown_tokens:
+                detail["unknown_charged_tokens"] = unknown_charge_tokens
+                detail["unknown_charged_micro_usd"] = unknown_charge_micro
+            conn.execute(
+                text(
+                    "UPDATE model_requests SET usage_status = 'known', actual_micro_usd = :actual, input_tokens = :input_tokens, "
+                    "output_tokens = :output_tokens, pricing_version = :pricing_version, usage_detail = CAST(:detail AS jsonb), "
+                    "completed_at = now() WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key"
+                ),
+                {
+                    "actual": actual + unknown_charge_micro,
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "pricing_version": detail.get("pricing_version") or None,
+                    "detail": json.dumps(detail),
+                    "project_id": project_id,
+                    "task_id": task_id,
+                    "request_key": request_key,
+                },
+            )
+            conn.execute(
+                text(
+                    "UPDATE budget_accounts SET held_micro_usd = held_micro_usd - :reserved, spent_micro_usd = spent_micro_usd + :actual, "
+                    "tokens_held = tokens_held - :reserved_tokens, tokens_used = tokens_used + :tokens, version = version + 1 WHERE id = :id"
+                ),
+                {
+                    "reserved": reserved_cost,
+                    "actual": actual + unknown_charge_micro,
+                    "reserved_tokens": reserved_tokens,
+                    "tokens": measured_tokens + unknown_charge_tokens,
+                    "id": account["id"],
+                },
+            )
+        return book_result
+
+    def mark_unknown(self, *, owner_id: str, project_id: str, task_id: str, request_key: str, guard: SettleGuard | None = None) -> None:
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
             conn.execute(
                 text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
                 {"project_id": project_id, "task_id": task_id},
@@ -196,6 +525,45 @@ class BudgetLedger:
             ).rowcount
             if updated != 1:
                 raise BudgetError("not_reserved")
+
+    def cancel_unused(
+        self,
+        *,
+        owner_id: str,
+        project_id: str,
+        task_id: str,
+        request_key: str,
+        guard: SettleGuard | None = None,
+        reason: str | None = None,
+    ) -> bool:
+        """Release a reservation through which nothing billable was sent, back to the account in full.
+
+        Only for a row the caller has shown carried no billable call to a provider; True when it was
+        released. reason, when given, is written to usage_detail as released_unsent.
+        """
+        with self.database.transaction(owner_id=owner_id, project_id=project_id) as conn:
+            _require_guard(conn, guard)
+            account = conn.execute(
+                text("SELECT id FROM budget_accounts WHERE project_id = :project_id AND task_id = :task_id FOR UPDATE"),
+                {"project_id": project_id, "task_id": task_id},
+            ).mappings().one()
+            request = conn.execute(
+                text(
+                    "SELECT reserved_micro_usd, usage_detail FROM model_requests "
+                    "WHERE project_id = :project_id AND task_id = :task_id AND request_key = :request_key AND usage_status = 'reserved' FOR UPDATE"
+                ),
+                {"project_id": project_id, "task_id": task_id, "request_key": request_key},
+            ).mappings().first()
+            if request is None:
+                return False
+            detail = _detail(request["usage_detail"])
+            if reason is not None:
+                detail["released_unsent"] = reason
+            _cancel_before_dispatch(
+                conn, account_id=account["id"], project_id=project_id, task_id=task_id, request_key=request_key,
+                amount=int(request["reserved_micro_usd"]), detail=detail,
+            )
+        return True
 
     def _held_by(self, conn, *, project_id: str, task_id: str, request_key: str, attempt_id: str) -> tuple[object, dict, dict] | None:
         account = conn.execute(

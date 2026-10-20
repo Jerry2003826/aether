@@ -11,6 +11,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "services" / "worker"))
 sys.path.insert(0, str(ROOT / "packages" / "storage"))
+sys.path.append(str(ROOT))
 
 from aether_worker.f26_acceptance import LIVE_KEY, RESULT_NAME, run_f26_acceptance
 from aether_worker.live_harness import redact_secret

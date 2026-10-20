@@ -7,6 +7,7 @@ that prints the version is the git checkout, so the CLI can read the tag.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import json
 import os
 import shutil
@@ -50,33 +51,71 @@ def _fail(message: str) -> None:
     raise SystemExit(message)
 
 
+DOWNLOAD_ATTEMPTS = 5
+_TRANSIENT_HTTP = frozenset({429, 500, 502, 503, 504})
+
+
+class _ShortBody(OSError):
+    """The body ended before its Content-Length: a dropped connection, retried like one."""
+
+
+def _transient(exc: BaseException) -> bool:
+    """Worth another attempt: rate limits, 5xx, a redirect loop, connection errors, timeouts, short bodies."""
+    if isinstance(exc, urllib.error.HTTPError):
+        # urllib reports a redirect loop as the 30x it stopped at; github.com and codeload can bounce.
+        return exc.code in _TRANSIENT_HTTP or 300 <= exc.code < 400
+    # URLError wraps connection refusals, resets and DNS failures; a local disk error is not transient.
+    return isinstance(exc, (urllib.error.URLError, http.client.HTTPException, ConnectionError, TimeoutError, _ShortBody))
+
+
+def _reason(exc: BaseException) -> str:
+    if isinstance(exc, urllib.error.HTTPError):
+        return f"HTTP {exc.code}"
+    if isinstance(exc, urllib.error.URLError):
+        return f"URLError {exc.reason}"
+    return type(exc).__name__
+
+
+def _fetch(url: str, partial: Path) -> None:
+    # A new Request every attempt: urllib's redirect handler keeps its loop count on the request
+    # (redirect_dict), so a reused one counts every earlier attempt's 302 and fails as a loop.
+    request = urllib.request.Request(url, headers={"User-Agent": "aether-hermes-install"})
+    with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as handle:
+        expected = response.headers.get("Content-Length")
+        received = 0
+        while True:
+            chunk = response.read(1024 * 1024)
+            if not chunk:
+                break
+            handle.write(chunk)
+            received += len(chunk)
+    if expected is not None and expected.isdigit() and received != int(expected):
+        raise _ShortBody(f"{received} of {expected} bytes")
+
+
 def _download(url: str, destination: Path) -> None:
+    """Download url to destination, retrying transient failures only; the caller checks the checksum.
+
+    At most DOWNLOAD_ATTEMPTS attempts with 2/4/8/16 s backoff. A non-transient error fails at once and
+    the last transient one fails after the last attempt, both as SystemExit naming the attempts and the
+    reason. A checksum mismatch is the caller's and is never retried.
+    """
     destination.parent.mkdir(parents=True, exist_ok=True)
     partial = destination.with_suffix(destination.suffix + ".partial")
-    request = urllib.request.Request(url, headers={"User-Agent": "aether-hermes-install"})
     delay = 2
-    for attempt in range(5):
+    for attempt in range(1, DOWNLOAD_ATTEMPTS + 1):
         try:
-            with urllib.request.urlopen(request, timeout=120) as response, partial.open("wb") as handle:
-                while True:
-                    chunk = response.read(1024 * 1024)
-                    if not chunk:
-                        break
-                    handle.write(chunk)
-            partial.replace(destination)
-            return
-        except urllib.error.HTTPError as exc:
-            if partial.exists():
-                partial.unlink()
-            if exc.code not in {429, 500, 502, 503, 504} or attempt == 4:
-                raise
-        except urllib.error.URLError:
-            if partial.exists():
-                partial.unlink()
-            if attempt == 4:
-                raise
-        time.sleep(delay)
-        delay *= 2
+            _fetch(url, partial)
+        except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
+            partial.unlink(missing_ok=True)
+            if not _transient(exc) or attempt == DOWNLOAD_ATTEMPTS:
+                noun = "attempt" if attempt == 1 else "attempts"
+                raise SystemExit(f"hermes archive download failed after {attempt} {noun}: {_reason(exc)}") from exc
+            time.sleep(delay)
+            delay *= 2
+            continue
+        partial.replace(destination)
+        return
 
 
 def _archive_sha(archive: Path, member: str) -> str:

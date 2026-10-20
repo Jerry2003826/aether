@@ -4,9 +4,27 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 
-from aether_worker.coding_sandbox import LOG_CAPTURE_LIMIT, _bounded_logs, container_arguments, container_name
+from docker.errors import DockerException
+
+from aether_worker.coding_sandbox import (
+    LOG_CAPTURE_LIMIT,
+    RESULT_CAPTURE_LIMIT,
+    _bounded_logs,
+    container_arguments,
+    container_name,
+    sweep_leftover_coding_containers,
+)
 from aether_worker.net_guard import fixtures_enabled
+from aether_worker.openhands_image import (
+    IMAGE_UNAVAILABLE,
+    ImageUnavailable,
+    build_openhands_sandbox,
+    coding_runtime_image,
+    ensure_openhands_sandbox,
+    launch_image,
+)
 from aether_worker.role_http import serve_role
 from aether_worker.runner import JOB_IMAGE, _docker, probe_docker_daemon
 from aether_worker.threat_launch import ThreatLaunchError, docker_cleanup, docker_runner, execute_container
@@ -15,6 +33,9 @@ from aether_worker.sandbox_delegate import (
     accepted_grace,
     accepted_job,
     accepted_name,
+    accepted_objective,
+    accepted_proxy,
+    accepted_token,
     accepted_workspace,
 )
 
@@ -24,7 +45,12 @@ def main() -> None:
     if not token:
         raise SystemExit("runner 缺少 AETHER_LOOPBACK_TOKEN")
     os.environ["AETHER_PROCESS_ROLE"] = "runner"
+    # The image is ensured by prepare_image before this role starts (role_launch), so the
+    # worker's readiness wait never includes a first build on a clean host.
     started = probe_docker_daemon()
+    # Coding containers a previous run left behind (crash, unconfirmed stop, failed removal). Here,
+    # in the role that owns Docker and holds no verifier or provider secret, before any request.
+    sweep_leftover_coding_containers()
 
     def health() -> dict[str, str]:
         return {"role": "runner", **started}
@@ -73,7 +99,7 @@ def _sandbox(body: dict) -> tuple[int, dict]:
     op = body.get("op")
     try:
         if op == "logs":
-            return 200, _logs(body.get("name"))
+            return 200, _logs(body.get("name"), body.get("limit"))
         completed = _completed(op, body)
     except SandboxDelegateError:
         return 400, {"error": "rejected"}
@@ -87,7 +113,9 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
         job = accepted_job(body.get("job_id"))
         return _docker(["ps", "-aq", "--filter", f"label=aether.coding={job}", "--filter", "label=aether.role=coding"])
     if op == "run":
-        return _run(body.get("workspace"), body.get("job_id"))
+        return _run(
+            body.get("workspace"), body.get("job_id"), body.get("proxy_dir"), body.get("job_token"), body.get("objective")
+        )
     if op == "stop":
         return _docker(["stop", "-t", accepted_grace(body.get("grace")), accepted_name(body.get("name"))])
     if op == "rm":
@@ -99,17 +127,66 @@ def _completed(op: object, body: dict) -> subprocess.CompletedProcess[str] | Non
     return None
 
 
-def _run(workspace: object, job_id: object) -> subprocess.CompletedProcess[str]:
+def _ensure_coding_image(started: dict[str, str]) -> None:
+    """Label check and local build only, no pull. Not on the startup path: prepare_image is.
+
+    Kept for callers that already hold a probe result and must not reach a registry.
+    """
+    if started.get("runtime") != "enabled":
+        return
+    try:
+        if coding_runtime_image() is not None:
+            return
+        build_openhands_sandbox()
+    except (DockerException, OSError):
+        sys.stderr.write("openhands sandbox image build failed\n")
+
+
+def prepare_image() -> int:
+    """Ensure the OpenHands sandbox image (local, else pull, else build). Exit status for the one-shot step.
+
+    No Docker means nothing to prepare (0). A failed pull and build is reported (1); the
+    roles still start and a coding job then fails as image_unavailable.
+    """
+    started = probe_docker_daemon()
+    if started.get("runtime") != "enabled":
+        return 0
+    try:
+        ensure_openhands_sandbox()
+    except ImageUnavailable as exc:
+        sys.stderr.write(f"openhands sandbox image unavailable: {exc.reason}\n")
+        return 1
+    except (DockerException, OSError):
+        sys.stderr.write("openhands sandbox image build failed\n")
+        return 1
+    return 0
+
+
+def _run(
+    workspace: object, job_id: object, proxy_dir: object, job_token: object, objective: object
+) -> subprocess.CompletedProcess[str]:
     root = accepted_workspace(workspace)
     job = accepted_job(job_id)
-    args = [part for part in container_arguments(root, JOB_IMAGE, job_id=job) if part != "--rm"]
+    proxy = accepted_proxy(proxy_dir)
+    token = accepted_token(job_token)
+    text = accepted_objective(objective)
+    try:
+        image = launch_image(JOB_IMAGE, JOB_IMAGE)
+    except LookupError:
+        return subprocess.CompletedProcess(["docker"], 1, "", IMAGE_UNAVAILABLE)
+    args = [part for part in container_arguments(root, image, objective=text, job_id=job, proxy_dir=proxy, job_token=token) if part != "--rm"]
     return _docker(["run", "-d", "--name", container_name(job), *args[1:]])
 
 
-def _logs(name: object) -> dict[str, str]:
-    captured = _bounded_logs(accepted_name(name), limit=LOG_CAPTURE_LIMIT)
+def _logs(name: object, limit: object = None) -> dict[str, str]:
+    """The worker may ask for up to RESULT_CAPTURE_LIMIT bytes so a large RESULT line stays whole."""
+    wanted = limit if isinstance(limit, int) and not isinstance(limit, bool) and limit > 0 else LOG_CAPTURE_LIMIT
+    captured = _bounded_logs(accepted_name(name), limit=min(wanted, RESULT_CAPTURE_LIMIT))
     return {"stdout": captured["stdout"], "stderr": captured["stderr"]}
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["--prepare-image"]:
+        os.environ["AETHER_PROCESS_ROLE"] = "runner"
+        raise SystemExit(prepare_image())
     main()

@@ -10,11 +10,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
 
+from aether_api.body_models import MemoryCreateBody, MemoryPatchBody
 from aether_api.control import _accepted, _claim_idempotency, _decode_cursor, _encode_cursor, _idempotency_key, _owned, _owner, _stamp, _store_idempotency, _db, _task_id
 from aether_api.errors import ApiError
 from aether_api.settings import Settings
 from aether_domain.security import sha256_text
-from aether_worker.memory import ACTIONS, CATEGORIES, KINDS, MemoryError, classify_memory
+from aether_worker.memory import MemoryError, classify_memory
 
 def register_memory_routes(app: FastAPI, settings: Settings) -> None:
     @app.get("/v1/projects/{project_id}/memories", operation_id="listMemories")
@@ -139,50 +140,11 @@ def register_memory_routes(app: FastAPI, settings: Settings) -> None:
 
 
 def _create_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or set(body) - {"claim", "kind", "category", "source_artifact_ids"}:
-        raise ApiError(422, "invalid_memory", "记忆请求不合法")
-    claim = body.get("claim")
-    kind = body.get("kind")
-    category = body.get("category")
-    sources = body.get("source_artifact_ids") or []
-    if not isinstance(claim, str) or not claim.strip() or kind not in KINDS or category not in CATEGORIES or not isinstance(sources, list):
-        raise ApiError(422, "invalid_memory", "记忆请求不合法")
-    for item in sources:
-        try:
-            uuid.UUID(str(item))
-        except ValueError as exc:
-            raise ApiError(422, "invalid_memory", "来源编号不合法") from exc
-    return {"claim": claim.strip(), "kind": kind, "category": category, "source_artifact_ids": [str(item) for item in sources]}
+    return MemoryCreateBody.model_validate(body).model_dump()
 
 
 def _patch_body(body: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(body, dict) or body.get("action") not in ACTIONS:
-        raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    action = str(body["action"])
-    if action == "declassify":
-        return _declassify_body(body)
-    if set(body) - {"claim", "action"}:
-        raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    claim = body.get("claim")
-    if claim is not None and (not isinstance(claim, str) or not claim.strip()):
-        raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    if action in {"correct", "supersede"} and not isinstance(claim, str):
-        raise ApiError(422, "invalid_memory", "修正必须带新的说法")
-    return {"action": action, "claim": None if claim is None else claim.strip(), "sensitivity": None, "authorization_id": None}
-
-
-def _declassify_body(body: dict[str, Any]) -> dict[str, Any]:
-    if set(body) - {"action", "sensitivity", "authorization_id"}:
-        raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    sensitivity = body.get("sensitivity")
-    authorization_id = body.get("authorization_id")
-    if sensitivity not in {"standard", "high"}:
-        raise ApiError(422, "invalid_memory", "记忆修正不合法")
-    try:
-        uuid.UUID(str(authorization_id))
-    except (TypeError, ValueError) as exc:
-        raise ApiError(422, "invalid_memory", "记忆修正不合法") from exc
-    return {"action": "declassify", "claim": None, "sensitivity": str(sensitivity), "authorization_id": str(authorization_id)}
+    return MemoryPatchBody.model_validate(body).model_dump()
 
 
 def _enqueue(conn: Any, *, project_id: str, command_key: str, kind: str, payload: dict[str, Any]) -> None:

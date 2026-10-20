@@ -1,0 +1,336 @@
+"""The entry's RESULT line always reaches the worker whole, and empty-file changes are changes."""
+
+from __future__ import annotations
+
+import subprocess
+from pathlib import Path
+
+import pytest
+from aether_worker import coding_sandbox
+from aether_worker.coding_jobs import _agent_patch, _coding_terminal
+
+_ENTRY_DIR = Path("services/worker/aether_worker").resolve()
+_PYTHON = Path("environments/openhands/.venv/bin/python")
+
+
+def _entry(snippet: str, tmp_path: Path) -> subprocess.CompletedProcess[bytes]:
+    """Run `snippet` with the sandbox entry imported as `entry`, in the sandbox's interpreter."""
+    assert _PYTHON.is_file(), "environments/openhands lock was not synced"
+    code = (
+        f"import sys\nsys.path.append({str(_ENTRY_DIR)!r})\nimport openhands_sandbox_entry as entry\n"
+        + snippet
+    )
+    env = {
+        "PATH": "/usr/bin:/bin",
+        "HOME": str(tmp_path),
+        "AETHER_SANDBOX_WORK": str(tmp_path / "work"),
+    }
+    return subprocess.run(
+        [str(_PYTHON.absolute()), "-I", "-c", code],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        timeout=120,
+        check=False,
+    )
+
+
+def test_a_patch_that_json_escaping_inflates_still_yields_a_whole_result_line(
+    tmp_path: Path, monkeypatch
+) -> None:
+    # Under the raw 2 MiB cap, but each control character becomes a six-byte \u00XX escape.
+    raw = 1_900_000
+    assert raw < coding_sandbox.MAX_PATCH_BYTES
+    snippet = (
+        f"patch = '--- a/app.py\\n+++ b/app.py\\n@@ -1 +1 @@\\n+' + '\\x01' * {raw} + '\\n'\n"
+        "entry.emit({'passed': 1, 'failed': 0, 'errors': 0, 'cases': [{'name': 'test_app.test_value', 'verdict': 'PASS', 'detail': ''}],"
+        " 'agent_completed': True, 'model_requests': 1, 'patch': patch}, 0)\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    stdout = b"agent log line\n" * 1000 + completed.stdout
+    line = stdout.rstrip(b"\n").rsplit(b"\n", 1)[-1]
+    assert line.startswith(b"RESULT ")
+    assert len(line) + 1 <= coding_sandbox.RESULT_CAPTURE_LIMIT, len(line)
+
+    # What the worker reads back: only the last RESULT_CAPTURE_LIMIT bytes of stdout.
+    monkeypatch.setattr(
+        coding_sandbox, "container_logs", lambda _name, *, limit: (stdout[-limit:], b"")
+    )
+    monkeypatch.setattr(coding_sandbox, "worker_delegates", lambda: False)
+    monkeypatch.setattr(
+        coding_sandbox,
+        "_sandbox_docker",
+        lambda args, *, timeout=None: subprocess.CompletedProcess(
+            args, 0, "0\n" if args[:2] == ["inspect", "-f"] else "", ""
+        ),
+    )
+    collected = coding_sandbox._collect_exit("aether-code-escape")
+    result = collected["result"]
+    assert isinstance(result, dict), (
+        "the RESULT line was cut and the worker would report sandbox_failed"
+    )
+    assert result["patch"] == ""
+    assert result["patch_omitted"] == "too_large"
+    sandbox = {"exit_code": 0, "result": result}
+    assert _coding_terminal(
+        sandbox, upstream_error=None, measured=(3, 4), usage_missing=False,
+        channel_revoked=True,
+    ) == ("FAILED", "patch_too_large")
+
+
+def _patch_after(tmp_path: Path, baseline: dict[str, str], change: str) -> str:
+    job = tmp_path / "job"
+    for name, text in baseline.items():
+        path = job / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n"
+        + change
+        + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    return completed.stdout.decode()
+
+
+@pytest.mark.parametrize(
+    ("baseline", "change", "name"),
+    [
+        (
+            {"app.py": "def value():\n    return 1\n"},
+            "(job / 'pkg').mkdir()\n(job / 'pkg' / '__init__.py').write_text('')\n",
+            "pkg/__init__.py",
+        ),
+        (
+            {"app.py": "def value():\n    return 1\n", "legacy.py": ""},
+            "(job / 'legacy.py').unlink()\n",
+            "legacy.py",
+        ),
+    ],
+    ids=["create_empty", "delete_empty"],
+)
+def test_creating_or_deleting_an_empty_file_is_a_change(
+    tmp_path: Path, baseline: dict[str, str], change: str, name: str
+) -> None:
+    patch = _patch_after(tmp_path, baseline, change)
+    assert name in patch, patch
+    sandbox = {"exit_code": 0, "result": {"patch": patch}}
+    assert _agent_patch(sandbox) == patch
+
+
+def test_an_untouched_empty_file_is_not_a_change(tmp_path: Path) -> None:
+    assert (
+        _patch_after(tmp_path, {"app.py": "x = 1\n", "pkg/__init__.py": ""}, "") == ""
+    )
+
+
+def _applied(tmp_path: Path, baseline: dict[str, str], patch: str) -> Path:
+    """A fresh copy of the baseline with the published patch applied by git apply."""
+    target = tmp_path / "applied"
+    for name, text in baseline.items():
+        path = target / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    target.mkdir(exist_ok=True)
+    (tmp_path / "published.diff").write_text(patch, encoding="utf-8")
+    done = subprocess.run(["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=target, capture_output=True, text=True, check=False)
+    assert done.returncode == 0, done.stderr + patch
+    return target
+
+
+def test_deleting_a_file_publishes_a_deletion_that_removes_it(tmp_path: Path) -> None:
+    """Codex P1 (openhands_sandbox_entry.py:355): applied, the patch removes the file, not empties it."""
+    baseline = {"app.py": "def value():\n    return 1\n", "legacy.py": "OLD = 1\nMORE = 2\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'legacy.py').unlink()\n")
+    assert "--- a/legacy.py\n+++ /dev/null\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert not (applied / "legacy.py").exists(), patch
+    assert (applied / "app.py").read_text(encoding="utf-8") == baseline["app.py"]
+
+
+def test_creating_a_file_publishes_a_creation_from_dev_null(tmp_path: Path) -> None:
+    baseline = {"app.py": "def value():\n    return 1\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'pkg').mkdir()\n(job / 'pkg' / 'fresh.py').write_text('NEW = 1\\n')\n")
+    assert "--- /dev/null\n+++ b/pkg/fresh.py\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert (applied / "pkg" / "fresh.py").read_text(encoding="utf-8") == "NEW = 1\n"
+
+
+def test_emptying_a_file_keeps_it_as_an_empty_file(tmp_path: Path) -> None:
+    """Present-but-empty is not missing: emptying a file is a modification, and the file stays."""
+    baseline = {"app.py": "def value():\n    return 1\n", "notes.py": "X = 1\n"}
+    patch = _patch_after(tmp_path, baseline, "(job / 'notes.py').write_text('')\n")
+    assert "--- a/notes.py\n+++ b/notes.py\n" in patch, patch
+    applied = _applied(tmp_path, baseline, patch)
+    assert (applied / "notes.py").read_text(encoding="utf-8") == ""
+
+
+def test_a_deleted_and_an_edited_file_apply_together(tmp_path: Path) -> None:
+    baseline = {"app.py": "def value():\n    return 1\n", "old.py": "A = 1\n"}
+    change = "(job / 'old.py').unlink()\n(job / 'app.py').write_text('def value():\\n    return 42\\n')\n"
+    applied = _applied(tmp_path, baseline, _patch_after(tmp_path, baseline, change))
+    assert not (applied / "old.py").exists()
+    assert (applied / "app.py").read_text(encoding="utf-8") == "def value():\n    return 42\n"
+
+
+def test_the_published_patch_reproduces_non_utf8_files_byte_for_byte(tmp_path: Path) -> None:
+    """Codex P1 (openhands_sandbox_entry.py:325): applied with git apply, the published patch yields
+    exactly the bytes that were graded, including files that are not UTF-8."""
+    baseline = {
+        "app.py": b"def value():\n    return 1\n",
+        "latin.txt": b"caf\xe9\n",
+        "blob.bin": b"\xff\xfe\x00old\x80",
+        "gone.bin": b"\x81\x82\n",
+        "keep.txt": b"same \xe9\n",
+    }
+    graded = {
+        "app.py": b"def value():\n    return 2\n",
+        # Two distinct invalid sequences that decode to the same text under errors="replace".
+        "latin.txt": b"caf\xe8\n",
+        "blob.bin": b"\xff\xfe\x00new\x80\x00 no trailing newline",
+        "made.bin": b"\x00\x01\x02\xfe\xff",
+        "keep.txt": b"same \xe9\n",
+    }
+    job = tmp_path / "job"
+    applied = tmp_path / "applied"
+    for root in (job, applied):
+        root.mkdir()
+        for name, data in baseline.items():
+            (root / name).write_bytes(data)
+    change = (
+        "(job / 'app.py').write_bytes(b'def value():\\n    return 2\\n')\n"
+        "(job / 'latin.txt').write_bytes(b'caf\\xe8\\n')\n"
+        "(job / 'blob.bin').write_bytes(b'\\xff\\xfe\\x00new\\x80\\x00 no trailing newline')\n"
+        "(job / 'made.bin').write_bytes(b'\\x00\\x01\\x02\\xfe\\xff')\n"
+        "(job / 'gone.bin').unlink()\n"
+    )
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n" + change + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    patch = completed.stdout.decode("utf-8")
+    (tmp_path / "published.diff").write_text(patch, encoding="utf-8")
+    done = subprocess.run(
+        ["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr + patch
+    found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
+    assert found == graded, patch
+    assert not (applied / "gone.bin").exists(), patch
+
+
+def test_the_published_patch_reproduces_utf8_text_byte_for_byte(tmp_path: Path) -> None:
+    """Same root cause as the non-UTF-8 case: valid UTF-8 text is also published byte for byte. A last
+    line without a newline stays without one, a change to that newline alone is a change, and the line
+    separators str.splitlines knows but patch tools do not (CR, FF, U+2028, ...) stay inside their line."""
+    baseline = {
+        "both.py": b"X = 1",
+        "drop.py": b"X = 1\n",
+        "add.py": b"X = 1",
+        "cr.txt": b"a\rb\n",
+        "seps.py": "S = '\u2028\x0c\x1c\x85'\nT = 1\n".encode(),
+    }
+    graded = {
+        "both.py": b"X = 2",
+        "drop.py": b"X = 1",
+        "add.py": b"X = 1\n",
+        "cr.txt": b"a\rc\n",
+        "seps.py": "S = '\u2028\x0c\x1c\x85'\nT = 2\n".encode(),
+    }
+    job = tmp_path / "job"
+    applied = tmp_path / "applied"
+    for root in (job, applied):
+        root.mkdir()
+        for name, data in baseline.items():
+            (root / name).write_bytes(data)
+    change = "".join(f"(job / {name!r}).write_bytes({data!r})\n" for name, data in graded.items())
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n" + change + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    patch = completed.stdout.decode("utf-8")
+    assert _agent_patch({"result": {"patch": patch}}) == patch
+    (tmp_path / "published.diff").write_bytes(completed.stdout)
+    done = subprocess.run(
+        ["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr + patch
+    found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
+    assert found == graded, patch
+
+
+_APP = b"def value():\n    return 1\n"
+_EDIT = {"app.py": b"def value():\n    return 2\n"}
+
+
+@pytest.mark.parametrize(
+    ("baseline", "graded"),
+    [
+        # A patch of only an empty file: a header-only text diff makes git apply fail with "No valid patches".
+        ({"app.py": _APP}, {"app.py": _APP, "empty.py": b""}),
+        ({"app.py": _APP, "empty.py": b""}, {"app.py": _APP}),
+        # Mixed with other changes, the same header-only diff is skipped silently.
+        ({"app.py": _APP}, {**_EDIT, "empty.py": b""}),
+        ({"app.py": _APP, "empty.py": b""}, dict(_EDIT)),
+        ({"app.py": _APP, "gone.py": b"A = 1\n"}, dict(_EDIT)),
+        ({"app.py": _APP, "latin.txt": b"caf\xe9\n"}, {**_EDIT, "latin.txt": b"caf\xe8\n"}),
+        ({"app.py": b"X = 1"}, {"app.py": b"X = 2"}),
+        ({"app.py": b"X = 1"}, {"app.py": b"X = 1\n"}),
+        ({"app.py": b"X = 1\n"}, {"app.py": b"X = 1"}),
+        ({"app.py": _APP, "blob.bin": b"\x00\x01old"}, {**_EDIT, "blob.bin": b"\x00\x01new\xff"}),
+        ({"app.py": _APP}, {"app.py": _APP, "made.bin": b"\x00\xff\x00"}),
+    ],
+    ids=[
+        "create_empty_alone",
+        "delete_empty_alone",
+        "create_empty_mixed",
+        "delete_empty_mixed",
+        "delete_non_empty",
+        "non_utf8",
+        "no_newline_at_eof",
+        "only_eof_newline_added",
+        "only_eof_newline_removed",
+        "binary_modified",
+        "binary_only_created",
+    ],
+)
+def test_git_apply_of_the_published_patch_gives_the_graded_bytes(
+    tmp_path: Path, baseline: dict[str, bytes], graded: dict[str, bytes]
+) -> None:
+    """Codex 16:04 (openhands_sandbox_entry.py :325/:334/:355): whatever changed (empty files created or
+    deleted alone or with other changes, deletions, non-UTF-8, binary, the last newline only), the worker
+    takes the published patch and git apply of it reproduces the graded bytes exactly."""
+    job = tmp_path / "job"
+    applied = tmp_path / "applied"
+    for root in (job, applied):
+        root.mkdir()
+        for name, data in baseline.items():
+            (root / name).write_bytes(data)
+    change = "".join(f"(job / {name!r}).unlink()\n" for name in baseline if name not in graded)
+    change += "".join(f"(job / {name!r}).write_bytes({data!r})\n" for name, data in graded.items())
+    snippet = (
+        "from pathlib import Path\n"
+        f"job = Path({str(job)!r})\n"
+        "before = entry._snapshot(job)\n" + change + "sys.stdout.write(entry._patch(before, job))\n"
+    )
+    completed = _entry(snippet, tmp_path)
+    assert completed.returncode == 0, completed.stderr[-2000:]
+    patch = completed.stdout.decode("utf-8")
+    assert _agent_patch({"result": {"patch": patch}}) == patch, patch
+    (tmp_path / "published.diff").write_bytes(completed.stdout)
+    done = subprocess.run(
+        ["git", "apply", "-v", str(tmp_path / "published.diff")], cwd=applied, capture_output=True, text=True, check=False
+    )
+    assert done.returncode == 0, done.stderr + patch
+    found = {path.relative_to(applied).as_posix(): path.read_bytes() for path in applied.rglob("*") if path.is_file()}
+    assert found == graded, done.stderr + patch

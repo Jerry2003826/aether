@@ -15,6 +15,7 @@ from sqlalchemy import text
 from aether_storage.db import Database
 from aether_worker.grader_protocol import extract_protocol, probes_document, values_match
 from aether_worker.grader_runner import GRADER_PROGRAM as _GRADER_PROGRAM
+from aether_worker.container_runtime import build_from_dockerfile
 from aether_worker.runner import JOB_IMAGE, _docker
 from aether_worker.sandbox_image import grader_dockerfile
 from aether_worker.snapshot import SnapshotRejected, copy_tree, ensure_real_directory, read_tree
@@ -118,13 +119,7 @@ def _ensure_grader_image() -> str | None:
             pulled = _docker(["pull", JOB_IMAGE])
             if pulled.returncode != 0:
                 return None
-        built = subprocess.run(
-            ["docker", "build", "--label", f"aether.grader_dockerfile={stamp}", "-t", GRADER_IMAGE, "-"],
-            input=dockerfile,
-            text=True,
-            capture_output=True,
-            check=False,
-        )
+        built = build_from_dockerfile(dockerfile, tag=GRADER_IMAGE, labels={"aether.grader_dockerfile": stamp})
         if built.returncode != 0:
             return None
         found = _image_by_stamp(stamp)
@@ -162,6 +157,30 @@ def run_grader_container(
             "--network",
             "none",
             "--read-only",
+            "--cap-drop",
+            "ALL",
+            # The grader is root (PID 1) and must stay root: it hides the suite from the candidate by
+            # running probes as nobody. Without capabilities that root cannot do its job, so exactly
+            # these come back (all in Docker's default set; nothing else):
+            #   DAC_OVERRIDE  /work is a host bind mount owned by the worker uid with 0700 dirs and a
+            #                 0600 protocol.json/suite, so root needs it to stat/read them (DAC_READ_SEARCH
+            #                 would also do, but it enables open_by_handle_at and is not a Docker default);
+            #                 the mount and the rootfs are read-only, writes only reach the /run/aether tmpfs.
+            #   CHOWN         hand /run/aether/child to nobody.
+            #   SETUID/SETGID setuid/setgid/setgroups to nobody for every probe and pytest run.
+            #   KILL          kill(-1) reaps nobody's leftover processes; without it they survive.
+            # A non-root --user is no alternative: it cannot drop to nobody (Docker gives a non-root
+            # user no effective capabilities) and nobody would then share the suite owner's view.
+            "--cap-add",
+            "CHOWN",
+            "--cap-add",
+            "DAC_OVERRIDE",
+            "--cap-add",
+            "KILL",
+            "--cap-add",
+            "SETGID",
+            "--cap-add",
+            "SETUID",
             "--security-opt",
             "no-new-privileges",
             "--pids-limit",

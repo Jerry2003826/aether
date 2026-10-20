@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "services" / "worker"))
+sys.path.append(str(ROOT))
 
 from aether_worker.hermes_compare import RESULT_NAME, run_four_way
 from aether_worker.live_harness import LIVE_KEY, redact_secret
