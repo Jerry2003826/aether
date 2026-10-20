@@ -120,3 +120,34 @@ def test_dataset_carries_a_per_family_baseline() -> None:
     partial = [{"family": "a", "suite_files": files, "baseline_pass": True}, {"family": "b", "suite_files": files}]
     with pytest.raises(DatasetError):
         parse_dataset(_dataset(partial))
+
+
+@pytest.mark.parametrize(
+    "category",
+    [pytest.param("degenerate", id="scipy-degenerate-data"), pytest.param("runtime", id="numpy-runtime-warning")],
+)
+def test_a_bootstrap_warning_becomes_non_finite(monkeypatch: pytest.MonkeyPatch, category: str) -> None:
+    """A warning the bootstrap raises (warnings are errors there) is a SkillEvalError, not a crash.
+
+    Fault injection: the real SciPy bootstrap still runs; it is wrapped so that it
+    first emits the warning SciPy/NumPy emit on degenerate resamples.
+    """
+    import warnings
+
+    from aether_worker import skill_metrics
+    from scipy.stats import DegenerateDataWarning
+
+    real = skill_metrics.bootstrap
+
+    def noisy(*args: object, **kwargs: object) -> object:
+        if category == "degenerate":
+            warnings.warn("The BCa confidence interval cannot be calculated.", DegenerateDataWarning, stacklevel=2)
+        else:
+            warnings.warn("invalid value encountered in divide", RuntimeWarning, stacklevel=2)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(skill_metrics, "bootstrap", noisy)
+    base, cand = _pairs(5, 5, 13, 17)
+    with pytest.raises(SkillEvalError) as rejected:
+        metrics_from_grades(_grades(cand), baseline_outcomes=base, candidate_cost=1, baseline_cost=1)
+    assert rejected.value.code == "non_finite"
