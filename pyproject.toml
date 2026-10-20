@@ -38,6 +38,7 @@ dependencies = [
   "ir-measures==0.4.3",
   "scipy==1.18.1",
   "statsmodels==0.15.0",
+  "cachetools==6.2.1",
 ]
 
 [dependency-groups]
