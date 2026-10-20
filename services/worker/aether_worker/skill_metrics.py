@@ -15,8 +15,6 @@ from collections.abc import Sequence
 from typing import Any
 
 import numpy as np
-from scipy.stats import bootstrap
-from statsmodels.stats.contingency_tables import mcnemar
 
 from aether_worker.skill_eval import SkillEvalError
 
@@ -129,6 +127,9 @@ def _baseline(outcomes: Sequence[bool] | None, passes: int | None, families: int
 def _mcnemar_exact(baseline_only: int, candidate_only: int) -> float:
     if baseline_only + candidate_only == 0:
         return 1.0
+    # Heavy: imported only when an evaluation is scored, not at worker start-up.
+    from statsmodels.stats.contingency_tables import mcnemar
+
     table = [[0, baseline_only], [candidate_only, 0]]
     return float(min(1.0, mcnemar(table, exact=True).pvalue))
 
@@ -139,6 +140,9 @@ def _paired_bootstrap(baseline: list[bool], candidate: list[bool]) -> tuple[floa
     if diff.size < 2 or np.all(diff == diff[0]):
         value = float(diff.mean())
         return value, value
+    # Heavy: imported only when an evaluation is scored, not at worker start-up.
+    from scipy.stats import bootstrap
+
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         try:

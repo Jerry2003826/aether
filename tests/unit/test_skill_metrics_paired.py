@@ -134,10 +134,10 @@ def test_a_bootstrap_warning_becomes_non_finite(monkeypatch: pytest.MonkeyPatch,
     """
     import warnings
 
-    from aether_worker import skill_metrics
+    import scipy.stats
     from scipy.stats import DegenerateDataWarning
 
-    real = skill_metrics.bootstrap
+    real = scipy.stats.bootstrap
 
     def noisy(*args: object, **kwargs: object) -> object:
         if category == "degenerate":
@@ -146,7 +146,7 @@ def test_a_bootstrap_warning_becomes_non_finite(monkeypatch: pytest.MonkeyPatch,
             warnings.warn("invalid value encountered in divide", RuntimeWarning, stacklevel=2)
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(skill_metrics, "bootstrap", noisy)
+    monkeypatch.setattr(scipy.stats, "bootstrap", noisy)
     base, cand = _pairs(5, 5, 13, 17)
     with pytest.raises(SkillEvalError) as rejected:
         metrics_from_grades(_grades(cand), baseline_outcomes=base, candidate_cost=1, baseline_cost=1)
