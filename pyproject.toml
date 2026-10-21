@@ -40,6 +40,7 @@ dependencies = [
   "statsmodels==0.15.0",
   "cachetools==6.2.1",
   "pgvector==0.5.1",
+  "httpx-sse==0.4.3",
 ]
 
 [dependency-groups]

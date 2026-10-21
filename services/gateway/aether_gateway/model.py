@@ -41,6 +41,8 @@ from aether_storage.budget import (
 )
 from aether_storage.db import Database
 
+from aether_gateway.sse import data_fields, looks_like_event_stream
+
 litellm.suppress_debug_info = True
 
 # LiteLLM's response_cost is looked up in its bundled price table by the model
@@ -517,7 +519,7 @@ def _usage_token(usage: dict[str, Any], *names: str) -> int | None:
 def _is_event_stream(raw: bytes, content_type: str) -> bool:
     if "text/event-stream" in content_type.lower():
         return True
-    return raw.lstrip().startswith(b"data:")
+    return looks_like_event_stream(raw)
 
 
 def _sse_events(raw: bytes) -> list[dict[str, Any]]:
@@ -528,11 +530,9 @@ def _sse_events(raw: bytes) -> list[dict[str, Any]]:
     including a cut-off final event, means the stream is incomplete; it is never stitched around.
     """
     events: list[dict[str, Any]] = []
-    for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
-        data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
-        if not data_lines:
-            continue
-        payload = "\n".join(data_lines).strip()
+    # httpx-sse splits the events: CRLF, LF and lone CR line ends, a leading BOM, multi-line data.
+    for data in data_fields(raw):
+        payload = data.strip()
         if not payload or payload == "[DONE]":
             continue
         try:

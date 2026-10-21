@@ -21,6 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Callable
 
+from aether_gateway.sse import data_fields, looks_like_event_stream
 from aether_worker.hermes_baseline import GROUPS, holdout_status, load_dev_cases, summarize
 from aether_worker.live_harness import LIVE_ALIAS, LIVE_BASE, LIVE_KEY, _NoRedirect, _endpoint, _usage, redact_secret
 
@@ -154,12 +155,10 @@ def _forward_body(raw: bytes, alias: str) -> tuple[bytes, list[str]]:
 
 def _sse_payloads(body: bytes) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    for block in body.split(b"\n\n"):
-        data = [line[5:].strip() for line in block.splitlines() if line.startswith(b"data:")]
-        if not data:
-            continue
-        raw = b"\n".join(data)
-        if raw == b"[DONE]":
+    # httpx-sse splits the events: CRLF, LF and lone CR line ends, a leading BOM, multi-line data.
+    for data in data_fields(body):
+        raw = data.strip()
+        if raw == "[DONE]":
             continue
         try:
             payload = json.loads(raw)
@@ -195,7 +194,7 @@ def _json_content(payload: dict[str, Any]) -> str:
 
 
 def _meter_body(body: bytes, content_type: str) -> tuple[str, dict[str, Any], str | None, str | None]:
-    if EVENT_STREAM in content_type.lower() or body.lstrip().startswith(b"data:"):
+    if EVENT_STREAM in content_type.lower() or looks_like_event_stream(body):
         events = _sse_payloads(body)
         usage = _usage({})
         model = None
@@ -330,7 +329,7 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 def _response_type(forwarded: bytes, content_type: str, body: bytes) -> str:
-    if json.loads(forwarded).get("stream") is True and body.lstrip().startswith(b"data:"):
+    if json.loads(forwarded).get("stream") is True and looks_like_event_stream(body):
         return content_type if EVENT_STREAM in content_type.lower() else EVENT_STREAM
     return content_type or JSON_TYPE
 
