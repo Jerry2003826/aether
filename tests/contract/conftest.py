@@ -18,7 +18,7 @@ import psycopg
 import pytest
 from aether_storage.bootstrap import ensure_database
 from aether_storage.db import Database
-from testcontainers.postgres import PostgresContainer
+from testcontainers.community.postgres import PostgresContainer
 
 ROOT = Path(__file__).resolve().parents[2]
 
@@ -60,7 +60,9 @@ def new_scope(real_postgres: RealPostgres):
 
     def make() -> Scope:
         with real_postgres.aether_admin() as conn:
-            owner_id = conn.execute("INSERT INTO owners (display_name, password_hash) VALUES ('contract', 'x') RETURNING id::text").fetchone()[0]
+            # v1 has exactly one owner (one_owner_v1); every scope is a new project of that owner.
+            row = conn.execute("SELECT id::text FROM owners").fetchone()
+            owner_id = row[0] if row else conn.execute("INSERT INTO owners (display_name, password_hash) VALUES ('contract', 'x') RETURNING id::text").fetchone()[0]
             project_id = conn.execute("INSERT INTO projects (owner_id, name) VALUES (%s, 'contract') RETURNING id::text", (owner_id,)).fetchone()[0]
             task_id = conn.execute(
                 "INSERT INTO tasks (project_id, original_goal, workflow_id) VALUES (%s, 'contract', %s) RETURNING id::text",

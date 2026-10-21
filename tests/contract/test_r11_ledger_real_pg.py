@@ -4,6 +4,7 @@ serialises concurrent reservations, and row-level security between projects (r11
 from __future__ import annotations
 
 import threading
+import uuid
 
 import psycopg
 import pytest
@@ -83,10 +84,13 @@ def test_rls_denies_cross_project(new_scope, worker_db) -> None:
     ledger.open_account(owner_id=theirs.owner_id, project_id=theirs.project_id, task_id=theirs.task_id, limit_micro_usd=10_000, token_limit=10_000, max_requests=10)
     assert ledger.reserve(owner_id=theirs.owner_id, project_id=theirs.project_id, task_id=theirs.task_id, request_key="theirs", amount=10, role="researcher")
     with worker_db.transaction(owner_id=mine.owner_id, project_id=mine.project_id) as conn:
-        for table in ("projects", "tasks", "budget_accounts", "model_requests"):
-            column = "id" if table == "projects" else "project_id"
-            seen = conn.execute(text(f"SELECT count(*) FROM {table} WHERE {column} = :p"), {"p": theirs.project_id}).scalar_one()
+        for table in ("tasks", "budget_accounts", "model_requests"):
+            seen = conn.execute(text(f"SELECT count(*) FROM {table} WHERE project_id = :p"), {"p": theirs.project_id}).scalar_one()
             assert seen == 0, table
+    # projects is scoped by owner: another owner sees neither project.
+    with worker_db.transaction(owner_id=str(uuid.uuid4()), project_id=mine.project_id) as conn:
+        seen = conn.execute(text("SELECT count(*) FROM projects WHERE id IN (:a, :b)"), {"a": mine.project_id, "b": theirs.project_id}).scalar_one()
+    assert seen == 0
     # Writing into the other project from this project's scope is refused by the policy's WITH CHECK.
     with pytest.raises(ProgrammingError) as failure, worker_db.transaction(owner_id=mine.owner_id, project_id=mine.project_id) as conn:
         conn.execute(
