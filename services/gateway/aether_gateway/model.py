@@ -153,10 +153,51 @@ def _read_error_body(exc: urllib.error.HTTPError, *, deadline: float, limit: int
     return _read_bounded(response, deadline=deadline, limit=limit, per_read=per_read).decode(errors="replace")
 
 
-def estimate_input_tokens(prompt: str) -> int:
-    """Tokens held for the request body before it is sent. Never zero."""
+def _byte_estimate(prompt: str) -> int:
     size = len(prompt.encode("utf-8"))
     return max(1, -(-size // INPUT_BYTES_PER_TOKEN))
+
+
+def _litellm_count(prompt: str, model: str) -> int | None:
+    """LiteLLM token_counter for this model; None when LiteLLM cannot count it."""
+    try:
+        counted = litellm.token_counter(model=model, text=prompt)
+    except Exception:  # noqa: BLE001 - any counter failure falls back to the byte estimate
+        return None
+    return counted if isinstance(counted, int) and not isinstance(counted, bool) and counted >= 0 else None
+
+
+def _has_mapped_tokenizer(model: str) -> bool:
+    """True when LiteLLM maps the model and its tokenizer is the model's own (OpenAI tiktoken or a Hugging Face one)."""
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:  # noqa: BLE001 - unmapped model
+        return False
+    if info.get("litellm_provider") in {"openai", "azure"}:
+        return True
+    try:
+        return litellm.utils._select_tokenizer(model)["type"] == "huggingface_tokenizer"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def count_input_tokens(prompt: str, model: str | None) -> tuple[int, str]:
+    """(count, "exact") from LiteLLM's token_counter for a model with a mapped tokenizer, else (byte estimate, "estimate")."""
+    if model and _has_mapped_tokenizer(model):
+        counted = _litellm_count(prompt, model)
+        if counted is not None:
+            return counted, "exact"
+    return _byte_estimate(prompt), "estimate"
+
+
+def estimate_input_tokens(prompt: str, model: str | None = None) -> int:
+    """Tokens held for the request body before it is sent. Never zero, never below LiteLLM's count.
+
+    The hold is the larger of the byte estimate and LiteLLM's token_counter (for the model, or the
+    default tokenizer when the model is unknown), so it only ever grows over the byte estimate.
+    """
+    counted = _litellm_count(prompt, model or "gpt-4o")
+    return max(1, _byte_estimate(prompt), counted or 0)
 
 
 def coding_reservation_gap(
