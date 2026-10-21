@@ -68,9 +68,15 @@ def apply_console_commands(
             except OperationalError:
                 nested.rollback()
                 raise
-            except Exception:
+            except Exception as exc:
                 nested.rollback()
                 status = "FAILED"
+                # Permanent: say which command and why, or a caller polling for its effect only times out.
+                print(
+                    f"aether-console-command-failed project={project_id} kind={row['kind']} "
+                    f"command={row['command_key']} error={type(exc).__name__}",
+                    flush=True,
+                )
             conn.execute(
                 text(
                     "UPDATE command_outbox SET status = :status, "
