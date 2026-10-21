@@ -15,7 +15,7 @@ def test_a_failed_role_launch_prints_start_failed_with_its_phase(monkeypatch, tm
     monkeypatch.chdir(tmp_path)
     monkeypatch.delenv("AETHER_WORKER_STATE_DIR", raising=False)
 
-    def no_roles(*args, **kwargs):  # noqa: ANN002, ANN003 - stands in for the role launch
+    def no_roles(*args, **kwargs):  # stands in for the role launch
         raise SystemExit("角色进程没有就绪")
 
     monkeypatch.setattr(service, "_endpoints_for_process", no_roles)
@@ -41,7 +41,7 @@ def test_a_failed_temporal_connect_names_the_connect_phase(monkeypatch, tmp_path
         task_queue="r11c-phase",
     )
 
-    async def refused(*args, **kwargs):  # noqa: ANN002, ANN003
+    async def refused(*args, **kwargs):
         raise ConnectionRefusedError("temporal down")
 
     monkeypatch.setattr(service.Client, "connect", refused)

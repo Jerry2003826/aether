@@ -44,7 +44,7 @@ def test_an_unavailable_hugging_face_tokenizer_falls_back_to_the_byte_estimate_a
 
     calls: list[str] = []
 
-    def unavailable(kind, backend):  # noqa: ANN001 - LiteLLM's loader signature
+    def unavailable(kind, backend):  # LiteLLM loader signature
         calls.append(kind)
         time.sleep(3)
         raise OSError("hugging face hub unreachable")
