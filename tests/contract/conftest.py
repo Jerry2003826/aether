@@ -41,10 +41,32 @@ class RealPostgres:
 
 
 @pytest.fixture(scope="session")
-def real_postgres() -> Iterator[RealPostgres]:
+def postgres_container() -> Iterator[PostgresContainer]:
     with PostgresContainer(_postgres_image(), username="postgres", password=uuid.uuid4().hex, dbname="postgres", driver=None) as container:
-        admin_url = container.get_connection_url()
-        yield RealPostgres(admin_url=admin_url, role_urls=ensure_database(admin_url, rotate_passwords=True))
+        yield container
+
+
+@pytest.fixture(scope="session")
+def real_postgres(postgres_container: PostgresContainer) -> RealPostgres:
+    admin_url = postgres_container.get_connection_url()
+    return RealPostgres(admin_url=admin_url, role_urls=ensure_database(admin_url, rotate_passwords=True))
+
+
+@dataclass(frozen=True)
+class RunningImage:
+    image_id: str
+    repo_digests: tuple[str, ...]
+
+
+@pytest.fixture(scope="session")
+def running_postgres_image(postgres_container: PostgresContainer) -> RunningImage:
+    """docker inspect of the image behind the running container: its id, then that image's RepoDigests."""
+    running = postgres_container.get_wrapped_container()
+    running.reload()
+    assert running.status == "running", running.status
+    image_id = running.attrs["Image"]
+    image = postgres_container.get_docker_client().client.images.get(image_id)
+    return RunningImage(image_id=image_id, repo_digests=tuple(image.attrs.get("RepoDigests") or ()))
 
 
 @dataclass(frozen=True)
