@@ -292,7 +292,8 @@ async def _serve(endpoints: WorkerEndpoints | None, role_hook: Callable[[str], N
     try:
         if endpoints is None:
             startup.enter("roles")
-            endpoints, children = _endpoints_for_process(role_hook)
+            # The hook is passed only when a test injected one; the default call is unchanged.
+            endpoints, children = _endpoints_for_process() if role_hook is None else _endpoints_for_process(role_hook)
         resolved = endpoints
         configure(resolved)
         activity_executor, control_executor = make_executors()
