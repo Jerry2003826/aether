@@ -283,26 +283,61 @@ def test_slow_grader_stops_when_active_seconds_expire(client, role_urls) -> None
     assert item["configuration"]["error_code"] == "deadline_exceeded"
 
 
-def test_async_failure_is_visible_on_the_task_stream(client, role_urls) -> None:
+def _job_state(role_urls, owner_id: str, project_id: str, job_id: str) -> str:
+    worker = Database(role_urls["aether_worker"])
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return str(
+            conn.execute(
+                text("SELECT state FROM coding_jobs WHERE project_id = :project_id AND id = :id"),
+                {"project_id": project_id, "id": job_id},
+            ).scalar_one()
+        )
+
+
+def _route_until_terminal(client, role_urls, owner_id: str, project_id: str, job_id: str) -> str:
+    _route(client, role_urls, owner_id, project_id)
+    return _job_state(role_urls, owner_id, project_id, job_id)
+
+
+def _async_failure(client, role_urls, prefix: str) -> tuple[str, str, str, str]:
     _require_docker()
-    owner_id, project_id, csrf = _session(client, "r7-async-project")
-    task_id = _task(client, project_id, csrf, "r7-async-task")
-    artifact_id = _upload(client, project_id, csrf, "r7-async-file", "async.json", WORKSPACE)
+    owner_id, project_id, csrf = _session(client, f"{prefix}-project")
+    task_id = _task(client, project_id, csrf, f"{prefix}-task")
+    artifact_id = _upload(client, project_id, csrf, f"{prefix}-file", "async.json", WORKSPACE)
     created = client.post(
         f"/v1/projects/{project_id}/coding-jobs",
-        headers=_headers(csrf, "r7-async-job"),
+        headers=_headers(csrf, f"{prefix}-job"),
         json={"task_id": task_id, "base_artifact_id": artifact_id, "job_key": "async", "objective": "不要把协程当成通过"},
     )
     assert created.status_code == 202, created.text
     job_id = created.json()["resource_id"]
-    _route(client, role_urls, owner_id, project_id)
+    assert _route_until_terminal(client, role_urls, owner_id, project_id, job_id) == "FAILED"
+    return owner_id, project_id, task_id, job_id
+
+
+def test_an_attempt_that_loses_its_lease_is_finished_by_the_next_one(client, role_urls, monkeypatch) -> None:
+    # Under load the first attempt can lose its lease (coding_lease_lost_during_drain, r11 565299d run 1):
+    # the job stays ACTIVE with fence_lost until the lease runs out and the next route claims it. The
+    # test must wait for that terminal state, bounded by the lease, not read one snapshot.
+    from aether_worker import coding_jobs
+
+    real_renew = coding_jobs._renew_lease
+    lost: list[int] = []
+
+    def lose_once(*args, **kwargs):
+        if not lost:
+            lost.append(1)
+            return False
+        return real_renew(*args, **kwargs)
+
+    monkeypatch.setattr(coding_jobs, "_renew_lease", lose_once)
+    _async_failure(client, role_urls, "r7-lease")
+    assert lost == [1]
+
+
+def test_async_failure_is_visible_on_the_task_stream(client, role_urls) -> None:
+    owner_id, project_id, task_id, job_id = _async_failure(client, role_urls, "r7-async")
     worker = Database(role_urls["aether_worker"])
-    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
-        state = conn.execute(
-            text("SELECT state FROM coding_jobs WHERE project_id = :project_id AND id = :id"),
-            {"project_id": project_id, "id": job_id},
-        ).scalar_one()
-    assert state == "FAILED"
     store = ArtifactStore(client.app.state.settings.artifact_root, worker)
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         result_id = conn.execute(
