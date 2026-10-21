@@ -39,6 +39,7 @@ dependencies = [
   "scipy==1.18.1",
   "statsmodels==0.15.0",
   "cachetools==6.2.1",
+  "pgvector==0.5.1",
 ]
 
 [dependency-groups]
