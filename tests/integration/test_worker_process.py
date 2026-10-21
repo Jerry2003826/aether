@@ -21,6 +21,7 @@ from sqlalchemy import text
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
 from aether_worker.dispatcher import deliver_pending
+from tests.integration.startup_wait import wait_worker_ready
 from tests.integration.test_auth import ORIGIN
 
 
@@ -198,7 +199,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
     worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
     try:
         _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-        _wait_line(worker_logs, "aether-worker-ready", worker)
+        wait_worker_ready(worker_logs, worker)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
             bootstrap = http.post(
                 "/v1/auth/bootstrap",
@@ -241,7 +242,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             assert interrupted.json()["status"] == "RUNNING", interrupted.text
             worker_logs.clear()
             worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
-            _wait_line(worker_logs, "aether-worker-ready", worker)
+            wait_worker_ready(worker_logs, worker)
             finished = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
             assert finished["status"] == "SUCCEEDED"
             assert finished["research_calls"] == 1
@@ -255,7 +256,7 @@ def test_documented_worker_consumes_http_commands_without_duplicate_effects(role
             assert second.status_code == 202, second.text
             worker_logs.clear()
             worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
-            _wait_line(worker_logs, "aether-worker-ready", worker)
+            wait_worker_ready(worker_logs, worker)
             _wait_locator(http, project_id, locator + "/again", worker, worker_logs)
             stable = _wait_verified(http, project_id, task_id, fact, goal, worker, worker_logs)
             assert stable["research_calls"] == 1
@@ -295,7 +296,7 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
     worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
     try:
         _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-        _wait_line(worker_logs, "aether-worker-ready", worker)
+        wait_worker_ready(worker_logs, worker)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
             bootstrap = http.post(
                 "/v1/auth/bootstrap",
@@ -365,7 +366,7 @@ def test_http_pause_and_cancel_change_the_running_task(role_urls, clean_db, tmp_
             worker = None
             worker_logs.clear()
             worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
-            _wait_line(worker_logs, "aether-worker-ready", worker)
+            wait_worker_ready(worker_logs, worker)
             still = _wait_status(http, project_id, cancel_id, "CANCELLED", worker, worker_logs)
             assert still["status"] == "CANCELLED"
             replay = http.get(f"/v1/projects/{project_id}/tasks/{cancel_id}/events")

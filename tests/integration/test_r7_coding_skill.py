@@ -14,6 +14,7 @@ from sqlalchemy import text
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
+from tests.integration.startup_wait import wait_worker_ready
 from tests.integration.fake_coding_upstream import PROVIDER_KEY, FakeCodingModel, editing_upstream
 from tests.integration.test_worker_process import (
     ORIGIN_VALUE,
@@ -26,7 +27,6 @@ from tests.integration.test_worker_process import (
     _stop,
     _temporal_address,
     _wait_http,
-    _wait_line,
 )
 
 
@@ -133,7 +133,7 @@ def test_public_coding_job_and_skill_eval_reach_terminal_states(role_urls, clean
         worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
         try:
             _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-            _wait_line(worker_logs, "aether-worker-ready", worker)
+            wait_worker_ready(worker_logs, worker)
             with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=30) as http:
                 _exercise(http, role_urls, worker, worker_logs, secret, artifact_root)
         finally:

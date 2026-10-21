@@ -23,6 +23,7 @@ from temporalio.service import RPCError, RPCStatusCode
 
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
+from tests.integration.startup_wait import wait_worker_ready
 from tests.integration.test_hybrid_retrieval import APPLE
 from tests.integration.test_sys01_entry import _command_status, _poll, _wait_command
 from tests.integration.test_worker_process import (
@@ -36,7 +37,6 @@ from tests.integration.test_worker_process import (
     _stop,
     _temporal_address,
     _wait_http,
-    _wait_line,
 )
 
 SECRET = "另一项目的机密句子不会进入这个项目的索引"
@@ -118,7 +118,7 @@ class _Running:
 
     def ready(self) -> None:
         _wait_http(f"http://127.0.0.1:{self.api_port}/health/live")
-        _wait_line(self.worker_logs, "aether-worker-ready", self.worker)
+        wait_worker_ready(self.worker_logs, self.worker)
 
     def bootstrap(self, key: str, name: str) -> None:
         created = self.http.post(
