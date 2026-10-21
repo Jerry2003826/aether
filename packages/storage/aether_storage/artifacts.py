@@ -73,6 +73,16 @@ class ArtifactError(Exception):
 _RETAINED_CLASSIFICATIONS = ("task_answer", "task_verification_report")
 
 
+def _is_uuid(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        uuid.UUID(value)
+    except ValueError:
+        return False
+    return True
+
+
 def _succeeded_evidence(conn, project_id: str, artifact_id: str, classification: str, task_id: str | None) -> bool:
     """A succeeded task keeps its answer and verification report."""
     if classification in _RETAINED_CLASSIFICATIONS and task_id:
@@ -208,6 +218,9 @@ class ArtifactStore:
         return restored
 
     def get(self, *, owner_id: str, project_id: str, artifact_id: str) -> tuple[bytes, str]:
+        # A missing id (None, or None rendered as "None") is not an artifact: say so, never query with it.
+        if not _is_uuid(artifact_id):
+            raise ArtifactError("not_found", "产物不存在")
         row = self._row(owner_id, project_id, artifact_id)
         if row is None or row["deleted_at"] is not None:
             raise ArtifactError("not_found", "产物不存在")
