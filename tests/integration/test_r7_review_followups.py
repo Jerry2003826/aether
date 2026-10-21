@@ -13,6 +13,7 @@ from sqlalchemy import text
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
 from aether_worker.coding_sandbox import coding_container_ids, release_coding_container
+from aether_worker.coding_jobs import execute_queued_coding_jobs
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.runner import docker_available
 from aether_worker.service import route_pending
@@ -295,8 +296,25 @@ def _job_state(role_urls, owner_id: str, project_id: str, job_id: str) -> str:
 
 
 def _route_until_terminal(client, role_urls, owner_id: str, project_id: str, job_id: str) -> str:
+    """Route until the job is terminal. An attempt that lost its lease leaves it ACTIVE; the next route
+    after the lease runs out claims and finishes it. Bounded by two lease periods plus one stall limit;
+    a job still open after that fails the test with its state."""
+    from aether_worker.coding_jobs import _OPEN, LEASE_SECONDS
+    from aether_worker.startup_budget import STALL_LIMIT
+
+    deadline = time.monotonic() + 2 * LEASE_SECONDS + STALL_LIMIT
+    worker = Database(role_urls["aether_worker"])
+    store = ArtifactStore(client.app.state.settings.artifact_root, worker)
     _route(client, role_urls, owner_id, project_id)
-    return _job_state(role_urls, owner_id, project_id, job_id)
+    while True:
+        # Like the worker loop, which keeps progressing projects it has seen: a route with no pending
+        # command for this project would never return to a job left ACTIVE.
+        execute_queued_coding_jobs(worker, store, owner_id=owner_id, project_id=project_id)
+        state = _job_state(role_urls, owner_id, project_id, job_id)
+        if state not in _OPEN:
+            return state
+        assert time.monotonic() < deadline, f"coding job {job_id} still {state} after {2 * LEASE_SECONDS + STALL_LIMIT:.0f}s"
+        time.sleep(1)
 
 
 def _async_failure(client, role_urls, prefix: str) -> tuple[str, str, str, str]:
