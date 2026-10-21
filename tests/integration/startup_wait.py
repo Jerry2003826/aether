@@ -52,15 +52,16 @@ def wait_for_start(
                 last_line = line
             if line.startswith(failed):
                 raise fail(f"start-failed {line.removeprefix(failed)}")
-            if line == ready:
+            if line == ready or line.startswith(ready + " "):
                 return
             if image_start and image_start in line:
                 image_since = now
             elif image_end and image_end in line and image_since is not None:
                 excluded += now - image_since
                 image_since = None
-        if proc.poll() is not None:
-            raise fail(f"进程提前退出 {proc.returncode}")
+        code = proc.poll()
+        if code is not None:
+            raise fail(f"进程提前退出 {code}")
         if now - last_progress > stall:
             raise fail(f"stall: no progress for {now - last_progress:.0f}s (limit {stall:.0f}s)")
         counted = now - started - excluded - (now - image_since if image_since is not None else 0.0)
@@ -85,6 +86,34 @@ def wait_worker_ready(
         stall=startup_budget.STALL_LIMIT,
         image_start=f"name={startup_budget.IMAGE_PREP_START} ",
         image_end=f"name={startup_budget.IMAGE_PREP_END} ",
+        clock=clock,
+        sleep=sleep,
+    )
+
+
+# The Next.js dev server has no product startup budget of its own; the console test gives it the
+# worker's stall limit (no output for that long means stuck) and one role slot per step it prints
+# (starting, compiling, ready), so a slow but moving start is waited for and a stuck one is not.
+WEB_STALL_LIMIT = startup_budget.STALL_LIMIT
+WEB_TOTAL_BUDGET = startup_budget.ROLE_COUNT * startup_budget.STALL_LIMIT
+WEB_READY_PREFIX = "✓ Ready in"
+WEB_FAILED_PREFIX = "⨯"
+
+
+def wait_web_ready(
+    bucket: list[str],
+    proc: subprocess.Popen[str],
+    *,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> None:
+    wait_for_start(
+        bucket,
+        proc,
+        ready=WEB_READY_PREFIX,
+        failed=WEB_FAILED_PREFIX,
+        total=WEB_TOTAL_BUDGET,
+        stall=WEB_STALL_LIMIT,
         clock=clock,
         sleep=sleep,
     )

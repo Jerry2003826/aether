@@ -16,6 +16,8 @@ from aether_api.settings import Settings
 from aether_storage.db import Database
 from aether_worker.console_commands import apply_console_commands
 
+from tests.integration.startup_wait import WEB_STALL_LIMIT, wait_web_ready
+
 PASSPHRASE = "correct horse battery"
 HTML = "<img src=x onerror=alert(1)>"
 
@@ -26,19 +28,29 @@ def _port() -> int:
         return int(sock.getsockname()[1])
 
 
-def _wait(url: str) -> None:
-    deadline = time.time() + 90
-    last = ""
-    while time.time() < deadline:
-        try:
-            response = httpx.get(url, timeout=2)
-            if response.status_code < 500:
-                return
-            last = str(response.status_code)
-        except httpx.HTTPError as exc:
-            last = str(exc)
-        time.sleep(0.4)
-    raise AssertionError(f"服务没有起来: {url} {last}")
+def _wait_api(server: uvicorn.Server, thread: threading.Thread) -> None:
+    # In-process API: started is set once uvicorn is listening; a dead thread is a failed start.
+    deadline = time.monotonic() + WEB_STALL_LIMIT
+    while not server.started:
+        assert thread.is_alive(), "API 线程提前退出"
+        assert time.monotonic() < deadline, f"API 在 {WEB_STALL_LIMIT:.0f}s 内没有开始监听"
+        time.sleep(0.1)
+
+
+def _drain(pipe, bucket: list[str]) -> None:
+    for line in pipe:
+        bucket.append(line)
+
+
+def _wait_console(web: subprocess.Popen[str], web_logs: list[str], url: str) -> None:
+    """Next.js dev: wait for its own Ready line, then one request that may compile /console on demand.
+
+    The request is not cut off every 2 s and retried (each retry restarted the wait on a compile that
+    was still running); it waits up to the stall limit, and the dev server must still be running."""
+    wait_web_ready(web_logs, web)
+    response = httpx.get(url, timeout=WEB_STALL_LIMIT)
+    assert web.poll() is None, "".join(web_logs[-40:])
+    assert response.status_code < 500, f"{response.status_code}: {''.join(web_logs[-40:])}"
 
 
 def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db, tmp_path: Path) -> None:
@@ -60,7 +72,7 @@ def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=api_port, log_level="warning"))
     thread = threading.Thread(target=server.run, daemon=True)
     thread.start()
-    _wait(f"http://127.0.0.1:{api_port}/health/live")
+    _wait_api(server, thread)
     if not Path("apps/web/node_modules/next/package.json").is_file():
         subprocess.run(["corepack", "pnpm@10.18.2", "install", "--frozen-lockfile"], cwd="apps/web", check=True)
     web = subprocess.Popen(
@@ -71,8 +83,10 @@ def test_console_shows_real_states_and_does_not_execute_html(role_urls, clean_db
         stderr=subprocess.STDOUT,
         text=True,
     )
+    web_logs: list[str] = []
+    threading.Thread(target=_drain, args=(web.stdout, web_logs), daemon=True).start()
     try:
-        _wait(f"{web_origin}/console")
+        _wait_console(web, web_logs, f"{web_origin}/console")
         with sync_playwright() as playwright:
             browser = playwright.chromium.launch(headless=True)
             desktop = browser.new_context(viewport={"width": 1280, "height": 800})
