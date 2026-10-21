@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import aether_worker.goal_effect as goal_effect
+from aether_worker import startup_budget
 from aether_domain.coding_limits import require_coding_limits
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
@@ -237,11 +239,11 @@ def endpoints_from_env() -> WorkerEndpoints:
     )
 
 
-def _endpoints_for_process() -> tuple[WorkerEndpoints, list[subprocess.Popen[str]]]:
+def _endpoints_for_process(role_hook: Callable[[str], None] | None = None) -> tuple[WorkerEndpoints, list[subprocess.Popen[str]]]:
     reject_privileged_worker_env()
     if os.environ.get("AETHER_PROCESS_ROLE") == "worker":
         return endpoints_from_env(), []
-    launch_privileged_roles()
+    launch_privileged_roles(role_hook)
     os.execve(sys.executable, [sys.executable, "-m", "aether_worker"], dict(os.environ))
     raise SystemExit("worker 没有完成凭证交接")
 
@@ -255,8 +257,32 @@ def warn_if_git_missing() -> None:
         _LOG.warning("worker_git_missing git is not on PATH; coding job patches will be patch_unavailable")
 
 
-async def serve(endpoints: WorkerEndpoints | None = None) -> None:
+class _Startup:
+    """The startup step this process is in, and whether it has reported ready."""
+
+    def __init__(self) -> None:
+        self.name = "init"
+        self.ready = False
+
+    def enter(self, name: str) -> None:
+        self.name = name
+        startup_budget.phase(name)
+
+
+async def serve(endpoints: WorkerEndpoints | None = None, *, role_hook: Callable[[str], None] | None = None) -> None:
+    """Run the worker. role_hook is for tests only (see role_launch.launch_privileged_roles)."""
+    startup = _Startup()
+    try:
+        await _serve(endpoints, role_hook, startup)
+    except BaseException as exc:
+        if not startup.ready:
+            startup_budget.start_failed(startup.name, exc)
+        raise
+
+
+async def _serve(endpoints: WorkerEndpoints | None, role_hook: Callable[[str], None] | None, startup: _Startup) -> None:
     children: list[subprocess.Popen[str]] = []
+    startup.enter("init")
     # Absolute from here on, for this process and the runner it launches (same instance id for both).
     print(f"aether-worker-state-dir path={pin_worker_state_dir()}", flush=True)
     warn_if_git_missing()
@@ -265,13 +291,15 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     require_coding_limits()
     try:
         if endpoints is None:
-            endpoints, children = _endpoints_for_process()
+            startup.enter("roles")
+            endpoints, children = _endpoints_for_process(role_hook)
         resolved = endpoints
         configure(resolved)
         activity_executor, control_executor = make_executors()
         try:
-            client = await Client.connect(resolved.temporal_address)
-        except Exception:
+            startup.enter("temporal-connect")
+            client = await asyncio.wait_for(Client.connect(resolved.temporal_address), timeout=startup_budget.CONNECT_TIMEOUT)
+        except BaseException:
             activity_executor.shutdown(wait=False, cancel_futures=False)
             control_executor.shutdown(wait=False, cancel_futures=False)
             raise
@@ -288,14 +316,17 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         database = Database(resolved.worker_url)
         verifier = Database(resolved.verifier_url) if resolved.verifier_url else None
         store = ArtifactStore(resolved.artifact_root, database)
+        startup.enter("projects-restore")
         recover_started_projects(store, index_root_from_env())
         seen = load_projects(index_root_from_env())
         stop = asyncio.Event()
         for signame in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(signame, stop.set)
         try:
+            startup.enter("temporal-worker")
             async with worker:
-                print("aether-worker-ready", flush=True)
+                startup.ready = True
+                print(startup_budget.READY_LINE, flush=True)
                 while not stop.is_set():
                     try:
                         await deliver_pending(

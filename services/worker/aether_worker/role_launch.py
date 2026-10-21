@@ -11,12 +11,14 @@ import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
 import psutil
 
+from aether_worker import startup_budget
 from aether_worker.loopback import LoopbackError, get_json
 
 _PROCESS_ROLE = "AETHER_PROCESS_ROLE"
@@ -28,10 +30,11 @@ _WORKER_ROLE = "worker"
 _VERIFIER_ROLE = "verifier"
 _ENCODING = "utf-8"
 PRIVILEGED_ENV = (_VERIFIER_DATABASE_URL, "AETHER_LIVE_MODEL_KEY")
-_READY_TIMEOUT = 60.0
+_READY_TIMEOUT = startup_budget.READY_TIMEOUT
+_HEALTH_TIMEOUT = startup_budget.HEALTH_TIMEOUT
 # A first OpenHands image build on a clean host. It runs before any role starts, so it is
 # not part of the 60 s readiness wait.
-_PREPARE_TIMEOUT = 3600.0
+_PREPARE_TIMEOUT = startup_budget.PREPARE_TIMEOUT
 _ROLE_COMMANDS = ("aether_worker.verifier_process", "aether_gateway", "aether_worker.runner_process")
 
 
@@ -70,7 +73,12 @@ def stop_children(children: list[subprocess.Popen[str]]) -> None:
                 proc.kill()
 
 
-def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
+def launch_privileged_roles(role_hook: Callable[[str], None] | None = None) -> tuple[RolePorts, list[subprocess.Popen[str]]]:
+    """Start the verifier, gateway and runner roles one after another and wait for each.
+
+    role_hook is for tests only (passed in by the caller, never read from the environment): it is
+    called with the role name just before that role's readiness wait, e.g. to delay startup.
+    """
     missing = [
         name
         for name in ("AETHER_WORKER_DATABASE_URL", _VERIFIER_DATABASE_URL, "AETHER_DISPATCHER_DATABASE_URL", "AETHER_TEMPORAL_ADDRESS")
@@ -83,7 +91,9 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
     provider_key = os.environ.get("AETHER_LIVE_MODEL_KEY", "")
     token = secrets.token_urlsafe(32)
     secrets_to_hide = [verifier_url, provider_key, token, _password(verifier_url)]
+    startup_budget.phase(startup_budget.IMAGE_PREP_START)
     _prepare_runner_image(secrets_to_hide)
+    startup_budget.phase(startup_budget.IMAGE_PREP_END)
     # No provider key, no gateway: an empty AETHER_GATEWAY_BASE is how the worker learns that live
     # research has no model (_missing_live_settings -> live_provider_unconfigured, before any
     # reservation). A keyless gateway would admit research and turn the provider's 401 into a sent call.
@@ -110,9 +120,9 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
             children.append(gateway[0])
         runner_proc, runner_errors = _open("aether_worker.runner_process", _runner_env(token), secrets_to_hide, None)
         children.append(runner_proc)
-        verifier_base = _await_role(verifier_proc, verifier_errors, secrets_to_hide)
-        gateway_base = "" if gateway is None else _await_role(gateway[0], gateway[1], secrets_to_hide)
-        runner_base = _await_role(runner_proc, runner_errors, secrets_to_hide)
+        verifier_base = _await_named(_VERIFIER_ROLE, verifier_proc, verifier_errors, secrets_to_hide, role_hook)
+        gateway_base = "" if gateway is None else _await_named("gateway", gateway[0], gateway[1], secrets_to_hide, role_hook)
+        runner_base = _await_named("runner", runner_proc, runner_errors, secrets_to_hide, role_hook)
         scrub_privileged_env()
         os.environ["AETHER_VERIFIER_BASE"] = verifier_base
         os.environ["AETHER_GATEWAY_BASE"] = gateway_base
@@ -124,6 +134,7 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
         if gateway_base:
             _require_health(gateway_base, "gateway", secrets_to_hide)
         _require_health(runner_base, "runner", secrets_to_hide)
+        startup_budget.phase("roles-healthy")
         _write_boundary(ports)
         _close_pipes(children)
         return ports, children
@@ -228,6 +239,20 @@ def _open(
     return proc, errors
 
 
+def _await_named(
+    role: str,
+    proc: subprocess.Popen[str],
+    errors: list[str],
+    secrets_to_hide: list[str],
+    role_hook: Callable[[str], None] | None,
+) -> str:
+    if role_hook is not None:
+        role_hook(role)
+    base = _await_role(proc, errors, secrets_to_hide)
+    startup_budget.phase("role-ready", role=role)
+    return base
+
+
 def _await_role(proc: subprocess.Popen[str], errors: list[str], secrets_to_hide: list[str]) -> str:
     try:
         line = _read_ready(proc, secrets_to_hide, errors)
@@ -269,7 +294,7 @@ def _port(line: str) -> int:
 
 
 def _require_health(base: str, role: str, secrets_to_hide: list[str]) -> None:
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + _HEALTH_TIMEOUT
     last = "unreachable"
     while time.monotonic() < deadline:
         try:
