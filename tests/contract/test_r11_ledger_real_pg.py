@@ -4,6 +4,7 @@ serialises concurrent reservations, and row-level security between projects (r11
 from __future__ import annotations
 
 import threading
+import time
 import uuid
 
 import psycopg
@@ -45,12 +46,9 @@ def test_ledger_unique_constraint_on_real_pg(new_scope, worker_db) -> None:
     assert tuple(held) == (100, 1)
 
 
-def test_concurrent_reservation_lock(new_scope, worker_db) -> None:
-    # Room for exactly three reservations of 100 under the 80% non-verification ceiling (375 * 0.8 = 300).
-    scope = new_scope()
-    ledger = BudgetLedger(worker_db)
-    ledger.open_account(owner_id=scope.owner_id, project_id=scope.project_id, task_id=scope.task_id, limit_micro_usd=375, token_limit=10_000, max_requests=100)
-    start = threading.Barrier(12)
+def _race_reservations(ledger: BudgetLedger, scope, *, parties: int = 12, started: int = 12) -> tuple[list[bool], list[Exception], list[threading.Thread]]:
+    """Start `started` threads that meet at a barrier for `parties`, then each reserve 100 under its own key."""
+    start = threading.Barrier(parties)
     outcomes: list[bool] = []
     errors: list[Exception] = []
 
@@ -63,11 +61,26 @@ def test_concurrent_reservation_lock(new_scope, worker_db) -> None:
         except (BudgetError, SQLAlchemyError) as exc:  # reported below, with every other outcome
             errors.append(exc)
 
-    threads = [threading.Thread(target=reserve, args=(index,)) for index in range(12)]
+    threads = [threading.Thread(target=reserve, args=(index,)) for index in range(started)]
     for thread in threads:
         thread.start()
     for thread in threads:
         thread.join(timeout=60)
+    return outcomes, errors, [thread for thread in threads if thread.is_alive()]
+
+
+def _three_reservation_account(new_scope, worker_db):
+    # Room for exactly three reservations of 100 under the 80% non-verification ceiling (375 * 0.8 = 300).
+    scope = new_scope()
+    ledger = BudgetLedger(worker_db)
+    ledger.open_account(owner_id=scope.owner_id, project_id=scope.project_id, task_id=scope.task_id, limit_micro_usd=375, token_limit=10_000, max_requests=100)
+    return scope, ledger
+
+
+def test_concurrent_reservation_lock(new_scope, worker_db) -> None:
+    scope, ledger = _three_reservation_account(new_scope, worker_db)
+    outcomes, errors, stuck = _race_reservations(ledger, scope)
+    assert stuck == [], stuck
     assert errors == [], errors
     assert sorted(outcomes) == [False] * 9 + [True] * 3, outcomes
     with worker_db.transaction(owner_id=scope.owner_id, project_id=scope.project_id) as conn:
@@ -75,6 +88,21 @@ def test_concurrent_reservation_lock(new_scope, worker_db) -> None:
         rows = conn.execute(text("SELECT count(*) FROM model_requests WHERE task_id = :t"), {"t": scope.task_id}).scalar_one()
     assert tuple(held) == (300, 3)
     assert rows == 3
+
+
+def test_concurrent_reservation_reports_a_party_that_never_arrives(new_scope, worker_db) -> None:
+    # One of the twelve threads never starts: the barrier must break and every waiter must say so,
+    # instead of the race hanging until join gives up and leaving nothing to read.
+    scope, ledger = _three_reservation_account(new_scope, worker_db)
+    begun = time.monotonic()
+    outcomes, errors, stuck = _race_reservations(ledger, scope, started=11)
+    assert stuck == [], f"{len(stuck)} threads still waiting at the barrier after {time.monotonic() - begun:.0f}s"
+    assert outcomes == []
+    assert len(errors) == 11, errors
+    assert all(isinstance(error, threading.BrokenBarrierError) for error in errors), errors
+    with worker_db.transaction(owner_id=scope.owner_id, project_id=scope.project_id) as conn:
+        rows = conn.execute(text("SELECT count(*) FROM model_requests WHERE task_id = :t"), {"t": scope.task_id}).scalar_one()
+    assert rows == 0
 
 
 def test_rls_denies_cross_project(new_scope, worker_db) -> None:
