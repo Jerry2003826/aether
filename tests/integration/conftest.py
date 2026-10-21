@@ -16,6 +16,22 @@ from aether_api.auth_service import issue_bootstrap_secret
 from aether_api.settings import Settings
 from aether_storage.bootstrap import ensure_database
 from aether_storage.db import Database
+from aether_worker.openhands_image import ImageUnavailable, ensure_openhands_sandbox
+from aether_worker.runner import probe_docker_daemon
+
+
+@pytest.fixture(scope="session", autouse=True)
+def _openhands_sandbox_image() -> None:
+    # The sandbox image is tagged by its context hash, so any change to a file it copies needs a new
+    # build; launch_image only looks it up, never builds (a product launch without it is image_unavailable).
+    # Built here, before the first test, so a coding job never runs ahead of the build.
+    if probe_docker_daemon().get("runtime") != "enabled":
+        return
+    try:
+        ensure_openhands_sandbox()
+    except ImageUnavailable:
+        # Coding jobs then fail as image_unavailable, which their tests assert first and report.
+        return
 
 
 @pytest.fixture(autouse=True)
