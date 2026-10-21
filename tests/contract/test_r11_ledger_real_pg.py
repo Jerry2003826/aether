@@ -48,17 +48,17 @@ def test_ledger_unique_constraint_on_real_pg(new_scope, worker_db) -> None:
 
 def _race_reservations(ledger: BudgetLedger, scope, *, parties: int = 12, started: int = 12) -> tuple[list[bool], list[Exception], list[threading.Thread]]:
     """Start `started` threads that meet at a barrier for `parties`, then each reserve 100 under its own key."""
-    start = threading.Barrier(parties)
+    start = threading.Barrier(parties, timeout=30)
     outcomes: list[bool] = []
     errors: list[Exception] = []
 
     def reserve(index: int) -> None:
-        start.wait()
         try:
+            start.wait()
             outcomes.append(
                 ledger.reserve(owner_id=scope.owner_id, project_id=scope.project_id, task_id=scope.task_id, request_key=f"call-{index}", amount=100, role="researcher")
             )
-        except (BudgetError, SQLAlchemyError) as exc:  # reported below, with every other outcome
+        except (threading.BrokenBarrierError, BudgetError, SQLAlchemyError) as exc:  # reported below, with every other outcome
             errors.append(exc)
 
     threads = [threading.Thread(target=reserve, args=(index,)) for index in range(started)]
