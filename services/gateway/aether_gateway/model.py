@@ -44,6 +44,10 @@ from aether_storage.db import Database
 from aether_gateway.sse import data_fields, looks_like_event_stream
 
 litellm.suppress_debug_info = True
+# Never download a Hugging Face tokenizer while a request waits on the count: with the hub slow or
+# unreachable every reservation would stall on it. Models whose LiteLLM tokenizer is a Hugging Face
+# one are counted as "estimate" (byte estimate, held at least at tiktoken's count) instead.
+litellm.disable_hf_tokenizer_download = True
 
 # LiteLLM's response_cost is looked up in its bundled price table by the model
 # name the upstream reports. It is a local estimate, not a provider bill.
