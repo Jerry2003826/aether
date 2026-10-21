@@ -24,14 +24,15 @@ from aether_worker.runner import probe_docker_daemon
 def _openhands_sandbox_image() -> None:
     # The sandbox image is tagged by its context hash, so any change to a file it copies needs a new
     # build; launch_image only looks it up, never builds (a product launch without it is image_unavailable).
-    # Built here, before the first test, so a coding job never runs ahead of the build.
+    # Built here, before the first test, so a coding job never runs ahead of the build and a worker's
+    # startup image step is only a lookup (its readiness wait leaves image preparation out, see
+    # startup_wait). A failed build stops the session at once rather than surfacing as slow starts.
     if probe_docker_daemon().get("runtime") != "enabled":
         return
     try:
         ensure_openhands_sandbox()
-    except ImageUnavailable:
-        # Coding jobs then fail as image_unavailable, which their tests assert first and report.
-        return
+    except ImageUnavailable as exc:
+        pytest.exit(f"OpenHands sandbox image could not be built: {exc.reason}", returncode=1)
 
 
 @pytest.fixture(autouse=True)
