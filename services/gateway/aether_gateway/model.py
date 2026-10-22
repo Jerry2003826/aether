@@ -44,6 +44,9 @@ from aether_storage.db import Database
 from aether_gateway.sse import data_fields, looks_like_event_stream
 
 litellm.suppress_debug_info = True
+# Never fetch a Hugging Face tokenizer from the network (ADR-F53): offline, a model whose tokenizer
+# would be downloaded is counted by the byte estimate instead of hanging or failing on the download.
+litellm.disable_hf_tokenizer_download = True
 
 # LiteLLM's response_cost is looked up in its bundled price table by the model
 # name the upstream reports. It is a local estimate, not a provider bill.
@@ -178,6 +181,7 @@ def _has_mapped_tokenizer(model: str) -> bool:
     if info.get("litellm_provider") in {"openai", "azure"}:
         return True
     try:
+        # Private LiteLLM helper (ADR-F53); with downloads disabled it reports the default tokenizer.
         return litellm.utils._select_tokenizer(model)["type"] == "huggingface_tokenizer"
     except Exception:  # noqa: BLE001
         return False
