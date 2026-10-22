@@ -79,3 +79,35 @@ def test_a_finished_ready_line_is_returned_without_the_full_timeout() -> None:
         os.close(write_fd)
     assert line == "aether-role-ready port=9"
     assert time.monotonic() - started < 1
+
+
+def test_the_stdout_reader_is_gone_after_the_role_exits() -> None:
+    """The ready line ends the wait. Once the process closes stdout, every reader thread must exit."""
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"aether-role-ready port=9\n")
+    os.close(write_fd)
+    stdout = os.fdopen(read_fd, "r", buffering=1)
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.returncode = 0
+
+        def poll(self) -> None:
+            return None
+
+    before = {thread.ident for thread in threading.enumerate()}
+    line = role_launch._read_ready(_Proc(), [], [])  # type: ignore[arg-type]
+    assert line == "aether-role-ready port=9"
+    deadline = time.monotonic() + 1.0
+    leftover: list[threading.Thread] = []
+    while time.monotonic() < deadline:
+        leftover = [
+            thread
+            for thread in threading.enumerate()
+            if thread.ident not in before and thread.is_alive() and thread.name.startswith("aether-role-stdout")
+        ]
+        if not leftover:
+            break
+        time.sleep(0.02)
+    assert not leftover, f"角色退出后仍有读取线程: {[thread.name for thread in leftover]}"
