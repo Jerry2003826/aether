@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import math
+from typing import cast
 
 import pytest
+from aether_storage.artifacts import ArtifactStore
 from aether_worker.skill_dataset import DatasetError, parse_dataset
 from aether_worker.skill_eval import SkillEvalError
+from aether_worker.skill_execute import _grade_payload
 from aether_worker.skill_metrics import metrics_from_grades
 
 
@@ -120,6 +123,45 @@ def test_dataset_carries_a_per_family_baseline() -> None:
     partial = [{"family": "a", "suite_files": files, "baseline_pass": True}, {"family": "b", "suite_files": files}]
     with pytest.raises(DatasetError):
         parse_dataset(_dataset(partial))
+
+
+def test_a_partial_baseline_count_is_rejected_before_any_case_runs(monkeypatch: pytest.MonkeyPatch) -> None:
+    """64 cases and a bare count of 1 cannot be paired. Reject that before grading starts."""
+    files = {"test_x.py": "def test_x():\n    assert True\n"}
+    cases = [{"family": f"family-{index}", "suite_files": files} for index in range(64)]
+    data = _dataset(cases, baseline_passes=1, baseline_cost=0, candidate_cost=0)
+    ran: list[object] = []
+
+    def forbidden(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        ran.append((args, kwargs))
+        raise AssertionError("用例不该执行")
+
+    monkeypatch.setattr("aether_worker.skill_execute._bound_baseline", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        "aether_worker.skill_execute._candidate_bytes",
+        lambda *_args, **_kwargs: json.dumps({"kind": "aether.skill_candidate", "files": {"candidate.py": "x = 1\n"}}).encode(),
+    )
+    monkeypatch.setattr("aether_worker.skill_execute._evaluate_cases", forbidden)
+
+    class _Store:
+        def get(self, **_kwargs: object) -> tuple[bytes, str]:
+            return data, "application/json"
+
+    with pytest.raises(DatasetError) as rejected:
+        _grade_payload(
+            cast(ArtifactStore, _Store()),
+            owner_id="owner",
+            project_id="project",
+            payload={"dataset_manifest_id": "dataset", "candidate_version_id": "version"},
+        )
+    assert rejected.value.code == "baseline_unpaired"
+    assert ran == []
+    with pytest.raises(DatasetError) as parsed:
+        parse_dataset(data)
+    assert parsed.value.code == "baseline_unpaired"
+    assert parse_dataset(_dataset(cases, baseline_passes=0))["baseline_passes"] == 0
+    assert parse_dataset(_dataset(cases, baseline_passes=64))["baseline_passes"] == 64
+    assert parse_dataset(_dataset(cases))["baseline_passes"] == 0
 
 
 @pytest.mark.parametrize(
