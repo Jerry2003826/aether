@@ -299,7 +299,29 @@ def _async_failure(client, role_urls, prefix: str) -> tuple[str, str, str, str]:
     assert created.status_code == 202, created.text
     job_id = created.json()["resource_id"]
     _route(client, role_urls, owner_id, project_id)
+    # An attempt that lost its lease leaves the job ACTIVE for the next worker pass once the lease
+    # expires; like the worker loop, keep routing and running this project's queued coding jobs.
+    worker = Database(role_urls["aether_worker"])
+    store = ArtifactStore(client.app.state.settings.artifact_root, worker)
+    deadline = time.monotonic() + _TERMINAL_WAIT_SECONDS
+    while _job_state(worker, owner_id, project_id, job_id) in coding_jobs._OPEN and time.monotonic() < deadline:
+        time.sleep(1)
+        _route(client, role_urls, owner_id, project_id)
+        coding_jobs.execute_queued_coding_jobs(worker, store, owner_id=owner_id, project_id=project_id)
     return owner_id, project_id, task_id, job_id
+
+
+_TERMINAL_WAIT_SECONDS = 2 * coding_jobs.LEASE_SECONDS + 75
+
+
+def _job_state(worker: Database, owner_id: str, project_id: str, job_id: str) -> str:
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return str(
+            conn.execute(
+                text("SELECT state FROM coding_jobs WHERE project_id = :project_id AND id = :id"),
+                {"project_id": project_id, "id": job_id},
+            ).scalar_one()
+        )
 
 
 def _assert_async_failed(client, role_urls, owner_id: str, project_id: str, task_id: str, job_id: str) -> None:
