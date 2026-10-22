@@ -214,8 +214,8 @@ def test_concurrent_login_failures_share_one_window(client: TestClient) -> None:
     try:
         for thread in threads:
             thread.start()
-        deadline = time.time() + 2
-        while time.time() < deadline and len(entered) < 5:
+        deadline = time.monotonic() + 2
+        while time.monotonic() < deadline and len(entered) < 5:
             time.sleep(0.01)
         assert len(entered) == 5
         release.set()

@@ -18,6 +18,7 @@ from aether_worker.coding_sandbox import coding_container_ids, release_coding_co
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.runner import docker_available
 from aether_worker.service import route_pending
+from aether_worker.startup_budget import STALL_SECONDS
 from tests.integration.test_console_records import _headers, _session
 
 CANDIDATE = {
@@ -311,7 +312,7 @@ def _async_failure(client, role_urls, prefix: str) -> tuple[str, str, str, str]:
     return owner_id, project_id, task_id, job_id
 
 
-_TERMINAL_WAIT_SECONDS = 2 * coding_jobs.LEASE_SECONDS + 75
+_TERMINAL_WAIT_SECONDS = 2 * coding_jobs.LEASE_SECONDS + STALL_SECONDS
 
 
 def _job_state(worker: Database, owner_id: str, project_id: str, job_id: str) -> str:
@@ -403,8 +404,8 @@ def test_stale_attempt_cannot_overwrite_a_requeued_job(client, role_urls) -> Non
     thread = threading.Thread(target=_run)
     thread.start()
     try:
-        deadline = time.time() + 40
-        while time.time() < deadline and not coding_container_ids(job_id):
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not coding_container_ids(job_id):
             time.sleep(0.2)
         assert coding_container_ids(job_id), "编码容器没有起来"
         with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:

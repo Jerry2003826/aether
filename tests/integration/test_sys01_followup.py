@@ -22,7 +22,6 @@ from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
 from aether_worker.startup_budget import wait_worker_ready
-from aether_worker.startup_budget import ActiveDeadline
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
 from tests.integration.test_hybrid_retrieval import APPLE
@@ -629,9 +628,9 @@ def _schedule_id(database: Database, owner_id: str, project_id: str, watch_id: s
 
 
 def _command_terminal(database: Database, owner_id: str, project_id: str, command_id: str, proc, logs: list[str]) -> str:
-    deadline = ActiveDeadline(30)
+    deadline = time.monotonic() + 30
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-40:])}")
         last = _command_status(database, owner_id, project_id, command_id) or ""
@@ -644,8 +643,8 @@ def _command_terminal(database: Database, owner_id: str, project_id: str, comman
 def _schedule_is_missing(schedule_id: str) -> bool:
     async def look() -> bool:
         client = await Client.connect(_temporal_address())
-        deadline = ActiveDeadline(20)
-        while not deadline.expired():
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
             try:
                 await client.get_schedule_handle(schedule_id).describe()
             except RPCError as exc:
@@ -661,9 +660,9 @@ def _schedule_is_missing(schedule_id: str) -> bool:
 def _wait_schedule_fired(schedule_id: str) -> None:
     async def look() -> None:
         client = await Client.connect(_temporal_address())
-        deadline = ActiveDeadline(40)
+        deadline = time.monotonic() + 40
         last = None
-        while not deadline.expired():
+        while time.monotonic() < deadline:
             try:
                 described = await client.get_schedule_handle(schedule_id).describe()
             except RPCError as exc:

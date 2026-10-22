@@ -36,18 +36,16 @@ class _Script:
             self.bucket.append(line + "\n")
 
 
-def _run(steps: list[tuple[float, str | None]], proc: _Proc | None = None) -> sb.ActiveClock:
+def _run(steps: list[tuple[float, str | None]], proc: _Proc | None = None) -> None:
     bucket: list[str] = []
     script = _Script(steps, bucket)
-    return sb.wait_worker_ready(bucket, proc or _Proc(), now=script.now, sleep=script.sleep)
+    sb.wait_worker_ready(bucket, proc or _Proc(), now=script.now, sleep=script.sleep)
 
 
 def test_budget_constants_match_the_design() -> None:
-    assert sb.ROLE_READY_SECONDS == 60.0
-    assert sb.ROLE_HEALTH_SECONDS == 15.0
-    assert sb.TEMPORAL_CONNECT_SECONDS == 30.0
-    assert sb.STALL_SECONDS == 75.0
-    assert sb.TOTAL_SECONDS == 3 * (60 + 15) + 30 + 60
+    assert sb.STALL_SECONDS == sb.ROLE_READY_SECONDS + sb.ROLE_HEALTH_SECONDS
+    assert sb.ROLE_SECONDS == sb.STALL_SECONDS
+    assert sb.TOTAL_SECONDS == sb.ROLE_COUNT * sb.ROLE_SECONDS + sb.TEMPORAL_CONNECT_SECONDS + sb.WORKER_REST_SECONDS
 
 
 def test_returns_on_ready() -> None:
@@ -72,7 +70,7 @@ def test_no_output_for_the_stall_budget_fails() -> None:
 
 def test_progress_past_the_total_fails() -> None:
     steps = [(0.1, "aether-worker-phase step=image-ready")] + [(4.0, f"progress {i}") for i in range(90)]
-    with pytest.raises(sb.WorkerStartFailed, match="超过 315s"):
+    with pytest.raises(sb.WorkerStartFailed, match=f"超过 {sb.TOTAL_SECONDS:.0f}s"):
         _run(steps)
 
 

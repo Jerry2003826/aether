@@ -57,3 +57,25 @@ def test_a_blocking_readline_fails_within_the_ready_timeout(monkeypatch) -> None
     assert outcome and isinstance(outcome[0], SystemExit), outcome
     assert "没有就绪" in str(outcome[0]), outcome[0]
     assert elapsed <= role_launch._READY_TIMEOUT + 0.05, elapsed
+
+
+def test_a_finished_ready_line_is_returned_without_the_full_timeout() -> None:
+    read_fd, write_fd = os.pipe()
+    os.write(write_fd, b"noise\naether-role-ready port=9\n")
+    stdout = os.fdopen(read_fd, "r", buffering=1)
+
+    class _Proc:
+        def __init__(self) -> None:
+            self.stdout = stdout
+            self.returncode = None
+
+        def poll(self) -> None:
+            return None
+
+    started = time.monotonic()
+    try:
+        line = role_launch._read_ready(_Proc(), [], [])  # type: ignore[arg-type]
+    finally:
+        os.close(write_fd)
+    assert line == "aether-role-ready port=9"
+    assert time.monotonic() - started < 1

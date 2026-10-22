@@ -19,7 +19,6 @@ import pytest
 from sqlalchemy import text
 
 from aether_worker.startup_budget import wait_worker_ready
-from aether_worker.startup_budget import ActiveDeadline
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
 from aether_worker.dispatcher import deliver_pending
@@ -136,8 +135,8 @@ def _drain(pipe, bucket: list[str]) -> None:
 
 
 def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str], timeout: float = 90) -> None:
-    deadline = ActiveDeadline(timeout)
-    while not deadline.expired():
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
         if any(needle in line for line in bucket):
             return
         if proc.poll() is not None:
@@ -147,9 +146,9 @@ def _wait_line(bucket: list[str], needle: str, proc: subprocess.Popen[str], time
 
 
 def _wait_http(url: str) -> None:
-    deadline = ActiveDeadline(30)
+    deadline = time.monotonic() + 30
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         try:
             response = httpx.get(url, timeout=2)
             if response.status_code < 500:
@@ -393,9 +392,9 @@ def _approve_waiting(http: httpx.Client, csrf: str, project_id: str, task_id: st
 
 
 def _wait_status(http: httpx.Client, project_id: str, task_id: str, status: str, worker: subprocess.Popen[str] | None, logs: list[str]) -> dict:
-    deadline = ActiveDeadline(30)
+    deadline = time.monotonic() + 30
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         if worker is not None and worker.poll() is not None:
             raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
         task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
@@ -407,9 +406,9 @@ def _wait_status(http: httpx.Client, project_id: str, task_id: str, status: str,
 
 
 def _wait_verified(http: httpx.Client, project_id: str, task_id: str, fact: str, goal: str, worker: subprocess.Popen[str], logs: list[str]) -> dict[str, object]:
-    deadline = ActiveDeadline(45)
+    deadline = time.monotonic() + 45
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         if worker.poll() is not None:
             raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
         task = http.get(f"/v1/projects/{project_id}/tasks/{task_id}")
@@ -444,9 +443,9 @@ def _wait_verified(http: httpx.Client, project_id: str, task_id: str, fact: str,
 
 
 def _wait_locator(http: httpx.Client, project_id: str, locator: str, worker: subprocess.Popen[str], logs: list[str]) -> None:
-    deadline = ActiveDeadline(30)
+    deadline = time.monotonic() + 30
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         if worker.poll() is not None:
             raise AssertionError(f"worker 退出 {worker.returncode}: {''.join(logs[-40:])}")
         sources = http.get(f"/v1/projects/{project_id}/sources")

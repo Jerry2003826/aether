@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import secrets
-import select
 import signal
 import subprocess
 import sys
@@ -19,7 +19,7 @@ from urllib.parse import urlsplit
 import psutil
 
 from aether_worker.loopback import LoopbackError, get_json
-from aether_worker.startup_budget import IMAGE_READY_STEP, PHASE, ROLE_HEALTH_SECONDS, ROLE_READY_SECONDS, ActiveClock
+from aether_worker.startup_budget import IMAGE_READY_STEP, PHASE, ROLE_HEALTH_SECONDS, ROLE_READY_SECONDS
 
 _PROCESS_ROLE = "AETHER_PROCESS_ROLE"
 _LOOPBACK_TOKEN = "AETHER_LOOPBACK_TOKEN"
@@ -256,25 +256,53 @@ def _await_role(proc: subprocess.Popen[str], errors: list[str], secrets_to_hide:
         if proc.poll() is None:
             proc.terminate()
         raise
-    assert proc.stdout is not None
-    threading.Thread(target=_drain, args=(proc.stdout, [], secrets_to_hide), daemon=True).start()
     return f"http://127.0.0.1:{_port(line)}"
 
 
+def _discard_lines(lines: queue.Queue[str]) -> None:
+    while True:
+        lines.get()
+
+
 def _read_ready(proc: subprocess.Popen[str], secrets_to_hide: list[str], errors: list[str]) -> str:
+    """Wait until the role prints its ready line, on time.monotonic().
+
+    readline runs on a side thread. A partial line blocks that call, and the deadline is checked
+    without waiting for it to return, so the wait cannot become unbounded.
+    """
     assert proc.stdout is not None
-    clock = ActiveClock()
-    while clock.tick() < _READY_TIMEOUT:
-        if proc.poll() is not None:
+    stdout = proc.stdout
+    deadline = time.monotonic() + _READY_TIMEOUT
+    lines: queue.Queue[str] = queue.Queue()
+
+    def _pump() -> None:
+        try:
+            while True:
+                line = stdout.readline()
+                lines.put(line)
+                if line == "":
+                    return
+        except (OSError, ValueError):
+            lines.put("")
+
+    threading.Thread(target=_pump, name="aether-role-stdout", daemon=True).start()
+    while True:
+        if time.monotonic() >= deadline:
+            raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        if proc.poll() is not None and lines.empty():
             raise SystemExit(_redact(f"角色进程退出 {proc.returncode}: {''.join(errors)[-800:]}", secrets_to_hide))
-        remaining = max(0.0, _READY_TIMEOUT - clock.elapsed)
-        ready, _, _ = select.select([proc.stdout], [], [], min(0.5, remaining))
-        if not ready:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        try:
+            line = lines.get(timeout=min(0.05, remaining))
+        except queue.Empty:
             continue
-        line = proc.stdout.readline()
         if line.startswith("aether-role-ready "):
+            threading.Thread(target=_discard_lines, args=(lines,), name="aether-role-stdout-discard", daemon=True).start()
             return line.strip()
-    raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        if line == "" and proc.poll() is not None:
+            raise SystemExit(_redact(f"角色进程退出 {proc.returncode}: {''.join(errors)[-800:]}", secrets_to_hide))
 
 
 def _drain(pipe, bucket: list[str], secrets_to_hide: list[str]) -> None:
@@ -290,14 +318,17 @@ def _port(line: str) -> int:
 
 
 def _require_health(base: str, role: str, secrets_to_hide: list[str]) -> None:
-    clock = ActiveClock()
+    deadline = time.monotonic() + ROLE_HEALTH_SECONDS
     last = "unreachable"
-    while clock.tick(allow=_HEALTH_CALL_SECONDS) < ROLE_HEALTH_SECONDS:
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
         try:
-            payload = get_json(f"{base}/health", timeout=_HEALTH_CALL_SECONDS)
+            payload = get_json(f"{base}/health", timeout=min(_HEALTH_CALL_SECONDS, remaining))
         except LoopbackError as exc:
             last = exc.code
-            time.sleep(0.05)
+            pause = min(0.05, max(0.0, deadline - time.monotonic()))
+            if pause:
+                time.sleep(pause)
             continue
         if payload.get("role") != role:
             raise SystemExit(f"{role} 健康检查角色不符")

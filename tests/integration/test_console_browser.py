@@ -27,9 +27,9 @@ def _port() -> int:
 
 
 def _wait(url: str) -> None:
-    deadline = time.time() + 90
+    deadline = time.monotonic() + 90
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         try:
             response = httpx.get(url, timeout=2)
             if response.status_code < 500:

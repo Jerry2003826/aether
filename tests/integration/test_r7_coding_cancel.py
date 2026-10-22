@@ -78,8 +78,8 @@ def test_cancel_is_cancelled_only_after_the_container_is_gone(client, role_urls)
     thread = threading.Thread(target=_run)
     thread.start()
     try:
-        deadline = time.time() + 40
-        while time.time() < deadline and not coding_container_ids(job_id):
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not coding_container_ids(job_id):
             time.sleep(0.2)
         assert coding_container_ids(job_id), "编码容器没有起来"
         cancelled = client.post(

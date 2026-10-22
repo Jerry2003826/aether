@@ -1,9 +1,8 @@
-"""Integration wait helpers must not time out because the box was paused (r11d flake root cause).
+"""Integration wait helpers use time.monotonic(), not the wall clock (r11d flake root cause).
 
-On this KVM box a pause moves the wall clock far more than the monotonic clock (clockwatch
-19:12:11: one 1 s sleep took wall 84.9 s, monotonic 15.3 s; the 2h40m pause on 2026-10-22). A wait
-whose deadline is time.time() then expires with almost no active time spent. Both clocks are
-scripted here; a real overrun must still fail.
+On the KVM box a pause moves the wall clock and leaves the monotonic clock almost still. A wait
+whose deadline is time.time() then expires with almost no monotonic time spent. A gap in
+time.monotonic() is elapsed time and must still fail. Both clocks are scripted here.
 """
 
 from __future__ import annotations
@@ -62,7 +61,7 @@ class _Http:
 
 
 def test_poll_survives_a_paused_box(monkeypatch) -> None:
-    _Clock(monkeypatch, jump_at=2)
+    _Clock(monkeypatch, jump_at=2, mono_jump=0.0)
     http = _Http(ready_after=5)
     found = test_sys01_entry._poll(http, "/x", lambda _body: "done" if http.calls >= 5 else None, _Proc(), [], 45)
     assert found == "done"
@@ -75,7 +74,7 @@ def test_poll_still_times_out_on_real_overrun(monkeypatch) -> None:
 
 
 def test_wait_line_survives_a_paused_box(monkeypatch) -> None:
-    clock = _Clock(monkeypatch, jump_at=2)
+    clock = _Clock(monkeypatch, jump_at=2, mono_jump=0.0)
     bucket: list[str] = []
     real_sleep = clock.sleep
 

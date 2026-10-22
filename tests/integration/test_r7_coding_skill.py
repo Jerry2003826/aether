@@ -69,9 +69,9 @@ def _candidate() -> bytes:
 
 
 def _wait_job(database: Database, owner_id: str, project_id: str, job_key: str, states: set[str], proc, logs: list[str]) -> dict:
-    deadline = time.time() + 180
+    deadline = time.monotonic() + 180
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-60:])}")
         with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
@@ -91,9 +91,9 @@ def _wait_job(database: Database, owner_id: str, project_id: str, job_key: str, 
 
 
 def _wait_evaluation(http: httpx.Client, project_id: str, evaluation_id: str, proc, logs: list[str]) -> dict:
-    deadline = time.time() + 180
+    deadline = time.monotonic() + 180
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-60:])}")
         response = http.get(f"/v1/projects/{project_id}/evaluations")
@@ -189,9 +189,9 @@ def _task_status(database: Database, owner_id: str, project_id: str, task_id: st
 
 
 def _wait_approval(database: Database, owner_id: str, project_id: str, task_id: str, proc, logs: list[str]) -> None:
-    deadline = time.time() + 60
+    deadline = time.monotonic() + 60
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-60:])}")
         last = _task_status(database, owner_id, project_id, task_id)
@@ -255,9 +255,9 @@ def _skill(http, csrf, owner_id, project_id, database, proc, logs) -> None:
     )
     assert imported.status_code == 202, imported.text
     skill_id = imported.json()["resource_id"]
-    deadline = time.time() + 30
+    deadline = time.monotonic() + 30
     version_id = None
-    while time.time() < deadline and version_id is None:
+    while time.monotonic() < deadline and version_id is None:
         with database.transaction(owner_id=owner_id, project_id=project_id) as conn:
             version_id = conn.execute(
                 text("SELECT id::text FROM skill_versions WHERE project_id = :project_id AND skill_id = :skill_id"),

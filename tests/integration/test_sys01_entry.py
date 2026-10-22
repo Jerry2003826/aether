@@ -18,7 +18,6 @@ from sqlalchemy import text
 from temporalio.client import Client, ScheduleActionStartWorkflow
 
 from aether_worker.startup_budget import wait_worker_ready
-from aether_worker.startup_budget import ActiveDeadline
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
@@ -38,9 +37,9 @@ from tests.integration.test_worker_process import (
 
 
 def _poll(http: httpx.Client, url: str, ready: Callable[[dict[str, Any]], Any], proc, logs: list[str], timeout: float = 90):
-    deadline = ActiveDeadline(timeout)
+    deadline = time.monotonic() + timeout
     last = ""
-    while not deadline.expired(allow=10):
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs)}")
         response = http.get(url)
@@ -62,9 +61,9 @@ def _command_status(database: Database, owner_id: str, project_id: str, command_
 
 
 def _wait_command(database: Database, owner_id: str, project_id: str, command_id: str, expected: str, proc, logs: list[str]) -> None:
-    deadline = ActiveDeadline(30)
+    deadline = time.monotonic() + 30
     last = ""
-    while not deadline.expired():
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-40:])}")
         last = _command_status(database, owner_id, project_id, command_id) or ""
@@ -281,9 +280,9 @@ def _assert_watch_schedule(database: Database, owner_id: str, project_id: str, w
     client = asyncio.run(Client.connect(_temporal_address()))
 
     async def describe_ready():
-        deadline = ActiveDeadline(30)
+        deadline = time.monotonic() + 30
         last = None
-        while not deadline.expired():
+        while time.monotonic() < deadline:
             described = await client.get_schedule_handle(str(schedule_id)).describe()
             last = described
             if described.info.num_actions >= 1 and described.info.next_action_times:

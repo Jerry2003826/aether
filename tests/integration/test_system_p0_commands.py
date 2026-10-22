@@ -138,9 +138,9 @@ def test_documented_worker_survives_a_duplicate_source_and_keeps_running_tasks(c
     worker = Database(role_urls["aether_worker"])
     status = None
     try:
-        deadline = time.time() + 40
+        deadline = time.monotonic() + 40
         approved = False
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with worker.transaction(owner_id=owner, project_id=other) as conn:
                 status = conn.execute(text("SELECT status FROM tasks WHERE id = :id"), {"id": task_id}).scalar_one()
             if status == "WAITING_APPROVAL" and not approved:
