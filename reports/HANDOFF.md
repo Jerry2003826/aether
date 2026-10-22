@@ -1,5 +1,33 @@
 # 交接
 
+## r11 flake（分支 `cloud/r11-flake`，代码 `b5550a7`）
+
+2026-10-22。基线是 `origin/wip/r11-flake`。等待期限改回 `time.monotonic()`，不再把两次检查之间的长间隔当成机器暂停。产品里的编码租约仍是 PostgreSQL `now()`。`live_research` 的 1800 秒活动时间预算没有改。`docs/DECISIONS.md` 里的 ADR-F53 已用 `scripts/rebuild_spec.py` 写回 `MASTER_SPEC.md`。
+
+在 `b5550a7` 上对照 CI 的 pack-and-unit：
+
+```sh
+uv run --locked --no-build python scripts/verify_freeze.py
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --no-build pytest -q tests/unit
+uv run --locked --no-build pytest -q tests/contract
+cd apps/web && pnpm typecheck
+```
+
+冻结检查通过。参考套件 76 OK（1.657s）。单元 1326 passed（799.26s）。契约 5 passed（5.98s）。网页 `tsc --noEmit` 通过。gitleaks 8.30.1（官方包，sha256 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`）`no leaks found`。
+
+集成在干净 clone `/tmp/aether-clean`（当时代码是 `3a7279c`，随后的 `b5550a7` 只改阅读版规格）上跑。墙钟与单调钟之差不超过 0.001 秒的三轮，都只有 Tor 夹具超时这一条失败：
+
+```text
+1 failed, 429 passed, 1 warning in 1160.62s (0:19:20)
+1 failed, 429 passed, 1 warning in 1118.81s (0:18:38)
+1 failed, 429 passed, 1 warning in 1159.60s (0:19:19)
+```
+
+失败项是 `test_threat_browser_container.py::test_one_shot_containers_only_reach_tor_and_are_removed`。另有两轮墙钟相对单调钟多走了 33 秒和 992 秒，不作数；其中 33 秒那轮还多失败了 `test_large_token_rounds_extend_the_reservation_and_settle_actual_usage`（作业停在 ACTIVE）。
+
+下一步：等所有者决定要不要改 `live_research` 的 1800 秒墙钟预算，并对照即将给出的设计清单。
+
 ## F26 正式验收重跑（head `27cfc9f`，PR #31）
 
 2026-10-20 14:44（墨尔本时间，UTC 03:44），监督者在 `27cfc9fe0e2281941864120de9feea3409ceb19e` 上用真实 key 运行：
