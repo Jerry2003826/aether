@@ -2,6 +2,7 @@ import hashlib
 import importlib.util
 import json
 import shutil
+import subprocess
 import threading
 import urllib.error
 import urllib.request
@@ -587,4 +588,49 @@ def test_script_writes_blocked_result_without_calling_out(tmp_path: Path, monkey
     assert code == 2
     assert written["status"] == "blocked"
     assert written["live_ready"] is False
+    assert _RECORDED.read_bytes() == before
+
+
+def test_script_can_write_evidence_named_after_current_head(tmp_path: Path, monkeypatch) -> None:
+    """The recorded evidence name reports/f26_acceptance_result_<head>.json is a valid --out."""
+    monkeypatch.delenv(LIVE_KEY, raising=False)
+    monkeypatch.delenv(LIVE_BASE, raising=False)
+    monkeypatch.delenv(LIVE_ALIAS, raising=False)
+    spec = importlib.util.spec_from_file_location("run_f26_acceptance", Path("scripts/run_f26_acceptance.py"))
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = {"GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1", "PATH": "/usr/bin:/bin:/usr/local/bin"}
+    ident = ["-c", "user.name=t", "-c", "user.email=t@example.invalid"]
+    subprocess.run(["git", "-C", str(repo), "init", "-q"], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), *ident, "commit", "-q", "--allow-empty", "-m", "x"], check=True, env=env)
+    head = subprocess.run(["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, env=env, capture_output=True, text=True).stdout.strip()
+    module.ROOT = repo
+    module.RESULT_PATH = tmp_path / "default.json"
+    before = _RECORDED.read_bytes()
+    for short in (head[:7], head):
+        code = module.main(["--out", f"reports/f26_acceptance_result_{short}.json"])
+        written = json.loads((repo / "reports" / f"f26_acceptance_result_{short}.json").read_text(encoding="utf-8"))
+        assert code == 2
+        assert written["status"] == "blocked"
+        assert written["live_ready"] is False
+    assert not module.RESULT_PATH.exists()
+    other = "0" * 7 if not head.startswith("0000000") else "1" * 7
+    for bad in (
+        f"reports/f26_acceptance_result_{other}.json",
+        f"reports/f26_acceptance_result_{head[:6]}.json",
+        f"reports/f26_acceptance_result_{head[:7].upper()}.json",
+        f"reports/f26_acceptance_result_{head[:7]}.verdict.json",
+        f"reports/f26_acceptance_result_{head[:7]}.approval.json",
+        f"reports/x/f26_acceptance_result_{head[:7]}.json",
+        f"{repo}/reports/f26_acceptance_result_{head[:7]}.json",
+    ):
+        try:
+            module.main(["--out", bad])
+        except SystemExit as exc:
+            assert str(exc) == "out must be reports/f26_acceptance_result.json", bad
+        else:
+            raise AssertionError(f"{bad} must be rejected")
     assert _RECORDED.read_bytes() == before

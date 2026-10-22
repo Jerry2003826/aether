@@ -32,6 +32,8 @@ jobs:
           uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py' -v
       - name: Unit tests
         run: uv run --locked --no-build pytest -q tests/unit
+      - name: Contract tests on a real PostgreSQL (testcontainers)
+        run: uv run --locked --no-build pytest -q tests/contract
       - name: Web typecheck
         run: |
           corepack enable

@@ -21,6 +21,7 @@ from sqlalchemy import text
 from temporalio.client import Client
 from temporalio.service import RPCError, RPCStatusCode
 
+from aether_worker.startup_budget import wait_worker_ready
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
 from tests.integration.test_hybrid_retrieval import APPLE
@@ -36,7 +37,6 @@ from tests.integration.test_worker_process import (
     _stop,
     _temporal_address,
     _wait_http,
-    _wait_line,
 )
 
 SECRET = "另一项目的机密句子不会进入这个项目的索引"
@@ -118,7 +118,7 @@ class _Running:
 
     def ready(self) -> None:
         _wait_http(f"http://127.0.0.1:{self.api_port}/health/live")
-        _wait_line(self.worker_logs, "aether-worker-ready", self.worker)
+        wait_worker_ready(self.worker_logs, self.worker)
 
     def bootstrap(self, key: str, name: str) -> None:
         created = self.http.post(
@@ -628,9 +628,9 @@ def _schedule_id(database: Database, owner_id: str, project_id: str, watch_id: s
 
 
 def _command_terminal(database: Database, owner_id: str, project_id: str, command_id: str, proc, logs: list[str]) -> str:
-    deadline = time.time() + 30
+    deadline = time.monotonic() + 30
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-40:])}")
         last = _command_status(database, owner_id, project_id, command_id) or ""
@@ -643,8 +643,8 @@ def _command_terminal(database: Database, owner_id: str, project_id: str, comman
 def _schedule_is_missing(schedule_id: str) -> bool:
     async def look() -> bool:
         client = await Client.connect(_temporal_address())
-        deadline = time.time() + 20
-        while time.time() < deadline:
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
             try:
                 await client.get_schedule_handle(schedule_id).describe()
             except RPCError as exc:
@@ -660,9 +660,9 @@ def _schedule_is_missing(schedule_id: str) -> bool:
 def _wait_schedule_fired(schedule_id: str) -> None:
     async def look() -> None:
         client = await Client.connect(_temporal_address())
-        deadline = time.time() + 40
+        deadline = time.monotonic() + 40
         last = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             try:
                 described = await client.get_schedule_handle(schedule_id).describe()
             except RPCError as exc:

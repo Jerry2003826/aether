@@ -279,6 +279,9 @@ VENV_DIRS = frozenset({".venv", "venv", "env"})
 # step allowance covers isolation overhead with room for real work; a hung suite stops at the cap.
 PROTOCOL_CALL_TIMEOUT_SECONDS = 15
 PROTOCOL_TEST_TIMEOUT_SECONDS = 20
+# A test process's first reply (start-up, importing pytest, collecting the module) has its own limit,
+# separate from one test's: a slow start is never cut off by a short per-test limit (ADR-F52).
+PROTOCOL_COLLECT_TIMEOUT_SECONDS = 20
 PROTOCOL_BASE_SECONDS = 30
 PROTOCOL_STEP_SECONDS = 2
 PROTOCOL_CAP_SECONDS = 240

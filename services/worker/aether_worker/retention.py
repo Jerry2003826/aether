@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import json
+import threading
 from typing import Any
 
+from cachetools import TTLCache
 from sqlalchemy import text
 
 LIMITS = (
     "这是 tombstone，不是从磁盘和备份里物理删除。",
     "数据库备份和 Temporal 历史里可能还留着副本，要等备份到期才消失。",
 )
-_SEARCH_CACHE: dict[tuple[str, int, str, str], dict[str, Any]] = {}
+# Bounded: least recently used entries go first, and nothing outlives the TTL. The key is
+# unchanged (project, visibility epoch, generation, query), so a new epoch still misses.
+SEARCH_CACHE_MAXSIZE = 1024
+SEARCH_CACHE_TTL_SECONDS = 600
+_SEARCH_CACHE: TTLCache[tuple[str, int, str, str], dict[str, Any]] = TTLCache(
+    maxsize=SEARCH_CACHE_MAXSIZE, ttl=SEARCH_CACHE_TTL_SECONDS
+)
+_SEARCH_CACHE_LOCK = threading.Lock()
 
 
 class RetentionError(Exception):
@@ -29,12 +38,15 @@ def current_epoch(conn: Any, project_id: str) -> int:
 
 
 def cache_result(project_id: str, epoch: int, key: str, value: dict[str, Any], *, generation_id: str = "") -> None:
-    _SEARCH_CACHE[(project_id, int(epoch), generation_id, key)] = dict(value)
+    with _SEARCH_CACHE_LOCK:
+        _SEARCH_CACHE[(project_id, int(epoch), generation_id, key)] = dict(value)
 
 
 def read_cached_result(conn: Any, project_id: str, key: str, *, generation_id: str = "") -> dict[str, Any] | None:
     """Return a cached search only for the current epoch and the requested generation."""
-    found = _SEARCH_CACHE.get((project_id, current_epoch(conn, project_id), generation_id, key))
+    cache_key = (project_id, current_epoch(conn, project_id), generation_id, key)
+    with _SEARCH_CACHE_LOCK:
+        found = _SEARCH_CACHE.get(cache_key)
     return None if found is None else dict(found)
 
 
@@ -49,9 +61,9 @@ def advance_visibility_epoch(conn: Any, project_id: str) -> int:
 
 
 def _drop_project_cache(project_id: str) -> None:
-    for cache_key in list(_SEARCH_CACHE):
-        if cache_key[0] == project_id:
-            del _SEARCH_CACHE[cache_key]
+    with _SEARCH_CACHE_LOCK:
+        for cache_key in [item for item in _SEARCH_CACHE if item[0] == project_id]:
+            _SEARCH_CACHE.pop(cache_key, None)
 
 
 def invalidate_derived(conn: Any, *, project_id: str) -> dict[str, Any]:

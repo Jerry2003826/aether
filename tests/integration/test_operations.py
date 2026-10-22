@@ -313,9 +313,9 @@ def test_dispatch_locks_resource_head_before_send(client, api_db, role_urls, aet
     assert held.wait(timeout=5)
     dispatcher.start()
     waiting = False
-    deadline = time.time() + 3
+    deadline = time.monotonic() + 3
     try:
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with psycopg.connect(aether_admin) as conn:
                 count = conn.execute(
                     "SELECT count(*) FROM pg_stat_activity WHERE datname = current_database() AND state = 'active' AND wait_event_type IS NOT NULL AND query ILIKE '%resource_heads%'"

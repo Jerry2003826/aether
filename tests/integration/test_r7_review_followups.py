@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import threading
 import time
 import uuid
@@ -12,10 +13,12 @@ from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
+from aether_worker import coding_jobs
 from aether_worker.coding_sandbox import coding_container_ids, release_coding_container
 from aether_worker.console_commands import apply_console_commands
 from aether_worker.runner import docker_available
 from aether_worker.service import route_pending
+from aether_worker.startup_budget import STALL_SECONDS
 from tests.integration.test_console_records import _headers, _session
 
 CANDIDATE = {
@@ -283,19 +286,46 @@ def test_slow_grader_stops_when_active_seconds_expire(client, role_urls) -> None
     assert item["configuration"]["error_code"] == "deadline_exceeded"
 
 
-def test_async_failure_is_visible_on_the_task_stream(client, role_urls) -> None:
+def _async_failure(client, role_urls, prefix: str) -> tuple[str, str, str, str]:
+    """Create the async-test coding job, route it, and return (owner, project, task, job) once it is terminal."""
     _require_docker()
-    owner_id, project_id, csrf = _session(client, "r7-async-project")
-    task_id = _task(client, project_id, csrf, "r7-async-task")
-    artifact_id = _upload(client, project_id, csrf, "r7-async-file", "async.json", WORKSPACE)
+    owner_id, project_id, csrf = _session(client, f"{prefix}-project")
+    task_id = _task(client, project_id, csrf, f"{prefix}-task")
+    artifact_id = _upload(client, project_id, csrf, f"{prefix}-file", "async.json", WORKSPACE)
     created = client.post(
         f"/v1/projects/{project_id}/coding-jobs",
-        headers=_headers(csrf, "r7-async-job"),
+        headers=_headers(csrf, f"{prefix}-job"),
         json={"task_id": task_id, "base_artifact_id": artifact_id, "job_key": "async", "objective": "不要把协程当成通过"},
     )
     assert created.status_code == 202, created.text
     job_id = created.json()["resource_id"]
     _route(client, role_urls, owner_id, project_id)
+    # An attempt that lost its lease leaves the job ACTIVE for the next worker pass once the lease
+    # expires; like the worker loop, keep routing and running this project's queued coding jobs.
+    worker = Database(role_urls["aether_worker"])
+    store = ArtifactStore(client.app.state.settings.artifact_root, worker)
+    deadline = time.monotonic() + _TERMINAL_WAIT_SECONDS
+    while _job_state(worker, owner_id, project_id, job_id) in coding_jobs._OPEN and time.monotonic() < deadline:
+        time.sleep(1)
+        _route(client, role_urls, owner_id, project_id)
+        coding_jobs.execute_queued_coding_jobs(worker, store, owner_id=owner_id, project_id=project_id)
+    return owner_id, project_id, task_id, job_id
+
+
+_TERMINAL_WAIT_SECONDS = 2 * coding_jobs.LEASE_SECONDS + STALL_SECONDS
+
+
+def _job_state(worker: Database, owner_id: str, project_id: str, job_id: str) -> str:
+    with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
+        return str(
+            conn.execute(
+                text("SELECT state FROM coding_jobs WHERE project_id = :project_id AND id = :id"),
+                {"project_id": project_id, "id": job_id},
+            ).scalar_one()
+        )
+
+
+def _assert_async_failed(client, role_urls, owner_id: str, project_id: str, task_id: str, job_id: str) -> None:
     worker = Database(role_urls["aether_worker"])
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         state = conn.execute(
@@ -316,6 +346,31 @@ def test_async_failure_is_visible_on_the_task_stream(client, role_urls) -> None:
     assert "coding_job.terminal" in events.text
     assert job_id in events.text
     assert '"state": "FAILED"' in events.text or '"state":"FAILED"' in events.text
+
+
+def test_async_failure_is_visible_on_the_task_stream(client, role_urls) -> None:
+    owner_id, project_id, task_id, job_id = _async_failure(client, role_urls, "r7-async")
+    _assert_async_failed(client, role_urls, owner_id, project_id, task_id, job_id)
+
+
+def test_async_failure_survives_a_lost_first_lease_renewal(client, role_urls, monkeypatch, caplog) -> None:
+    """The first renewal fails once (as after a box pause): the attempt ends coding_lease_lost_during_drain
+    and the job is still ACTIVE; the next worker pass after the lease expires must take it to FAILED."""
+    real = coding_jobs._renew_lease
+    calls = {"n": 0}
+
+    def _renew_once_lost(*args, **kwargs):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return False
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(coding_jobs, "_renew_lease", _renew_once_lost)
+    caplog.set_level(logging.WARNING, logger="aether.worker.coding")
+    owner_id, project_id, task_id, job_id = _async_failure(client, role_urls, "r7-async-lease")
+    assert calls["n"] >= 1
+    assert "coding_lease_lost_during_drain" in caplog.text
+    _assert_async_failed(client, role_urls, owner_id, project_id, task_id, job_id)
 
 
 def test_stale_attempt_cannot_overwrite_a_requeued_job(client, role_urls) -> None:
@@ -349,8 +404,8 @@ def test_stale_attempt_cannot_overwrite_a_requeued_job(client, role_urls) -> Non
     thread = threading.Thread(target=_run)
     thread.start()
     try:
-        deadline = time.time() + 40
-        while time.time() < deadline and not coding_container_ids(job_id):
+        deadline = time.monotonic() + 40
+        while time.monotonic() < deadline and not coding_container_ids(job_id):
             time.sleep(0.2)
         assert coding_container_ids(job_id), "编码容器没有起来"
         with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:

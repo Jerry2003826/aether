@@ -44,6 +44,11 @@ class ConsoleCommandError(Exception):
         self.code = code
 
 
+def _report_failed(row: Any, exc: BaseException) -> None:
+    """Diagnostic only (r11 sys01_followup flakes): say which command was marked FAILED and why; no retry."""
+    print(f"aether-console-command-failed kind={row['kind']} command_key={row['command_key']} error={type(exc).__name__}", flush=True)
+
+
 def apply_console_commands(
     database: Database, *, owner_id: str, project_id: str, store: ArtifactStore | None = None
 ) -> list[str]:
@@ -68,9 +73,10 @@ def apply_console_commands(
             except OperationalError:
                 nested.rollback()
                 raise
-            except Exception:
+            except Exception as exc:
                 nested.rollback()
                 status = "FAILED"
+                _report_failed(row, exc)
             conn.execute(
                 text(
                     "UPDATE command_outbox SET status = :status, "
@@ -108,9 +114,10 @@ def apply_verifier_commands(database: Database, *, owner_id: str, project_id: st
             except OperationalError:
                 nested.rollback()
                 raise
-            except Exception:
+            except Exception as exc:
                 nested.rollback()
                 status = "FAILED"
+                _report_failed(row, exc)
             conn.execute(
                 text(
                     "UPDATE command_outbox SET status = :status, "

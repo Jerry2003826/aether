@@ -1,5 +1,143 @@
 # 交接
 
+## 当前交接（分支 `cloud/r11-flake`，代码 `0ce129d`，2026-10-22）
+
+对照 `origin/main` 的 `8e90c91`。`origin/fix/r11-gpt-review` 的 `f7c3cd6` 是本分支的祖先。本文件只记交接，不改产品行为。`STATUS.json` 与 `tasks/backlog.yaml` 未改。`readiness.live_ready` 仍是 pending。下面各节是更早的交接，保留原样。
+
+### 这一批已经完成的内容
+
+相对 main 共 67 个提交，到代码头 `0ce129d`。分两段。
+
+GPT Pro 审查已落地的修复（`5fa4c64` 至 `f7c3cd6`，以及其后仍属于这批评审的提交）：
+
+- F26 `live_ready` 改为三条记录：运行证据、验收结论、所有者批准，按 sha256 逐级算出。证据白名单只有 `reports/f26_acceptance_result*.json` 和 `reports/HANDOFF.md`。白名单以外的改动（含 `STATUS.json`）让 `live_ready_state` 回到 pending。决定是 ADR-F50。
+- sys01：一次 watch 运行的通知、`last_run_at` 与 watch-run 制品在同一事务提交或一起回滚。`trigger_watch` 的 `store` 是必填关键字参数。
+- 技能提升改为同一组任务的配对比较：statsmodels McNemar 精确检验，SciPy 固定种子的配对 BCa bootstrap（ADR-F51）。统计库改为评分时再导入。退化数据的警告转成 `SkillEvalError(non_finite)`。ADR-F32 的 `live_ready` 判定方式由 ADR-F50 取代，取代关系表已登记。
+- 收集阶段超时逐条记失败，整次运行的 deadline 仍是上限（ADR-F52）。
+- 评分容器的 JUnit 先用标准库 expat 拒绝 DOCTYPE、实体声明和外部实体，再交给 ElementTree。
+- retention 检索缓存改为 `cachetools.TTLCache`（上限 1024，TTL 600 秒）。
+- 模型输入 token 计数接入 LiteLLM `token_counter`，预留取字节估算与精确值的较大值。
+- 向量字面量改用 pgvector-python 的 `Vector`，按 float32 往返。
+- 模型 SSE 改用 httpx-sse，支持 CRLF、LF、单独 CR、开头 BOM 和多行 data。
+- 账本契约测试用 testcontainers 跑在真实 PostgreSQL 上。并发预留的 barrier 有超时。
+- `running_postgres_image` 从运行中容器的 RepoDigests 核对 `images.lock.json`。
+- 集成会话开始时预建 OpenHands 沙箱镜像。
+- `test_coding_model_relay` 每个用例开始前清掉 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_ALIAS`、`AETHER_LIVE_MODEL_BASE`。
+- `scripts/run_f26_acceptance.py --out` 接受 `reports/f26_acceptance_result_<当前 HEAD 前缀>.json`。
+
+集成测试不稳定用例（基线 `origin/wip/r11-flake`，从 `c0c0f98` 到 `0ce129d`）：
+
+- 等待期限用 `time.monotonic()`。两次检查隔得久，直接计入期限。产品代码和测试代码里都没有 ActiveClock / ActiveDeadline。
+- worker 启动预算集中在 `startup_budget`：单角色就绪 60 秒、健康检查 15 秒、停滞 75 秒、三个角色加 Temporal 30 秒加 worker 收尾 60 秒，总上限 315 秒。镜像准备在总上限之外。进程退出或 start-failed 立即失败。慢启动钩子只由测试注入的 `role_hook` 打开，默认关闭。
+- 角色标准输出由一条泵线程读取。就绪之后这条线程自己丢掉后续输出，读到结尾就退出。角色退出后不留丢弃线程。
+- 非 UUID 的产物 id 在查询前返回 `not_found`。`uuid.UUID` 对象进入查询。
+- 控制台按 Next.js 自己的 Ready 行等待，停滞和总时长引用启动预算常量。
+- r7 异步失败测试在租约丢失后续跑排队的 coding job，直到作业离开开放状态。产品里的编码租约仍是 PostgreSQL `now()` 加 30 秒。
+- 网关关闭 LiteLLM 的 Hugging Face 分词器下载；离线时按字节估算（ADR-F53）。`MASTER_SPEC.md` 已按 `scripts/rebuild_spec.py` 写回。
+- 11 线程竞争测试的 Barrier 超时改为可传参，并设为 2 秒。
+- 控制台命令被标 FAILED 时打印一行 `aether-console-command-failed`。
+- SSE 只有 event、没有 data 时，两个读取器都跳过。这是覆盖测试，产品解析已在 httpx-sse 那次修改里。
+
+`live_research` 的 1800 秒活动预算仍按墙钟计算，本批没有改。
+
+### 红测与修复
+
+审查与库替换：
+
+| 红测 | 修复 | 内容 |
+|---|---|---|
+| `5fa4c64` | `3674e50` | F26 三条记录算出 `live_ready` |
+| `c467190`、`be1cfc5` | `c7c2f45`、`2e2dcba` | sys01 通知、`last_run_at`、制品同一事务 |
+| `76ad63f` | `0a62c15` | 配对 McNemar 与 bootstrap |
+| `f04f173` | `b20c9de` | bootstrap 警告转 `non_finite` |
+| `c4b3c99` | `259b48e` | 统计库延迟导入 |
+| `4658656` | `b3f2aeb` | 收集阶段超时逐条失败 |
+| `1c97f48` | `ec8bb9c` | JUnit 拒绝 DOCTYPE 与外部实体 |
+| `a6a1c19` | `5f8e2c6` | 检索缓存上限与 TTL |
+| `b9b90c9` | `1dc5d5d` | LiteLLM `token_counter` |
+| `c7019da` | `4033f7e` | pgvector `Vector` |
+| `3a5758e` | `565299d` | httpx-sse |
+| `2de7741` | `8fe7765` | 真实 PostgreSQL 上的账本契约 |
+| `9e6a217` | `d2ecfc1` | 并发预留 barrier 超时 |
+| `ba48771` | `f7c3cd6` | 运行中的 Postgres 镜像摘要 |
+| `46bcaf2` | `a4867ab` | 会话开始前预建 OpenHands 镜像 |
+| `5b957aa` | `1119110` | 编码中继测试清掉宿主模型环境变量 |
+| `d7ee683` | `a0252f8` | F26 `--out` 直接写成证据文件名 |
+
+集成不稳定用例：
+
+| 红测 | 修复 | 内容 |
+|---|---|---|
+| `c0c0f98` | `3e5bd5a` | 启动预算、阶段日志、仅测试注入的放慢钩子 |
+| `61f9595` | `f103c90` | 离线时不下载 Hugging Face 分词器 |
+| `fc97dc8` | `6f1e2be` | r7 续租失败后继续跑到终态 |
+| `abca80f` | `d5bc2a0` | 控制台 FAILED 诊断行 |
+| `c8073dc` | `31abf7e` | 当时引入 ActiveDeadline |
+| `2275ce9`、`ff582a1` | `c1938fd` | 撤掉 ActiveDeadline；阻塞 readline 与单调钟间隔都计入 `time.monotonic()` 期限 |
+| `59923ef` | `3717a3d` | 非 UUID 在查询前 `not_found` |
+| `9c7e352` | `636e64b` | 控制台按 Next.js Ready 行等待 |
+| `3a7279c` | 同一提交 | 慢启动用两次 monotonic 之差，仍须超过 100 秒 |
+| `d8347c3` | `09d7da3` | 角色退出后不留读取线程 |
+| `ad01875` | `41ec0f9` | `uuid.UUID` 对象进入查询 |
+
+`d8c2c6e`（SSE event-only）和 `13e2501`（Barrier 超时 2 秒）提交时即为通过，没有单独的失败提交。`2daee6c` 去掉结算断言里不再使用的 detail 拼接。`b5550a7` 重写 `MASTER_SPEC.md`。`f912d22` 与 `0ce129d` 是交接记录。
+
+### 门禁证据
+
+审查两条建议（读取线程、`uuid.UUID`）落地之后，在本仓库对照 CI 的 pack-and-unit：
+
+```sh
+uv run --locked --no-build python scripts/verify_freeze.py
+uv run --locked --no-build python -m unittest discover -s tests -p 'test_*.py'
+uv run --locked --no-build pytest -q tests/unit
+uv run --locked --no-build pytest -q tests/contract
+cd apps/web && pnpm typecheck
+```
+
+冻结检查通过。参考套件 76 OK（1.657s）。单元 1328 passed（784.53s）。契约 5 passed（4.23s）。网页 `tsc --noEmit` 通过。gitleaks 8.30.1（官方包，sha256 `551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb`）对 `0ce129d` 的历史扫描 `no leaks found`。密钥检索只命中测试夹具里的公开示例 `AKIAIOSFODNN7EXAMPLE`（`tests/unit/test_detect_secrets_scan.py`）。
+
+五条曾不稳定的集成用例各跑 10 轮，每轮 5 passed：
+
+- `tests/integration/test_sys01_followup.py::test_fetch_failures_reach_a_terminal_state`
+- `tests/integration/test_sys01_followup.py::test_url_allowlist_and_redirects`
+- `tests/integration/test_worker_process.py::test_documented_worker_consumes_http_commands_without_duplicate_effects`
+- `tests/integration/test_live_research.py::test_length_truncated_research_answer_is_not_accepted`
+- `tests/integration/test_r11c_worker_startup.py::test_a_slow_but_progressing_worker_start_is_waited_for`
+
+第 8 轮墙钟比单调钟多走 324.668 秒，用例仍通过。
+
+干净 clone `/tmp/aether-clean` 在 `3a7279c` 上跑全量集成。墙钟与单调钟之差不超过 0.001 秒的三轮计入：
+
+```text
+1 failed, 429 passed, 1 warning in 1160.62s (0:19:20)
+1 failed, 429 passed, 1 warning in 1118.81s (0:18:38)
+1 failed, 429 passed, 1 warning in 1159.60s (0:19:19)
+```
+
+唯一失败是 `test_threat_browser_container.py::test_one_shot_containers_only_reach_tor_and_are_removed`。另两轮墙钟相对单调钟多走 32.954 秒和 991.754 秒，不作数。32.954 秒那轮还多失败了 `test_large_token_rounds_extend_the_reservation_and_settle_actual_usage`（作业停在 ACTIVE，与 PostgreSQL `now()` 租约一致）。
+
+`b5550a7` 只重写阅读版规格。审查两条建议之后，相关集成 5 passed（215.94s）：documented worker、慢启动、不可达 Temporal、两条 OpenHands 网关结算。
+
+CI：推送 `0ce129d` 的 workflow [39795524507](https://github.com/Jerry2003826/aether/actions/runs/39795524507)。pack-and-unit 通过（job 119881795964）。integration 失败（job 119881796464），停在安装 Hermes，集成测试本身没有跑到。
+
+### 已知风险
+
+- `live_research` 的 1800 秒活动预算按墙钟计算：打开的 `task.active` 区间用 `task_events.created_at` 对 `datetime.now(UTC)`。墙钟一次跳过 1800 秒会变成 `budget_exhausted`。要等用户决定改不改。本批保持原样。
+- Tor 夹具超时仍在。三轮计入的全量集成都失败在 `test_one_shot_containers_only_reach_tor_and_are_removed`（`tor` 没有打开，夹具超时）。这是合并前就有的基线失败。
+- Hermes 下载会报 HTTP 429。`0ce129d` 的 integration 日志是 `hermes archive download failed after 5 attempts: HTTP 429`。当时打包与单元测试已经通过。
+
+编码租约仍是 PostgreSQL `now()` 加 30 秒。虚拟机暂停把墙钟向前拨时，租约会到期；测试靠再次路由把作业跑完。上面不作数的那一轮已经出现过 ACTIVE 残留。
+
+### 下一步
+
+1. 重跑 integration，并确认结果为绿。`0ce129d` 的 integration 停在「Install pinned Hermes and probe it」：`hermes archive download failed after 5 attempts: HTTP 429`（workflow [39795524507](https://github.com/Jerry2003826/aether/actions/runs/39795524507)，job 119881796464）。同一轮 pack-and-unit 已通过。本交接推上去之后 CI 会再跑，要确认的是 integration 全绿。
+2. 合并前重跑 Security/Approval。目前结论是 NEUTRAL。
+3. 等用户决定三件事，决定之前保持现状。`live_research` 的 1800 秒活动预算仍按墙钟计算（`task_events.created_at` 对 `datetime.now`）。`role_http` 是否换成 Uvicorn：现在是 `services/worker/aether_worker/role_http.py` 里绑在 `127.0.0.1` 的纯 TCP（`RoleHTTPServer`），不用 `http.server`。是否删除 wip 备份分支：远端仍有 `wip/r11-flake`、`wip/r11-racetimeout`、`wip/r11c-399fc7f`、`wip/orchestrator`，本批没有删除任何分支。
+4. 合并之后再找 GPT Pro 做一轮外部审核。
+5. GPT 之前列出的待办，本批没有再追加功能。live_ready 的判定代码：ADR-F50（红测 `5fa4c64`，修复 `3674e50`）已改成运行证据、验收结论、所有者批准三条记录；旧交接里「结果文件自身 `live_ready` 必须为 true，并且 `git_commit` 等于当前提交」已由 ADR-F50 取代；当前 HEAD 没有新的现场证据，`readiness.live_ready` 仍是 pending。HANDOFF 输出路径的说明：`d7ee683` / `a0252f8` 已让 `scripts/run_f26_acceptance.py --out` 接受 `reports/f26_acceptance_result_<当前 HEAD 前缀>.json`，说明写在下面「F26 正式验收重跑」一节，合并后的新 head 要再核对这段说明和脚本是否一致。`test_coding_model_relay` 的环境变量隔离：红测 `5b957aa`，修复 `1119110`，模块级 autouse 在每个用例前清掉 `AETHER_LIVE_MODEL_KEY`、`AETHER_LIVE_MODEL_ALIAS`、`AETHER_LIVE_MODEL_BASE`，下一轮确认没有漏掉的变量。sys01 和 role_http：通知、`last_run_at` 与 watch-run 制品已同一事务提交（红测 `c467190`、`be1cfc5`，修复 `c7c2f45`、`2e2dcba`）；role_http 换不换 Uvicorn 见第 3 条，本批没有改 `role_http.py`。
+6. F00–F27 里剩下没做完的部分。`tasks/backlog.yaml` 和 `STATUS.json`（as_of 2026-10-20）把 F00–F27 的工程状态都标成 done，本批没有改这两份文件。还不能写成通过的是：`readiness.live_ready` 是 pending，`f26.live_ready` 与 `f27.live_ready` 是 false，现场验收证据仍是 `d694f89` 的 `reports/f26_acceptance_result.json`，当前 HEAD 没有用真实 key 重跑，`semantic_support` 是 not_judged，`cost_status` 是 unknown；`comparative_evidence` 是 not_run，F24 在 `fcceba5` 上有一次 probed 对照，`superior` 是 null；`f01.live_model`、`f04.live_model`、`f13.openhands_live_model` 是 not_run，`f09` 的 live 模型是 scripted_not_live，`f10.embedding` 是 not_filled；`f25.vulnerability_db` 是 offline_not_run。
+
+
 ## F26 正式验收重跑（head `27cfc9f`，PR #31）
 
 2026-10-20 14:44（墨尔本时间，UTC 03:44），监督者在 `27cfc9fe0e2281941864120de9feea3409ceb19e` 上用真实 key 运行：
@@ -18,6 +156,8 @@ uv run --locked --no-build python scripts/run_f26_acceptance.py --out reports/f2
 退出码 0，`status=probed`，`scripted_substitute=false`。协议、现场 BGE 混合检索、OpenHands 1.54.0 补丁（baseline 退出码 1，打补丁后 0）和 Linux 隔离四项都是 pass，`error` 为 null。3 次调用，合计 1137 token（输入 801，输出 336），上限是 8 次、20000 token。`cost_status` 是 unknown。比较报告 sha256 是 `ff2f43a69f1f2c81c5d21c128bcad4c7e53c36487352022fe021a9223a446649`，completion 263 token。`checker_sha256` 与 `snapshot_sha256` 和 `27cfc9f` 上现算的值一致。结果、日志和仓库 `reports/`、`secrets/` 的 key grep 计数为 0。
 
 脚本原样生成的结果逐字节保存为 `reports/f26_acceptance_result_27cfc9f.json`，sha256 是 `68c5394a0331e4a389d3caef4544c00ddb8d11e657f03923d16b5c7658a3a428`。`reports/f26_acceptance_result.json` 保持 `d694f89` 的历史版本，`STATUS.json` 不改。
+
+F26 输出路径（ADR-F50）：`scripts/run_f26_acceptance.py --out` 接受 `reports/f26_acceptance_result.json`，或者以当前 HEAD 前缀（7 到 40 位小写十六进制）命名的证据文件 `reports/f26_acceptance_result_<HEAD 前缀>.json`，例如在 `27cfc9f` 上跑就写 `--out reports/f26_acceptance_result_27cfc9f.json`，直接得到入库用的证据名，不必再手工改名，也不会覆盖 `reports/f26_acceptance_result.json` 的历史版本。别的 commit 前缀、嵌套目录、绝对路径和 `.verdict`/`.approval` 名字一律拒绝。验收结论写成同目录的 `f26_acceptance_result_<短 commit>.verdict.json`，所有者批准写成 `f26_acceptance_result_<短 commit>.approval.json`。证据白名单只有 `reports/f26_acceptance_result*.json` 和本文件；证据之后改了白名单以外的任何文件（包括 `STATUS.json`），`live_ready` 都回到 pending，需要在新 commit 上重跑。
 
 `live_ready` 由所有者决定保持 pending。`acceptance_report` 的判定要求结果文件自身 `live_ready` 为 true（脚本不自证，永远写 false），并且结果的 `git_commit` 等于当前提交，这与所有者写回提交冲突。判定代码留到下一轮修。`semantic_support` 仍是 not_judged，`comparative_evidence` 仍是 not_run。
 

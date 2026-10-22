@@ -18,6 +18,7 @@ from typing import Any, Iterator
 import bm25s
 import ir_measures
 import numpy as np
+from pgvector import Vector
 from sqlalchemy import text
 
 from aether_storage.artifacts import ArtifactStore
@@ -261,7 +262,17 @@ def rerank_scores(query: str, passages: list[str]) -> list[float]:
 
 
 def _vector_literal(vector: list[float]) -> str:
-    return "[" + ",".join(f"{value:.8f}" for value in vector) + "]"
+    """pgvector's own text form of a float32 vector; every value round-trips exactly.
+
+    NaN and infinity are refused here, before any SQL is sent.
+    """
+    try:
+        value = Vector(vector)
+    except (ValueError, TypeError) as exc:
+        raise RetrievalError("vector_invalid") from exc
+    if not np.isfinite(value.to_numpy()).all():
+        raise RetrievalError("vector_not_finite")
+    return value.to_text()
 
 
 def rrf(rank_lists: list[list[str]], *, k: int = RRF_K) -> list[str]:

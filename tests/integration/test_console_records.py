@@ -126,7 +126,6 @@ def test_console_coding_job_matches_the_database(client, role_urls, monkeypatch)
         monkeypatch.setenv("AETHER_LIVE_MODEL_KEY", PROVIDER_KEY)
         route_pending(Database(role_urls["aether_dispatcher"]), worker, Database(role_urls["aether_verifier"]), store)
     assert model.problems == []
-    assert model.authorizations and set(model.authorizations) == {f"Bearer {PROVIDER_KEY}"}
     with worker.transaction(owner_id=owner_id, project_id=project_id) as conn:
         row = conn.execute(
             text(
@@ -139,6 +138,15 @@ def test_console_coding_job_matches_the_database(client, role_urls, monkeypatch)
             text("SELECT status FROM command_outbox WHERE project_id = :project_id AND kind = 'coding.create'"),
             {"project_id": project_id},
         ).scalar_one()
+    # The job's own end first: a job that never reached the model (image_unavailable, say) is named here.
+    outcome: dict = {}
+    if row["result_id"]:
+        recorded, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["result_id"])
+        outcome = json.loads(recorded)
+    assert (row["state"], outcome.get("error_code")) == ("FINISHED", None), (
+        f"coding job {row['state']} error_code={outcome.get('error_code')}: {dict(row)} {outcome}"
+    )
+    assert model.authorizations and set(model.authorizations) == {f"Bearer {PROVIDER_KEY}"}
     assert row["state"] == "FINISHED"
     assert command == "DELIVERED"
     patch, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["patch_id"])

@@ -150,7 +150,9 @@ def _grade_payload(store: ArtifactStore, *, owner_id: str, project_id: str, payl
     grades = _evaluate_cases(dataset["cases"], candidate["files"], dataset["contract"], deadline)
     metrics = metrics_from_grades(
         grades,
+        baseline_outcomes=dataset["baseline_outcomes"],
         baseline_passes=int(dataset["baseline_passes"]),
+        family_names=[str(case["family"]) for case in dataset["cases"]],
         candidate_cost=int(dataset["candidate_cost"]),
         baseline_cost=int(dataset["baseline_cost"]),
     )

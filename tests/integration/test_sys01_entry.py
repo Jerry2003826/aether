@@ -17,6 +17,7 @@ import httpx
 from sqlalchemy import text
 from temporalio.client import Client, ScheduleActionStartWorkflow
 
+from aether_worker.startup_budget import wait_worker_ready
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
@@ -32,14 +33,13 @@ from tests.integration.test_worker_process import (
     _stop,
     _temporal_address,
     _wait_http,
-    _wait_line,
 )
 
 
 def _poll(http: httpx.Client, url: str, ready: Callable[[dict[str, Any]], Any], proc, logs: list[str], timeout: float = 90):
-    deadline = time.time() + timeout
+    deadline = time.monotonic() + timeout
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs)}")
         response = http.get(url)
@@ -61,9 +61,9 @@ def _command_status(database: Database, owner_id: str, project_id: str, command_
 
 
 def _wait_command(database: Database, owner_id: str, project_id: str, command_id: str, expected: str, proc, logs: list[str]) -> None:
-    deadline = time.time() + 30
+    deadline = time.monotonic() + 30
     last = ""
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
         if proc.poll() is not None:
             raise AssertionError(f"worker 退出 {proc.returncode}: {''.join(logs[-40:])}")
         last = _command_status(database, owner_id, project_id, command_id) or ""
@@ -96,7 +96,7 @@ def test_public_entry_reaches_a_terminal_state(role_urls, clean_db, tmp_path: Pa
     worker = _start([sys.executable, "-m", "aether_worker"], env, worker_logs)
     try:
         _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-        _wait_line(worker_logs, "aether-worker-ready", worker)
+        wait_worker_ready(worker_logs, worker)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
             _exercise(http, role_urls, worker, worker_logs, secret, artifact_root, queue)
     finally:
@@ -280,9 +280,9 @@ def _assert_watch_schedule(database: Database, owner_id: str, project_id: str, w
     client = asyncio.run(Client.connect(_temporal_address()))
 
     async def describe_ready():
-        deadline = time.time() + 30
+        deadline = time.monotonic() + 30
         last = None
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             described = await client.get_schedule_handle(str(schedule_id)).describe()
             last = described
             if described.info.num_actions >= 1 and described.info.next_action_times:

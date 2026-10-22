@@ -41,7 +41,12 @@ from aether_storage.budget import (
 )
 from aether_storage.db import Database
 
+from aether_gateway.sse import data_fields, looks_like_event_stream
+
 litellm.suppress_debug_info = True
+# Never fetch a Hugging Face tokenizer from the network (ADR-F53): offline, a model whose tokenizer
+# would be downloaded is counted by the byte estimate instead of hanging or failing on the download.
+litellm.disable_hf_tokenizer_download = True
 
 # LiteLLM's response_cost is looked up in its bundled price table by the model
 # name the upstream reports. It is a local estimate, not a provider bill.
@@ -153,10 +158,52 @@ def _read_error_body(exc: urllib.error.HTTPError, *, deadline: float, limit: int
     return _read_bounded(response, deadline=deadline, limit=limit, per_read=per_read).decode(errors="replace")
 
 
-def estimate_input_tokens(prompt: str) -> int:
-    """Tokens held for the request body before it is sent. Never zero."""
+def _byte_estimate(prompt: str) -> int:
     size = len(prompt.encode("utf-8"))
     return max(1, -(-size // INPUT_BYTES_PER_TOKEN))
+
+
+def _litellm_count(prompt: str, model: str) -> int | None:
+    """LiteLLM token_counter for this model; None when LiteLLM cannot count it."""
+    try:
+        counted = litellm.token_counter(model=model, text=prompt)
+    except Exception:  # noqa: BLE001 - any counter failure falls back to the byte estimate
+        return None
+    return counted if isinstance(counted, int) and not isinstance(counted, bool) and counted >= 0 else None
+
+
+def _has_mapped_tokenizer(model: str) -> bool:
+    """True when LiteLLM maps the model and its tokenizer is the model's own (OpenAI tiktoken or a Hugging Face one)."""
+    try:
+        info = litellm.get_model_info(model)
+    except Exception:  # noqa: BLE001 - unmapped model
+        return False
+    if info.get("litellm_provider") in {"openai", "azure"}:
+        return True
+    try:
+        # Private LiteLLM helper (ADR-F53); with downloads disabled it reports the default tokenizer.
+        return litellm.utils._select_tokenizer(model)["type"] == "huggingface_tokenizer"
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def count_input_tokens(prompt: str, model: str | None) -> tuple[int, str]:
+    """(count, "exact") from LiteLLM's token_counter for a model with a mapped tokenizer, else (byte estimate, "estimate")."""
+    if model and _has_mapped_tokenizer(model):
+        counted = _litellm_count(prompt, model)
+        if counted is not None:
+            return counted, "exact"
+    return _byte_estimate(prompt), "estimate"
+
+
+def estimate_input_tokens(prompt: str, model: str | None = None) -> int:
+    """Tokens held for the request body before it is sent. Never zero, never below LiteLLM's count.
+
+    The hold is the larger of the byte estimate and LiteLLM's token_counter (for the model, or the
+    default tokenizer when the model is unknown), so it only ever grows over the byte estimate.
+    """
+    counted = _litellm_count(prompt, model or "gpt-4o")
+    return max(1, _byte_estimate(prompt), counted or 0)
 
 
 def coding_reservation_gap(
@@ -476,7 +523,7 @@ def _usage_token(usage: dict[str, Any], *names: str) -> int | None:
 def _is_event_stream(raw: bytes, content_type: str) -> bool:
     if "text/event-stream" in content_type.lower():
         return True
-    return raw.lstrip().startswith(b"data:")
+    return looks_like_event_stream(raw)
 
 
 def _sse_events(raw: bytes) -> list[dict[str, Any]]:
@@ -487,11 +534,9 @@ def _sse_events(raw: bytes) -> list[dict[str, Any]]:
     including a cut-off final event, means the stream is incomplete; it is never stitched around.
     """
     events: list[dict[str, Any]] = []
-    for block in re.split(r"\r?\n\r?\n", raw.decode("utf-8", errors="replace")):
-        data_lines = [line[5:].lstrip() for line in block.splitlines() if line.startswith("data:")]
-        if not data_lines:
-            continue
-        payload = "\n".join(data_lines).strip()
+    # httpx-sse splits the events: CRLF, LF and lone CR line ends, a leading BOM, multi-line data.
+    for data in data_fields(raw):
+        payload = data.strip()
         if not payload or payload == "[DONE]":
             continue
         try:

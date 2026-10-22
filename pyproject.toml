@@ -19,7 +19,7 @@ dependencies = [
   "pyyaml>=6,<7",
   "argon2-cffi>=23",
   "python-multipart>=0.0.18",
-  "litellm>=1.55",
+  "litellm==1.105.1",
   "defusedxml>=0.7.1",
   "bm25s>=0.2.0",
   "mcp>=1.0",
@@ -36,12 +36,18 @@ dependencies = [
   "docker==7.2.0",
   "psutil==7.2.2",
   "ir-measures==0.4.3",
+  "scipy==1.18.1",
+  "statsmodels==0.15.0",
+  "cachetools==6.2.1",
+  "pgvector==0.5.1",
+  "httpx-sse==0.4.3",
 ]
 
 [dependency-groups]
 dev = [
     "playwright==1.64.0",
     "pytest>=8",
+    "testcontainers==4.15.0",
 ]
 
 [tool.setuptools.packages.find]
@@ -50,7 +56,7 @@ include = ["aether_*"]
 
 [tool.pytest.ini_options]
 pythonpath = [".", "packages/domain", "packages/storage", "services/api", "services/gateway", "services/worker"]
-testpaths = ["tests/unit", "tests/integration"]
+testpaths = ["tests/unit", "tests/contract", "tests/integration"]
 
 [tool.uv]
 package = true

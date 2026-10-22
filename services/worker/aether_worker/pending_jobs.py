@@ -300,21 +300,14 @@ def _run_watch(
     watch_id: str,
     trigger_key: str,
 ) -> None:
-    result = trigger_watch(
+    trigger_watch(
         database,
         owner_id=owner_id,
         project_id=project_id,
         watch_id=watch_id,
         watermark=_watermark(database, owner_id=owner_id, project_id=project_id, watch_id=watch_id),
         trigger_key=trigger_key,
-    )
-    if not result["summarized"]:
-        return
-    store.put(
-        owner_id=owner_id,
-        project_id=project_id,
-        data=f"watch-run\n{watch_id}\n".encode(),
-        media_type="text/plain",
+        store=store,
     )
 
 

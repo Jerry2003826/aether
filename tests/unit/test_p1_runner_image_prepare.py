@@ -108,4 +108,4 @@ def test_a_failed_or_slow_prepare_does_not_stop_the_roles(monkeypatch: pytest.Mo
 
 
 def test_the_readiness_timeout_was_not_raised_to_cover_a_build() -> None:
-    assert role_launch._READY_TIMEOUT == 60.0
+    assert role_launch._READY_TIMEOUT == role_launch.ROLE_READY_SECONDS

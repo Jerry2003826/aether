@@ -4,13 +4,14 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import secrets
-import select
 import signal
 import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -18,6 +19,7 @@ from urllib.parse import urlsplit
 import psutil
 
 from aether_worker.loopback import LoopbackError, get_json
+from aether_worker.startup_budget import IMAGE_READY_STEP, PHASE, ROLE_HEALTH_SECONDS, ROLE_READY_SECONDS
 
 _PROCESS_ROLE = "AETHER_PROCESS_ROLE"
 _LOOPBACK_TOKEN = "AETHER_LOOPBACK_TOKEN"
@@ -28,10 +30,11 @@ _WORKER_ROLE = "worker"
 _VERIFIER_ROLE = "verifier"
 _ENCODING = "utf-8"
 PRIVILEGED_ENV = (_VERIFIER_DATABASE_URL, "AETHER_LIVE_MODEL_KEY")
-_READY_TIMEOUT = 60.0
+_READY_TIMEOUT = ROLE_READY_SECONDS
 # A first OpenHands image build on a clean host. It runs before any role starts, so it is
 # not part of the 60 s readiness wait.
 _PREPARE_TIMEOUT = 3600.0
+_HEALTH_CALL_SECONDS = 10
 _ROLE_COMMANDS = ("aether_worker.verifier_process", "aether_gateway", "aether_worker.runner_process")
 
 
@@ -70,7 +73,14 @@ def stop_children(children: list[subprocess.Popen[str]]) -> None:
                 proc.kill()
 
 
-def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
+def _phase(step: str) -> None:
+    print(f"{PHASE} step={step}", flush=True)
+
+
+def launch_privileged_roles(
+    role_hook: Callable[[str], None] | None = None,
+) -> tuple[RolePorts, list[subprocess.Popen[str]]]:
+    """role_hook(role) runs before each role is awaited; only tests pass it (never read from the environment)."""
     missing = [
         name
         for name in ("AETHER_WORKER_DATABASE_URL", _VERIFIER_DATABASE_URL, "AETHER_DISPATCHER_DATABASE_URL", "AETHER_TEMPORAL_ADDRESS")
@@ -84,6 +94,7 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
     token = secrets.token_urlsafe(32)
     secrets_to_hide = [verifier_url, provider_key, token, _password(verifier_url)]
     _prepare_runner_image(secrets_to_hide)
+    _phase(IMAGE_READY_STEP)
     # No provider key, no gateway: an empty AETHER_GATEWAY_BASE is how the worker learns that live
     # research has no model (_missing_live_settings -> live_provider_unconfigured, before any
     # reservation). A keyless gateway would admit research and turn the provider's 401 into a sent call.
@@ -110,9 +121,18 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
             children.append(gateway[0])
         runner_proc, runner_errors = _open("aether_worker.runner_process", _runner_env(token), secrets_to_hide, None)
         children.append(runner_proc)
+        hook = role_hook or (lambda _role: None)
+        hook(_VERIFIER_ROLE)
         verifier_base = _await_role(verifier_proc, verifier_errors, secrets_to_hide)
-        gateway_base = "" if gateway is None else _await_role(gateway[0], gateway[1], secrets_to_hide)
+        _phase("role-ready role=verifier")
+        gateway_base = ""
+        if gateway is not None:
+            hook("gateway")
+            gateway_base = _await_role(gateway[0], gateway[1], secrets_to_hide)
+            _phase("role-ready role=gateway")
+        hook("runner")
         runner_base = _await_role(runner_proc, runner_errors, secrets_to_hide)
+        _phase("role-ready role=runner")
         scrub_privileged_env()
         os.environ["AETHER_VERIFIER_BASE"] = verifier_base
         os.environ["AETHER_GATEWAY_BASE"] = gateway_base
@@ -124,6 +144,7 @@ def launch_privileged_roles() -> tuple[RolePorts, list[subprocess.Popen[str]]]:
         if gateway_base:
             _require_health(gateway_base, "gateway", secrets_to_hide)
         _require_health(runner_base, "runner", secrets_to_hide)
+        _phase("roles-ready")
         _write_boundary(ports)
         _close_pipes(children)
         return ports, children
@@ -235,25 +256,56 @@ def _await_role(proc: subprocess.Popen[str], errors: list[str], secrets_to_hide:
         if proc.poll() is None:
             proc.terminate()
         raise
-    assert proc.stdout is not None
-    threading.Thread(target=_drain, args=(proc.stdout, [], secrets_to_hide), daemon=True).start()
     return f"http://127.0.0.1:{_port(line)}"
 
 
 def _read_ready(proc: subprocess.Popen[str], secrets_to_hide: list[str], errors: list[str]) -> str:
+    """Wait until the role prints its ready line, on time.monotonic().
+
+    readline runs on a side thread. A partial line blocks that call, and the deadline is checked
+    without waiting for it to return, so the wait cannot become unbounded. After the ready line,
+    that same thread drops further output and returns at EOF, so a finished role leaves no reader.
+    """
     assert proc.stdout is not None
+    stdout = proc.stdout
     deadline = time.monotonic() + _READY_TIMEOUT
-    while time.monotonic() < deadline:
-        if proc.poll() is not None:
+    lines: queue.Queue[str] = queue.Queue()
+    # Set once the ready line is in hand. The pump then discards the rest itself and exits at EOF.
+    finished = threading.Event()
+
+    def _pump() -> None:
+        try:
+            while True:
+                line = stdout.readline()
+                if finished.is_set():
+                    if line == "":
+                        return
+                    continue
+                lines.put(line)
+                if line == "":
+                    return
+        except (OSError, ValueError):
+            if not finished.is_set():
+                lines.put("")
+
+    threading.Thread(target=_pump, name="aether-role-stdout", daemon=True).start()
+    while True:
+        if time.monotonic() >= deadline:
+            raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        if proc.poll() is not None and lines.empty():
             raise SystemExit(_redact(f"角色进程退出 {proc.returncode}: {''.join(errors)[-800:]}", secrets_to_hide))
-        remaining = max(0.0, deadline - time.monotonic())
-        ready, _, _ = select.select([proc.stdout], [], [], min(0.5, remaining))
-        if not ready:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        try:
+            line = lines.get(timeout=min(0.05, remaining))
+        except queue.Empty:
             continue
-        line = proc.stdout.readline()
         if line.startswith("aether-role-ready "):
+            finished.set()
             return line.strip()
-    raise SystemExit(_redact("角色进程没有就绪: " + "".join(errors)[-800:], secrets_to_hide))
+        if line == "" and proc.poll() is not None:
+            raise SystemExit(_redact(f"角色进程退出 {proc.returncode}: {''.join(errors)[-800:]}", secrets_to_hide))
 
 
 def _drain(pipe, bucket: list[str], secrets_to_hide: list[str]) -> None:
@@ -269,14 +321,17 @@ def _port(line: str) -> int:
 
 
 def _require_health(base: str, role: str, secrets_to_hide: list[str]) -> None:
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + ROLE_HEALTH_SECONDS
     last = "unreachable"
     while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
         try:
-            payload = get_json(f"{base}/health", timeout=10)
+            payload = get_json(f"{base}/health", timeout=min(_HEALTH_CALL_SECONDS, remaining))
         except LoopbackError as exc:
             last = exc.code
-            time.sleep(0.05)
+            pause = min(0.05, max(0.0, deadline - time.monotonic()))
+            if pause:
+                time.sleep(pause)
             continue
         if payload.get("role") != role:
             raise SystemExit(f"{role} 健康检查角色不符")
