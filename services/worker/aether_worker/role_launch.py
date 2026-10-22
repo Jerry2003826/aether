@@ -259,31 +259,34 @@ def _await_role(proc: subprocess.Popen[str], errors: list[str], secrets_to_hide:
     return f"http://127.0.0.1:{_port(line)}"
 
 
-def _discard_lines(lines: queue.Queue[str]) -> None:
-    while True:
-        lines.get()
-
-
 def _read_ready(proc: subprocess.Popen[str], secrets_to_hide: list[str], errors: list[str]) -> str:
     """Wait until the role prints its ready line, on time.monotonic().
 
     readline runs on a side thread. A partial line blocks that call, and the deadline is checked
-    without waiting for it to return, so the wait cannot become unbounded.
+    without waiting for it to return, so the wait cannot become unbounded. After the ready line,
+    that same thread drops further output and returns at EOF, so a finished role leaves no reader.
     """
     assert proc.stdout is not None
     stdout = proc.stdout
     deadline = time.monotonic() + _READY_TIMEOUT
     lines: queue.Queue[str] = queue.Queue()
+    # Set once the ready line is in hand. The pump then discards the rest itself and exits at EOF.
+    finished = threading.Event()
 
     def _pump() -> None:
         try:
             while True:
                 line = stdout.readline()
+                if finished.is_set():
+                    if line == "":
+                        return
+                    continue
                 lines.put(line)
                 if line == "":
                     return
         except (OSError, ValueError):
-            lines.put("")
+            if not finished.is_set():
+                lines.put("")
 
     threading.Thread(target=_pump, name="aether-role-stdout", daemon=True).start()
     while True:
@@ -299,7 +302,7 @@ def _read_ready(proc: subprocess.Popen[str], secrets_to_hide: list[str], errors:
         except queue.Empty:
             continue
         if line.startswith("aether-role-ready "):
-            threading.Thread(target=_discard_lines, args=(lines,), name="aether-role-stdout-discard", daemon=True).start()
+            finished.set()
             return line.strip()
         if line == "" and proc.poll() is not None:
             raise SystemExit(_redact(f"角色进程退出 {proc.returncode}: {''.join(errors)[-800:]}", secrets_to_hide))
