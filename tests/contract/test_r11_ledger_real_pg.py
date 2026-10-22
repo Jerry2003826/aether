@@ -46,9 +46,9 @@ def test_ledger_unique_constraint_on_real_pg(new_scope, worker_db) -> None:
     assert tuple(held) == (100, 1)
 
 
-def _race_reservations(ledger: BudgetLedger, scope, *, parties: int = 12, started: int = 12) -> tuple[list[bool], list[Exception], list[threading.Thread]]:
+def _race_reservations(ledger: BudgetLedger, scope, *, parties: int = 12, started: int = 12, timeout: float = 30) -> tuple[list[bool], list[Exception], list[threading.Thread]]:
     """Start `started` threads that meet at a barrier for `parties`, then each reserve 100 under its own key."""
-    start = threading.Barrier(parties, timeout=30)
+    start = threading.Barrier(parties, timeout=timeout)
     outcomes: list[bool] = []
     errors: list[Exception] = []
 
@@ -95,7 +95,7 @@ def test_concurrent_reservation_reports_a_party_that_never_arrives(new_scope, wo
     # instead of the race hanging until join gives up and leaving nothing to read.
     scope, ledger = _three_reservation_account(new_scope, worker_db)
     begun = time.monotonic()
-    outcomes, errors, stuck = _race_reservations(ledger, scope, started=11)
+    outcomes, errors, stuck = _race_reservations(ledger, scope, started=11, timeout=2)
     assert stuck == [], f"{len(stuck)} threads still waiting at the barrier after {time.monotonic() - begun:.0f}s"
     assert outcomes == []
     assert len(errors) == 11, errors
