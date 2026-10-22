@@ -34,11 +34,19 @@ def parse_dataset(data: bytes) -> dict[str, Any]:
     if len(families) != len(set(families)):
         raise DatasetError("dataset_invalid")
     baseline_outcomes = _baseline_outcomes(parsed_cases, body)
+    if baseline_outcomes is None:
+        baseline_passes = _count(body.get("baseline_passes", 0), len(parsed_cases))
+        # A bare count pairs only when every family failed or every family passed.
+        # Anything in between is baseline_unpaired; reject it here so grading never starts.
+        if baseline_passes not in (0, len(parsed_cases)):
+            raise DatasetError("baseline_unpaired")
+    else:
+        baseline_passes = sum(baseline_outcomes)
     return {
         "split": str(body["split"]),
         "synthetic": body["synthetic"],
         "contract": body["contract"],
-        "baseline_passes": sum(baseline_outcomes) if baseline_outcomes is not None else _count(body.get("baseline_passes", 0), len(parsed_cases)),
+        "baseline_passes": baseline_passes,
         "baseline_outcomes": baseline_outcomes,
         "baseline_cost": _cost(body.get("baseline_cost", 0)),
         "candidate_cost": _cost(body.get("candidate_cost", 0)),
