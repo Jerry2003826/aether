@@ -51,6 +51,6 @@ def test_a_uuid_object_is_queried_instead_of_rejected_as_missing(tmp_path) -> No
     artifact_id = uuid.uuid4()
     store = ArtifactStore(tmp_path / "artifacts", _Database())  # type: ignore[arg-type]
     with pytest.raises(ArtifactError) as failure:
-        store.get(owner_id="o", project_id="p", artifact_id=artifact_id)  # type: ignore[arg-type]
+        store.get(owner_id="o", project_id="p", artifact_id=artifact_id)
     assert failure.value.code == "not_found"
     assert seen == [artifact_id]
