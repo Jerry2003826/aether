@@ -12,6 +12,7 @@ import shutil
 import signal
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from temporalio.client import Client
 from temporalio.worker import Worker
 
 import aether_worker.goal_effect as goal_effect
+import aether_worker.startup_budget as startup_budget
 from aether_domain.coding_limits import require_coding_limits
 from aether_storage.artifacts import ArtifactStore
 from aether_storage.db import Database
@@ -237,11 +239,13 @@ def endpoints_from_env() -> WorkerEndpoints:
     )
 
 
-def _endpoints_for_process() -> tuple[WorkerEndpoints, list[subprocess.Popen[str]]]:
+def _endpoints_for_process(
+    role_hook: Callable[[str], None] | None = None,
+) -> tuple[WorkerEndpoints, list[subprocess.Popen[str]]]:
     reject_privileged_worker_env()
     if os.environ.get("AETHER_PROCESS_ROLE") == "worker":
         return endpoints_from_env(), []
-    launch_privileged_roles()
+    launch_privileged_roles(role_hook)
     os.execve(sys.executable, [sys.executable, "-m", "aether_worker"], dict(os.environ))
     raise SystemExit("worker 没有完成凭证交接")
 
@@ -255,8 +259,14 @@ def warn_if_git_missing() -> None:
         _LOG.warning("worker_git_missing git is not on PATH; coding job patches will be patch_unavailable")
 
 
-async def serve(endpoints: WorkerEndpoints | None = None) -> None:
+def _phase(step: str) -> None:
+    print(f"{startup_budget.PHASE} step={step}", flush=True)
+
+
+async def serve(endpoints: WorkerEndpoints | None = None, *, role_hook: Callable[[str], None] | None = None) -> None:
+    """Start the worker. role_hook is for tests only (passed in, never read from the environment)."""
     children: list[subprocess.Popen[str]] = []
+    phase = "state-dir"
     # Absolute from here on, for this process and the runner it launches (same instance id for both).
     print(f"aether-worker-state-dir path={pin_worker_state_dir()}", flush=True)
     warn_if_git_missing()
@@ -265,16 +275,26 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
     require_coding_limits()
     try:
         if endpoints is None:
-            endpoints, children = _endpoints_for_process()
+            phase = "roles"
+            _phase(phase)
+            # Older tests replace _endpoints_for_process with a zero-argument function.
+            endpoints, children = _endpoints_for_process(role_hook) if role_hook is not None else _endpoints_for_process()
         resolved = endpoints
+        phase = "configure"
         configure(resolved)
         activity_executor, control_executor = make_executors()
+        phase = "temporal-connect"
+        _phase(phase)
         try:
-            client = await Client.connect(resolved.temporal_address)
+            client = await asyncio.wait_for(
+                Client.connect(resolved.temporal_address), timeout=startup_budget.TEMPORAL_CONNECT_SECONDS
+            )
         except Exception:
             activity_executor.shutdown(wait=False, cancel_futures=False)
             control_executor.shutdown(wait=False, cancel_futures=False)
             raise
+        phase = "worker-start"
+        _phase(phase)
         loop = asyncio.get_running_loop()
         loop.set_default_executor(activity_executor)
         set_control_executor(control_executor)
@@ -295,7 +315,8 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
             loop.add_signal_handler(signame, stop.set)
         try:
             async with worker:
-                print("aether-worker-ready", flush=True)
+                phase = "ready"
+                print(startup_budget.READY, flush=True)
                 while not stop.is_set():
                     try:
                         await deliver_pending(
@@ -322,6 +343,10 @@ async def serve(endpoints: WorkerEndpoints | None = None) -> None:
         finally:
             activity_executor.shutdown(wait=False, cancel_futures=False)
             control_executor.shutdown(wait=False, cancel_futures=False)
+    except BaseException as exc:
+        if phase != "ready" and not isinstance(exc, (KeyboardInterrupt, asyncio.CancelledError)):
+            print(f"{startup_budget.START_FAILED} phase={phase} error={type(exc).__name__}", flush=True)
+        raise
     finally:
         stop_children(children)
         stop_recorded_roles()

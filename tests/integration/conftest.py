@@ -27,11 +27,13 @@ def _openhands_sandbox_image() -> None:
     # Built here, before the first test, so a coding job never runs ahead of the build.
     if probe_docker_daemon().get("runtime") != "enabled":
         return
+    # Image preparation is outside the worker start budget (startup_budget.TOTAL_SECONDS): it is
+    # done once here, and a failed build stops the session at once instead of surfacing later as a
+    # slow or failed worker start.
     try:
         ensure_openhands_sandbox()
-    except ImageUnavailable:
-        # Coding jobs then fail as image_unavailable, which their tests assert first and report.
-        return
+    except ImageUnavailable as exc:
+        pytest.fail(f"OpenHands sandbox image build failed: {exc}", pytrace=False)
 
 
 @pytest.fixture(autouse=True)
