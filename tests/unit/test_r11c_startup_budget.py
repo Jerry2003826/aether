@@ -82,10 +82,16 @@ def test_image_preparation_is_outside_the_total() -> None:
     _run(prep + rest)
 
 
-def test_a_suspended_box_is_neither_a_stall_nor_start_time() -> None:
-    """The box paused for 2h40m in the middle of a progressing start (monotonic jumped 9600s)."""
-    steps = [(0.1, "aether-worker-phase step=image-ready"), (4.0, "role verifier"), (9600.0, None), (4.0, "role runner")]
-    steps += [(0.1, "aether-worker-ready")]
-    clock = _run(steps)
-    assert clock.elapsed < 20
-    assert clock.suspended > 9000
+def test_a_monotonic_gap_is_a_stall_even_when_a_later_line_would_be_ready() -> None:
+    """time.monotonic() does not move while the box is paused, so a gap in it is real elapsed time.
+
+    Treating that gap as a pause would let a blocked step reset the stall budget. The ready line
+    after the gap must not be reached.
+    """
+    steps = [
+        (0.1, "aether-worker-phase step=image-ready"),
+        (sb.STALL_SECONDS + 1, None),
+        (0.1, "aether-worker-ready"),
+    ]
+    with pytest.raises(sb.WorkerStartFailed, match="停滞"):
+        _run(steps)
