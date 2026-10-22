@@ -51,6 +51,18 @@ class ActiveClock:
         return self.elapsed
 
 
+class ActiveDeadline:
+    """A deadline in active seconds (see ActiveClock); reads time.monotonic at call time."""
+
+    def __init__(self, seconds: float) -> None:
+        self.seconds = seconds
+        self._clock = ActiveClock(lambda: time.monotonic())
+
+    def expired(self, allow: float = 0.0) -> bool:
+        """allow: how long the caller may legitimately block between two checks (e.g. an HTTP timeout)."""
+        return self._clock.tick(allow=allow) >= self.seconds
+
+
 class WorkerStartFailed(AssertionError):
     pass
 

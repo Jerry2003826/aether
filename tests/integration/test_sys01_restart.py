@@ -10,6 +10,7 @@ import httpx
 
 from aether_api.auth_service import issue_bootstrap_secret
 from aether_storage.db import Database
+from aether_worker.startup_budget import wait_worker_ready
 from tests.integration.test_hybrid_retrieval import APPLE
 from tests.integration.test_sys01_entry import _command_status, _poll
 from tests.integration.test_worker_process import (
@@ -23,7 +24,6 @@ from tests.integration.test_worker_process import (
     _stop,
     _temporal_address,
     _wait_http,
-    _wait_line,
 )
 
 
@@ -53,7 +53,7 @@ def test_restart_resumes_queued_ingestion_after_delivered_command(role_urls, cle
     resumed = None
     try:
         _wait_http(f"http://127.0.0.1:{api_port}/health/live")
-        _wait_line(first_logs, "aether-worker-ready", worker)
+        wait_worker_ready(first_logs, worker)
         with httpx.Client(base_url=f"http://127.0.0.1:{api_port}", timeout=10) as http:
             owner_id, project_id, csrf = _bootstrap_project(http, secret)
             source_id = _create_source(http, csrf, project_id, worker, first_logs)
@@ -69,7 +69,7 @@ def test_restart_resumes_queued_ingestion_after_delivered_command(role_urls, cle
             resumed_env = dict(env)
             resumed_env.pop("AETHER_DEFER_PROGRESS", None)
             resumed = _start([sys.executable, "-m", "aether_worker"], resumed_env, second_logs)
-            _wait_line(second_logs, "aether-worker-ready", resumed)
+            wait_worker_ready(second_logs, resumed)
             finished = _poll(
                 http,
                 f"/v1/projects/{project_id}/ingestions",

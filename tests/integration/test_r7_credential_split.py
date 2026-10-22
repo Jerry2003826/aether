@@ -11,7 +11,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from tests.integration.test_worker_process import _start, _stop, _temporal_address, _wait_line
+from aether_worker.startup_budget import wait_worker_ready
+from tests.integration.test_worker_process import _start, _stop, _temporal_address
 
 SECRET = "sk-live-should-not-stay"
 
@@ -24,7 +25,7 @@ def test_worker_process_drops_verifier_key_and_docker(role_urls, tmp_path: Path)
     logs: list[str] = []
     worker = _start([sys.executable, "-m", "aether_worker"], env, logs)
     try:
-        _wait_line(logs, "aether-worker-ready", worker, timeout=90)
+        wait_worker_ready(logs, worker)
         _assert_process_clean(worker.pid, password)
         for pid in _descendants(worker.pid):
             _assert_process_clean(pid, password)
