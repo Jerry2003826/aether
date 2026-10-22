@@ -69,3 +69,17 @@ def test_the_hermes_comparison_reads_every_sse_line_ending_a_bom_and_multiline_d
     content, usage, model, upstream_id = _meter_body(_CASES[name], content_type)
     assert (content, model, upstream_id) == ("def value(): return 42", "deepseek-chat", "chatcmpl-1"), usage
     assert usage == _meter_body(_CASES["lf"], "text/event-stream")[1], usage
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_an_event_with_an_event_field_but_no_data_is_skipped_by_both_readers(newline: str) -> None:
+    # A named event (event: ping) with no data: line carries nothing; both readers skip it, the stream
+    # around it is read in full, and it is never turned into an empty chunk.
+    ping = "event: ping" + newline + newline
+    stream = (ping + _event(_FIRST, newline) + ping + _event(_LAST, newline) + "event: done" + newline + newline).encode()
+    reply = parse_upstream_chat(stream, "text/event-stream")
+    assert reply["choices"][0]["message"]["content"] == "def value(): return 42", reply
+    assert reply["usage"] == {"prompt_tokens": 7, "completion_tokens": 5}, reply
+    content, usage, model, upstream_id = _meter_body(stream, "text/event-stream")
+    assert (content, model, upstream_id) == ("def value(): return 42", "deepseek-chat", "chatcmpl-1"), usage
+    assert usage == _meter_body(_CASES["lf"], "text/event-stream")[1], usage
