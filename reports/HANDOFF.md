@@ -26,6 +26,8 @@ cd apps/web && pnpm typecheck
 
 失败项是 `test_threat_browser_container.py::test_one_shot_containers_only_reach_tor_and_are_removed`。另有两轮墙钟相对单调钟多走了 33 秒和 992 秒，不作数；其中 33 秒那轮还多失败了 `test_large_token_rounds_extend_the_reservation_and_settle_actual_usage`（作业停在 ACTIVE）。
 
+审查两条建议已改（`d8347c3` 红测、`09d7da3` 修复读取线程；`ad01875` 红测、`41ec0f9` 修复 `uuid.UUID`）。角色退出后不再留下丢弃线程；`ArtifactStore.get` 接受 `uuid.UUID` 对象。重跑 pack-and-unit：冻结检查通过，参考套件 76 OK，单元 `1328 passed`（784.53s），契约 `5 passed`（4.23s），网页 typecheck 通过。相关集成 `5 passed`（215.94s）：documented worker、慢启动、不可达 Temporal、两条 OpenHands 网关结算。
+
 下一步：等所有者决定要不要改 `live_research` 的 1800 秒墙钟预算，并对照即将给出的设计清单。
 
 ## F26 正式验收重跑（head `27cfc9f`，PR #31）
