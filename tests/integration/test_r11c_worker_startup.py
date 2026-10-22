@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+import time
 import uuid
 from pathlib import Path
 
@@ -48,10 +49,12 @@ def test_a_slow_but_progressing_worker_start_is_waited_for(role_urls, clean_db, 
     logs: list[str] = []
     worker = _start([sys.executable, "-c", _SLOW_START], env, logs)
     try:
-        clock = startup_budget.wait_worker_ready(logs, worker)
+        started = time.monotonic()
+        startup_budget.wait_worker_ready(logs, worker)
+        elapsed = time.monotonic() - started
         text = "".join(logs)
         # 2 roles (no provider key, no gateway) x 50s of hook progress: longer than any single stall.
-        assert clock.elapsed > 2 * 50
+        assert elapsed > 2 * 50
         assert "aether-test-role-hook role=verifier order=verifier\n" in text
         assert "aether-test-role-hook role=runner order=verifier,runner\n" in text
         for step in ("image-ready", "roles-ready", "temporal-connect", "worker-start"):
