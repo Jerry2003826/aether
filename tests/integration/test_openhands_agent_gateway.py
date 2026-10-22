@@ -201,7 +201,6 @@ def _assert_settled(
     events_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["events_id"])
     result = json.loads(result_bytes)
     events = json.loads(events_bytes)
-    detail = result_bytes.decode("utf-8", "replace") + events_bytes.decode("utf-8", "replace") + json.dumps(model.problems)
     assert model.problems == []
     candidate = unified_patch(WORKSPACE["base_files"], WORKSPACE["files"])
     assert "return 42" not in candidate
