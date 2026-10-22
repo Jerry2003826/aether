@@ -194,13 +194,14 @@ def _assert_settled(
             ),
             {"project_id": project_id, "task_id": task_id},
         ).mappings().one()
-    patch, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(row["patch_id"]))
-    result_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(row["result_id"]))
-    events_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=str(row["events_id"]))
+    # A job that did not finish has no patch (NULL). str(None) used to reach the query as "None".
+    assert row["state"] == "FINISHED" and row["patch_id"] is not None, (dict(row), model.problems)
+    patch, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["patch_id"])
+    result_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["result_id"])
+    events_bytes, _media = store.get(owner_id=owner_id, project_id=project_id, artifact_id=row["events_id"])
     result = json.loads(result_bytes)
     events = json.loads(events_bytes)
     detail = result_bytes.decode("utf-8", "replace") + events_bytes.decode("utf-8", "replace") + json.dumps(model.problems)
-    assert row["state"] == "FINISHED", detail
     assert model.problems == []
     candidate = unified_patch(WORKSPACE["base_files"], WORKSPACE["files"])
     assert "return 42" not in candidate
